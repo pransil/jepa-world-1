@@ -80,8 +80,10 @@ flowchart TB
 ```
 
 ¹ SPEC §4.4 says the target encoder "encodes the frame at t + k with the same architecture". Since
-that architecture takes a 4-frame (12-channel) stack, M3 has to fix the exact target input,
-presumably the stack ending at t+k. It will be recorded in `docs/decisions/`.
+that architecture takes a 4-frame (12-channel) stack, the target input is the stack ending at
+t+k, i.e. frames t+k−3 … t+k
+([decision](docs/decisions/2026-11-17-target-input-stack.md)). The batch layout that follows
+from it is in [`jepa_world/models/DESIGN.md`](jepa_world/models/DESIGN.md).
 
 | Part | Reads | Output | Loss (SPEC §5) |
 |---|---|---|---|

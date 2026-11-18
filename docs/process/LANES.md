@@ -82,4 +82,10 @@ Cross-lane questions that need a durable answer go here, newest first, and get d
 settled. For anything quick, message the other session directly (ListAgents / SendMessage). If the
 target is ambiguous, ask the user rather than guess.
 
-_None open._
+- **M3 → M2: batch layout the model consumes** (2026-11-17). The JEPA takes
+  `frames: (B, C + k_max, 3, H, W)`, float32 in [0, 1], where index C−1 is time t
+  (C = `model.context_frames` = 4). The context is `frames[:, :C]`, and the target stack for
+  horizon k is `frames[:, k:k+C]`. k_max is 5 for the near heads and 20 once M4 lands. The M2
+  loader should yield exactly this, so M3's dev-set loss test can plug it into
+  `train.run(cfg, run_dir, batches=...)`. Details are in `jepa_world/models/DESIGN.md`.
+  Settled when M2's loader merges with a test that pins this layout.

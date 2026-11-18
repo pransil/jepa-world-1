@@ -49,6 +49,7 @@ sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
     bounce_min_speed: 0.5     # ...with normal approach speed >= this (m/s)
 
 data:                         # SPEC §3.5, split by terrain seed, never by frame
+  source: episodes            # episodes (the M2 loader) | synthetic (moving disc; smoke runs and benchmarks only)
   dev_terrain_seeds: 10
   train_terrain_seeds: 500
   test_terrain_seeds: 50
@@ -60,17 +61,23 @@ model:                        # SPEC §4
     L1: {channels: 64, size: 64}
     L2: {channels: 128, size: 32}
     L3: {channels: 256, size: 8}
-  downsample: null            # stride2 | pool. Pick one in M3 and keep it fixed
+  downsample: stride2         # 3x3 stride-2 conv per 2x step (docs/decisions/2026-11-17-downsample-stride2.md)
+  norm_groups: 8              # GroupNorm groups in encoder and heads: no batch statistics, no buffers
   horizons: [1, 2, 3, 4, 5, 10, 20]
   head_level: {1: L1, 2: L1, 3: L1, 4: L1, 5: L1, 10: L2, 20: L3}
   far_horizons: [10, 20]      # Gaussian mean + log-variance heads
+  horizon_embed_dim: 8        # learned per-horizon vector, broadcast over positions (SPEC §4.5)
   l1_head_hidden: 32          # [OPEN] benchmark before fixing (SPEC §9.4)
+  l1_head_kernel: 3           # [OPEN] 3 | 1 (SPEC §9.4: "or use 1x1 convolutions if needed")
   ema_momentum: 0.996         # [OPEN] maybe toward 0.999 later
   action_dim: 0               # slot exists, zeros in v1
 
 loss:                         # SPEC §5
-  latent_distance: mse        # [OPEN] mse | cosine
-  collapse_guard: true        # [OPEN] VICReg-style variance term
+  latent_distance: mse        # squared L2, summed over channels, mean over positions (docs/decisions/2026-11-17-latent-distance-sq-l2.md)
+  collapse_guard: true        # VICReg-style variance floor (docs/decisions/2026-11-17-collapse-guard-on.md)
+  var_gamma: 1.0              # target batch std per (channel, position)
+  var_eps: 1.0e-4             # inside the sqrt, so a zero-variance feature has a finite gradient
+  w_var: 1.0
   w_k: 1.0
   w_goal: 0.5
   w_pix: 0.05
@@ -79,7 +86,10 @@ train:                        # SPEC §6
   device: auto                # auto | mps | cpu
   batch_size: 32
   optimizer: adamw
-  lr: null                    # "start with defaults, then tune"
-  weight_decay: null
+  lr: 1.0e-3                  # torch 2.15 AdamW default ("start with defaults, then tune")
+  weight_decay: 0.01          # torch 2.15 AdamW default
   precision: fp32             # do not assume bf16 works on MPS
   stages: [near, far, goal, pixel]   # SPEC §5.5
+  steps: 10000                # placeholder, set per experiment
+  log_every: 50               # flush interval for metrics.jsonl; every step is still logged
+  ckpt_every: 2000            # plus one checkpoint at the end

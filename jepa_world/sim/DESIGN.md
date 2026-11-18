@@ -6,17 +6,20 @@ Turn `(sim cfg, terrain_seed, ball_seed)` into one deterministic episode: 60 RGB
 64×64 at 15 fps, showing a ball rolling and bouncing over a y-constant heightfield, plus exact
 per-frame ground truth (SPEC §3).
 
+Optionally (M7), foreground posts that hide the ball, and the `occluded` flag. These are off unless
+`sim.obstacles` is present ([below](#obstacles-and-occlusion-m7)).
+
 **Not here:** datasets, the seed→split mapping and loaders (M2, `data/`, which calls
-`simulate_episode` and `save_episode`). Obstacles and occlusion (M7; `occluded` is recorded
-but always False). Physics baselines themselves (M2/M6 in `baselines.py`). They re-simulate known
-terrain through `simulate_from_state`, below.
+`simulate_episode` and `save_episode`). Physics baselines themselves (M2/M6 in `baselines.py`). They
+re-simulate known terrain through `simulate_from_state`, below.
 
 ## Data flow and shapes
 
 ```
 cfg["sim"], terrain_seed ─► sample_terrain ─► Terrain(x (N,), heights (N,), params)
 cfg["sim"], terrain_seed, ball_seed ─► sample_ball ─► BallParams(radius, friction, restitution, x0, drop, vx0)
-Terrain, BallParams ─► build_model ─► MjModel (hfield, 3-joint ball, mocap camera rig)
+cfg["sim"].get("obstacles"), Terrain ─► sample_obstacles ─► Obstacles(x_lo (K,), x_hi (K,), z_lo, z_hi) | None
+Terrain, BallParams, Obstacles | None ─► build_model ─► MjModel (hfield, 3-joint ball, mocap camera rig, posts)
 simulate (simulate_episode = seeded wrapper): per frame, `substeps` mj_steps ─► contact/bounce
           flags ─► camera.track ─► render ─► Episode
 simulate_from_state(Terrain, BallParams, pos (2,), vel (2,), spin, frames) ─► the same loop ─► Episode
@@ -43,6 +46,9 @@ simulate_from_state(Terrain, BallParams, pos (2,), vel (2,), spin, frames) ─�
   airborne substeps (counted as an integer), with normal approach speed ≥ `bounce_min_speed`.
   `ContactTracker` implements it, and `test_tracker_*` pins each threshold.
 - `out_of_view[t]`: the projected ball disc lies entirely outside the image.
+- `occluded[t]`: the ball is in view, but no part of it is visible, because posts cover every pixel
+  column of the part of its disc that lies inside the image. It is always False without obstacles,
+  and never True together with `out_of_view`.
 
 ## Re-simulating from a state (`simulate_from_state`)
 
@@ -52,11 +58,11 @@ the ball's state at frame t. `simulate_from_state(sim_cfg, terrain, ball, pos, v
 cam_pos=None, render=False)` returns an `Episode` of `frames` frames. Frame 0 is the given state, and
 `t` counts from it.
 
-- **One loop.** `simulate` and `simulate_from_state` share `_run`, and both build the scene with
-  `build_model(terrain, ball, sim_cfg)`. So whatever later reads `sim_cfg.get("obstacles")` there
-  applies to both, and a missing key means off
-  ([decision](../../docs/decisions/2026-11-17-obstacles-dataset-keying.md)). Seeded placement can
-  use `terrain.params["seed"]`. A from-state Episode is a rollout, not a dataset episode: its
+- **One loop.** `simulate` and `simulate_from_state` share `_run`, which samples the obstacles from
+  `sim_cfg.get("obstacles")` and the terrain's seed, builds the scene with
+  `build_model(terrain, ball, sim_cfg, obstacles)`, and computes `occluded`. So obstacles apply to
+  both entry points, and a missing key means off (see [Obstacles](#obstacles-and-occlusion-m7)). A
+  from-state Episode is a rollout, not a dataset episode: its
   top-level `terrain_seed` and `ball_seed` are None, and the terrain's seed is in
   `meta["from_state"]`, so no seed-keyed lookup can mistake one for the other. `simulate` itself is unchanged: its ground truth is bitwise equal
   to before the refactor (80 episodes, checked in this lane's PR).
@@ -93,6 +99,58 @@ cam_pos=None, render=False)` returns an `Episode` of `frames` frames. Frame 0 is
   2.3 ms), then simulates (about 9 / 28 / 38 ms for 5 / 20 / 60 frames, measured on the M4 at
   load average ~55). Reusing a built model across restarts would save about 8% at a 20-frame
   horizon. That isn't worth widening the API yet.
+
+## Obstacles and occlusion (M7)
+
+These are SPEC §3.2's `track_lagged_obstacles` and the M7 occlusion ablation
+([plan §5](../../docs/milestones/M7-plan.md)). **An absent `sim.obstacles` means off**
+([decision](../../docs/decisions/2026-11-17-obstacles-dataset-keying.md)).
+- `configs/base.yaml` carries the block only as a comment, so the `sim` config hash, and with it
+  every M2 dataset key, is unchanged.
+- With the key absent, `build_model` writes the same MJCF as before (no extra body or geom), so every
+  output is unchanged too.
+- An experiment adds the block in its own yaml (`configs/m7_obstacles.yaml`). `--set` can't create
+  keys.
+
+| `sim.obstacles` key | meaning |
+|---|---|
+| `count: [lo, hi]` | posts per terrain, a uniform integer |
+| `width: [lo, hi]` | metres along x, uniform |
+| `gap` | metres: the minimum clear space between posts, and between a post and the wall zones |
+
+- **Posts, full height.** Each occluder is a box spanning z from the terrain's lowest point minus
+  `POST_MARGIN_M` (10 m) to its highest plus 10 m.
+  - The camera stays within a few metres of the ball, so a post covers the whole image height in
+    every frame. Occlusion then depends on x alone, and `occluded` is an exact 1-D interval test.
+  - `occluded` raises if a frame's view ever reaches past a post's z-span, so that assumption
+    can't fail silently.
+  - Floating boxes, which would hide the ball only at some heights, lost. An exact test of a disc
+    against a union of rectangles is harder, and posts already make the events.
+- **In front of everything, colliding with nothing.** The posts stand in the plane y = −1.5, between
+  the camera (y = −`camera.distance`) and the terrain slab's front face (y = −1), so they hide
+  terrain and ball alike. They have `contype = conaffinity = 0` and sit in their own static body
+  after the ball, so the terrain and ball geom ids don't move. Physics and every ground-truth array
+  except `occluded` are bitwise equal to the same episode without obstacles, through both entry
+  points (tests).
+- **Placement belongs to the terrain.** There is one post per equal-width bin over the interior
+  (walls excluded), at least `gap / 2` inside each bin, like the ledges. The draws come from
+  `SeedSequence([OBSTACLE_STREAM, terrain_seed])`, with `terrain_seed` taken from
+  `Terrain.params["seed"]`. So:
+  - every ball seed on a terrain sees the same posts;
+  - the split by terrain seed covers the posts too;
+  - the terrain and ball draws are unchanged.
+
+  Asking for obstacles on a hand-built terrain that has no seed raises.
+- **`occluded` means fully hidden, from geometry.**
+  - It mirrors `out_of_view` ("no pixel visible"), so the two events are disjoint and comparable.
+  - A partly hidden ball is not occluded. Any-overlap lost because it fires on slivers while the ball
+    is still visible. A visible-fraction threshold lost because it's one more number to tune.
+  - `visible_width_px` gives the uncovered width. A disc whose centre is above or below the image
+    counts only its chord at the image edge.
+  - It is computed from geometry, not from segmentation, so physics-only builds (no GL, CI) get it
+    too. The render tier cross-checks it against segmentation.
+- **Recorded** as `meta["obstacles"]` (`x_lo`, `x_hi`, `z_lo`, `z_hi`) only when present. With the
+  key absent, episode files are unchanged.
 
 ## Key decisions
 
@@ -158,7 +216,7 @@ cam_pos=None, render=False)` returns an `Episode` of `frames` frames. Frame 0 is
 
 | unit | pure? | touches | tested by |
 |---|---|---|---|
-| `terrain`, `ball`, `camera` | pure numpy | none | fast tier |
+| `terrain`, `ball`, `camera`, `obstacles` | pure numpy | none | fast tier |
 | `contact`, `scene`, `episode(render=False)` | MuJoCo physics, CPU | none (no GL) | fast tier, also in Linux CI |
 | `render`, `episode(render=True)` | creates a GL context lazily | GL (CGL on macOS) | `render` tier, Mac only |
 | `io`, `preview` | | disk (`preview` writes to `paths.new_run_dir`) | fast tier (io, in a tmp dir) |
@@ -170,9 +228,10 @@ cam_pos=None, render=False)` returns an `Episode` of `frames` frames. Frame 0 is
 | `terrain.py` | `Terrain`, `sample_terrain`: heights (waves, ledges, walls), `height_at`, `slope_at`, `gap`, `hfield` |
 | `ball.py` | `BallParams`, `sample_ball`: hidden parameters and the initial state; `mean_ball` |
 | `contact.py` | restitution calibration, `contact_params`: solref, solimp, friction triple |
-| `scene.py` | `build_model`: MJCF, hfield data, ids |
+| `scene.py` | `build_model`: MJCF, hfield data, posts, ids |
+| `obstacles.py` | `Obstacles`, `sample_obstacles` (seeded posts), `visible_width_px`, `occluded` (pure) |
 | `camera.py` | `initial`, `track`, `project`, `out_of_view`, `px_per_m` (pure) |
 | `episode.py` | `Episode`, `simulate_episode` (seeded) / `simulate` (given terrain and ball) / `simulate_from_state` (given a mid-episode state), all through `_run`; `ContactTracker`, `plain_json` |
 | `render.py` | `FrameRenderer`: RGB and segmentation (GL) |
 | `io.py` | `save_episode` / `load_episode` (.npz plus JSON metadata) |
-| `preview.py` | CLI: contact sheets and `stats.json` into a run dir |
+| `preview.py` | CLI: contact sheets (red = out of view, blue = occluded) and `stats.json` into a run dir |

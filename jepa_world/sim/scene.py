@@ -7,6 +7,9 @@
 - Camera: "track", orthographic with fovy = view height in metres, on the mocap body "rig". Move it
   with data.mocap_pos, then mj_forward. mj_kinematics alone leaves cam_xpos stale (checked on 4.0.1).
 - Shading is flat: a strong ambient headlight, no specular, no shadows, black background.
+- Obstacles (M7, optional): full-height boxes in the plane y = POST_Y, in front of the terrain slab,
+  in their own static body after the ball, colliding with nothing. With none, the MJCF is exactly the
+  M1 scene (sim/DESIGN.md, "Obstacles and occlusion").
 """
 
 from __future__ import annotations
@@ -16,18 +19,39 @@ import numpy as np
 
 from jepa_world.sim import contact
 from jepa_world.sim.ball import BallParams
+from jepa_world.sim.obstacles import Obstacles
 from jepa_world.sim.terrain import Terrain
 
 TERRAIN_RGBA = "0.45 0.62 0.35 1"
 BALL_RGBA = "0.92 0.28 0.2 1"
 HFIELD_HALF_DEPTH = 1.0  # y half-extent of the terrain slab; the ball runs at y = 0
+POST_RGBA = "0.3 0.4 0.85 1"
+POST_Y = -(HFIELD_HALF_DEPTH + 0.5)  # between the camera (y = -distance) and the slab's front face
+POST_HALF_DEPTH = 0.05
 
 
 def _vec(v) -> str:
     return " ".join(repr(float(x)) for x in v)
 
 
-def build_model(terrain: Terrain, ball: BallParams, sim_cfg: dict) -> mujoco.MjModel:
+def _posts_xml(obs: Obstacles | None) -> str:
+    """A static body of non-colliding boxes, or "" (and the M1 scene, byte for byte) when there are none."""
+    if obs is None or len(obs.x_lo) == 0:
+        return ""
+    zc, hz = (obs.z_lo + obs.z_hi) / 2, (obs.z_hi - obs.z_lo) / 2
+    geoms = "".join(
+        f'\n      <geom name="post{i}" type="box" pos="{_vec([(lo + hi) / 2, POST_Y, zc])}" '
+        f'size="{_vec([(hi - lo) / 2, POST_HALF_DEPTH, hz])}" rgba="{POST_RGBA}" '
+        'contype="0" conaffinity="0"/>'
+        for i, (lo, hi) in enumerate(zip(obs.x_lo, obs.x_hi, strict=True))
+    )
+    return f'\n    <body name="obstacles">{geoms}\n    </body>'
+
+
+def build_model(
+    terrain: Terrain, ball: BallParams, sim_cfg: dict, obstacles: Obstacles | None = None
+) -> mujoco.MjModel:
+    """The MuJoCo scene. `obstacles` (from obstacles.sample_obstacles) adds posts; None adds nothing."""
     data, zmin, elevation = terrain.hfield()
     half = float(terrain.x[-1] - terrain.x[0]) / 2
     if not np.isclose(terrain.x[0], -half) or not np.allclose(
@@ -63,7 +87,7 @@ def build_model(terrain: Terrain, ball: BallParams, sim_cfg: dict) -> mujoco.MjM
       <joint name="z" type="slide" axis="0 0 1"/>
       <joint name="ry" type="hinge" axis="0 1 0"/>
       <geom name="ball" type="sphere" size="{ball.radius!r}" rgba="{BALL_RGBA}" {geom_contact}/>
-    </body>
+    </body>{_posts_xml(obstacles)}
   </worldbody>
 </mujoco>"""
     m = mujoco.MjModel.from_xml_string(xml)

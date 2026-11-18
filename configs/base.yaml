@@ -47,8 +47,15 @@ sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
     rolling_per_friction: 0.01     # rolling-resistance coefficient (m) per unit friction
     min_air_s: 0.1            # bounce = contact onset after >= this long airborne...
     bounce_min_speed: 0.5     # ...with normal approach speed >= this (m/s)
+  # obstacles:                # M7 occluding posts. Keep this block COMMENTED here: an absent key means off, and
+  #                           # any key, even an "off" one, would change the sim hash and re-key every dataset
+  #                           # (docs/decisions/2026-11-17-obstacles-dataset-keying.md). Experiments add it in
+  #                           # their own yaml (configs/m7_obstacles.yaml); --set can't create it.
+  #   count: [3, 6]           # posts per terrain, uniform integer
+  #   width: [0.8, 1.6]       # metres along x
+  #   gap: 1.0                # metres: min clear space between posts, and from the wall zones
 
-data:                         # SPEC §3.5, split by terrain seed, never by frame. Design: jepa_world/data/DESIGN.md
+data:                        # SPEC §3.5, split by terrain seed, never by frame. Design: jepa_world/data/DESIGN.md
   source: episodes            # episodes (the M2 loader) | synthetic (moving disc; smoke runs and benchmarks only)
   split: train                # the split train.py reads (dev: debugging only, SPEC §3.5)
   format_version: 1           # bump if the dataset layout (files, manifest) changes

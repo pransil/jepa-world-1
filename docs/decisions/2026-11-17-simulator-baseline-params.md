@@ -1,7 +1,7 @@
 # Simulator-aware baseline: which ball parameters
 
-- **Date:** 2026-11-17   **Decided by:** pending (user)   **SPEC ref:** §7.1, §3.1
-- **Status:** proposed
+- **Date:** 2026-11-17   **Decided by:** user (2026-11-18)   **SPEC ref:** §7.1, §3.1
+- **Status:** accepted
 
 ## Question
 SPEC §7.1's physics baseline re-simulates the known terrain from the ball's true state at t
@@ -65,14 +65,18 @@ These mappings use the clearance and surface speed at t, which are part of the s
 in the frames. They use the radius only to translate between the two balls.
 
 ## Decision
-Pending. The code ships all three. None runs by default, so `eval --baselines` stays M2's quick
-closed-form report. `baselines.PROPOSED_SIM_PARAMS = ("true", "mean")` is the set recommended
-above.
+**B, mean parameters, is the headline physics bar. A, true parameters, is reported as the oracle
+ceiling. C, `true_radius`, stays available as a secondary comparison.** This is the
+recommendation above, accepted by the user on 2026-11-18.
 
 ## Consequences
-`python -m jepa_world.eval --baselines --sim-params true mean` runs this proposal. Each option is
-one 21-frame rollout per window: 46–58 s on the 7400 test windows in the run above, and 443–655 s
-at load average ~265 (run `…-9fa587`). Once the user decides:
-- update `PROPOSED_SIM_PARAMS`;
-- have M6's model eval (`eval.py --run`) run those params beside the model;
-- mark this file accepted.
+The code already implements this, with no change needed:
+- `baselines.PROPOSED_SIM_PARAMS = ("true", "mean")`, the set this decision accepts. The name
+  predates the decision and is kept, because a rename is a code change.
+- `eval.sim_params` in `configs/base.yaml` holds the same set, so `python -m jepa_world.eval
+  --run` reports `simulator_mean` (the bar) and `simulator_true` (the oracle) beside the model.
+- `--sim-params true mean true_radius` adds C.
+
+`eval --baselines` runs the simulator only when `--sim-params` is given. Each option is one
+21-frame rollout per window: 46–58 s on the 7400 test windows in the run above, and 443–655 s at
+load average ~265 (run `…-9fa587`).

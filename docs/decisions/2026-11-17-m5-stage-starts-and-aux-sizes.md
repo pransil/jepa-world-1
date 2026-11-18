@@ -1,8 +1,8 @@
 # M5 placeholders: goal and pixel start steps, aux head sizes
 
-- **Date:** 2026-11-17   **Decided by:** proposed by the m5 lane overnight; awaiting the user
+- **Date:** 2026-11-17   **Decided by:** user (2026-11-18), as proposed by the m5 lane
 - **SPEC ref:** §5.5, §4.6, §4.7
-- **Status:** proposed
+- **Status:** accepted
 
 ## Question
 Wiring the goal head and pixel decoder into training needs values that neither SPEC nor an
@@ -39,10 +39,17 @@ far placeholder, and left "M5 adds goal and pixel entries".
   is 3.5 per-horizon NLLs.
 
 ## Decision
-Pending. The values above are in `configs/base.yaml` so that M5 runs end to end. Each is one
-`--set` away from an alternative.
+**Accepted as proposed** by the user on 2026-11-18:
+- `stage_start` goal 4000, pixel 6000;
+- `goal_hidden: 128` and `pix_widths: [64, 32]`;
+- `goal_l2: false`;
+- all 7 goal horizons, `[1, 2, 3, 4, 5, 10, 20]`;
+- `loss/goal` is the sum over goal horizons.
+
+These are already the values in `configs/base.yaml`, and each is one `--set` away from an
+alternative.
 
 ## Consequences
 - Experiments that train the goal and pixel stages inherit these values unless they override them.
-- Revisit when the first M5 run (an `/experiment`) shows the goal and pixel terms' scale against
-  the latent terms. The logged `loss/goal`, `loss/pix` and `loss/total` give that scale.
+- Revisit once the headline run shows the goal and pixel loss scales against the latent terms.
+  The logged `loss/goal`, `loss/pix` and `loss/total` give that scale.

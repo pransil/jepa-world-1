@@ -6,6 +6,8 @@ import copy
 import itertools
 
 import pytest
+from tiny import BASE
+
 from jepa_world.data.splits import (
     SPLITS,
     LeakageError,
@@ -15,8 +17,6 @@ from jepa_world.data.splits import (
     split_episodes,
     terrain_seeds,
 )
-from tiny import BASE
-
 from jepa_world.utils.config import load_config
 
 

@@ -9,10 +9,10 @@ import json
 import numpy as np
 import pytest
 from fake_episodes import SHORT, Recorder, fake_episode, physics_episode
-from jepa_world.data.splits import LeakageError, split_episodes
 from tiny import BASE
 
 from jepa_world.data import build
+from jepa_world.data.splits import LeakageError, split_episodes
 from jepa_world.sim.episode import GT_FIELDS, simulate_episode
 from jepa_world.sim.io import load_episode
 from jepa_world.utils import paths

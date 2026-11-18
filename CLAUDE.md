@@ -6,9 +6,9 @@ floor" before editing anything.
 ## What this is
 
 A research testbed for a JEPA-style world model with multi-horizon prediction, on MuJoCo episodes
-of a ball rolling over a 2D heightfield (64×64 RGB, 15 fps, 60 frames). **`SPEC.md` is the design
-and milestone plan (M1–M7).** `README.md` has the architecture diagrams. PyTorch on Apple MPS
-(M4, 36 GB); tests run on CPU.
+of a ball rolling over terrain z = h(x), constant along y for now (later z = h(x, y)). Episodes are
+64×64 RGB, 15 fps, 60 frames. **`SPEC.md` is the design and milestone plan (M1–M7).**
+`README.md` has the architecture diagrams. PyTorch on Apple MPS (M4, 36 GB); tests run on CPU.
 
 ## The floor: every lane, every change
 

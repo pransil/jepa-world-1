@@ -4,16 +4,49 @@
 
 seed: 0
 
-sim:                          # SPEC §3
+sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
   generator_version: 1        # bump whenever simulator output changes for the same config
   fps: 15
   episode_frames: 60
   frame_size: 64
-  camera_mode: track_lagged   # [OPEN] track_full | track_lagged | track_lagged_obstacles
-  ball:                       # hidden per-episode parameters, sampled uniformly (ranges TBD in M1)
-    radius: null
-    friction: null
-    restitution: null
+  substeps: 40                # physics steps per frame -> timestep 1/(fps*substeps) = 1/600 s
+  gravity: 9.81
+  camera_mode: track_lagged   # decided 2026-11-17 (docs/decisions/*-camera-mode-track-lagged.md): track_lagged | track_full
+  camera:                     # orthographic, side-on, looking along +y (docs/decisions/*-orthographic-camera.md)
+    view_height: 3.6          # metres visible vertically (and horizontally: frames are square)
+    distance: 10.0            # camera sits at y = -distance (orthographic: affects clipping only)
+    lerp_x: 0.25              # per-frame smoothing toward the ball's x
+    lerp_z: 0.04              # per-frame smoothing toward the deadzone edge once the ball leaves it
+    deadzone_z: 0.6           # ball z may sit +-deadzone_z from the camera centre before z follows
+  terrain:                    # h(x): sinusoids + smoothed ledges + quadratic end walls, constant along y
+    length: 40.0              # metres, centred on x = 0
+    columns: 512              # heightfield samples along x
+    waves: 4
+    wavelength: [2.0, 20.0]   # metres, log-uniform
+    spectrum: 1.0             # wave amplitude ~ wavelength**spectrum
+    relief: [0.5, 4.0]        # metres, interior peak-to-peak of the waves, uniform (before the slope cap)
+    max_slope: 0.8            # |dh/dx| cap outside the walls (scales the whole profile down)
+    ledges: [2, 5]            # number of ledges, uniform integer (deep drops; walls the other way)
+    ledge_height: [1.0, 3.0]  # metres; the sign is random (a step down or up along +x)
+    ledge_width: 0.2          # metres of smoothstep transition
+    ledge_gap: 1.0            # metres: min spacing between ledges, and from the wall zones
+    wall_width: 2.0           # metres at each end
+    wall_height: 6.0          # metres added at the outer edge (quadratic ramp)
+    base: 0.5                 # heightfield slab thickness below its lowest point
+  ball:                       # hidden per-episode parameters + initial state, sampled uniformly
+    radius: [0.15, 0.35]      # metres
+    friction: [0.1, 1.0]      # sliding mu; rolling = contact.rolling_per_friction * friction (docs/decisions/*-friction-sliding-plus-rolling.md)
+    restitution: [0.2, 0.8]   # normal coefficient of restitution at contact.restitution_ref_speed
+    start_x: [-8.0, 8.0]
+    drop: [0.0, 2.0]          # start height of the ball's bottom above the terrain
+    vx0: [-3.0, 3.0]          # initial horizontal speed; initial spin = rolling (vx0 / radius)
+  contact:
+    stiffness: 3.0e4          # direct-mode solref (-stiffness, -damping); damping calibrated from restitution
+    solimp: [0.99, 0.99, 0.001, 0.5, 2.0]
+    restitution_ref_speed: 3.0     # m/s impact speed at which restitution is calibrated
+    rolling_per_friction: 0.01     # rolling-resistance coefficient (m) per unit friction
+    min_air_s: 0.1            # bounce = contact onset after >= this long airborne...
+    bounce_min_speed: 0.5     # ...with normal approach speed >= this (m/s)
 
 data:                         # SPEC §3.5, split by terrain seed, never by frame
   dev_terrain_seeds: 10

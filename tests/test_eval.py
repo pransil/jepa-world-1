@@ -281,6 +281,35 @@ def test_a_checkpoint_must_belong_to_the_run(artifacts):
         eval_cli.load_run(a, b / "checkpoints" / "step_0000003.pt")
     with pytest.raises(SystemExit):
         eval_cli.main(["--baselines", "--config", str(BASE), "--checkpoint", "x.pt"])
+    assert eval_cli.load_run(a, "step_0000003.pt").step == 3  # a bare name: the run's own
+
+
+def test_latest_checkpoint_is_the_highest_step_by_number(tmp_path):
+    (tmp_path / "checkpoints").mkdir()
+    for name in ("step_9999999.pt", "step_10000000.pt", "step_notes.pt"):
+        (tmp_path / "checkpoints" / name).touch()
+    assert eval_cli.latest_checkpoint(tmp_path).name == "step_10000000.pt"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["eval.sim_params=[true]", "eval.sim_params=[ture]", "eval.coverage_levels=[1.0]",
+     "eval.event_window=0", "eval.probes.train_windows=1"],
+)  # fmt: skip
+def test_a_bad_eval_block_fails_before_the_model_is_loaded(artifacts, monkeypatch, bad):
+    monkeypatch.setattr(eval_cli, "load_run", lambda *a, **k: pytest.fail("loaded the model"))
+    with pytest.raises(ValueError):
+        eval_cli.evaluate_run("unused", eval_cfg(bad), ["test"])
+
+
+def test_goal_table_follows_the_configured_coverage_levels():
+    cal = {"0.68": {"joint": 0.7}, "0.95": {"joint": 0.94}}
+    goal = {
+        "horizons": [1], "error_m": {"1": {"mean": 0.1}}, "calibration": {"1": cal},
+        "ratio_to_baseline": {"persistence": {"1": 0.5}},
+    }  # fmt: skip
+    head, row = eval_cli.format_goal_table({"goal_head": goal}).splitlines()
+    assert "cov0.68" in head and "cov0.95" in head and "0.940" in row
 
 
 def test_eval_refuses_a_run_trained_on_synthetic_frames(artifacts):

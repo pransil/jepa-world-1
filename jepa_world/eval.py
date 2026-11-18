@@ -207,12 +207,19 @@ BASE_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "base.yaml"
 HELD_OUT = ("dev", "test")  # the splits --run scores; never the one the run trained on
 
 
+def _step_of(path: Path) -> int:
+    try:
+        return int(path.stem.removeprefix("step_"))
+    except ValueError:
+        return -1  # not a step checkpoint: never the latest
+
+
 def latest_checkpoint(run_dir: Path) -> Path:
-    """The run's last checkpoint (train.py names them step_<7 digits>.pt, so they sort by step)."""
-    ckpts = sorted((Path(run_dir) / "checkpoints").glob("step_*.pt"))
+    """The run's highest-step checkpoints/step_<n>.pt, by number, not by name."""
+    ckpts = [p for p in (Path(run_dir) / "checkpoints").glob("step_*.pt") if _step_of(p) >= 0]
     if not ckpts:
         raise FileNotFoundError(f"{run_dir}: no checkpoints/step_*.pt checkpoint to evaluate")
-    return ckpts[-1]
+    return max(ckpts, key=_step_of)
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -228,10 +235,12 @@ def load_run(
     run_dir: str | Path, checkpoint: str | Path | None = None, device: torch.device | None = None
 ) -> LoadedRun:
     """A run's model from its latest checkpoint (or `checkpoint`, which must be one of the run's
-    own), built from the config saved in that checkpoint and loaded strictly, in eval mode on
-    `device`."""
+    own: a path, or a bare file name in the run's checkpoints/), built from the config saved in
+    that checkpoint and loaded strictly, in eval mode on `device`."""
     run_dir = Path(run_dir)
     path = Path(checkpoint) if checkpoint else latest_checkpoint(run_dir)
+    if checkpoint and not path.exists() and path.name == str(checkpoint):
+        path = run_dir / "checkpoints" / path.name
     if path.resolve().parent != (run_dir / "checkpoints").resolve():
         raise ValueError(
             f"checkpoint {path} isn't in {run_dir / 'checkpoints'}: eval of one run's model is filed under that run"
@@ -319,8 +328,9 @@ def model_outputs(
                 means.append(mean.cpu().double().numpy())  # MPS has no float64: CPU first
                 logvars.append(logvar.cpu().double().numpy())
             if features:
-                for level, f in ctx.items():
-                    feats.setdefault(level, []).append(probes.pool(f.cpu().numpy()))
+                for level, f in ctx.items():  # pool on the device: copy (B, C), not the map
+                    pooled = f.mean(dim=(2, 3)).cpu().double().numpy()
+                    feats.setdefault(level, []).append(pooled)
     return {
         "goal_mean": np.concatenate(means) if means else None,
         "goal_logvar": np.concatenate(logvars) if logvars else None,
@@ -437,6 +447,30 @@ def score_split(
     return families
 
 
+def _positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def check_eval_block(ev: dict) -> None:
+    """Validate the eval: block up front. An unquoted `true` in sim_params is YAML's bool."""
+    bad = [p for p in ev["sim_params"] if not isinstance(p, str) or p not in baselines.SIM_PARAMS]
+    if bad:
+        raise ValueError(
+            f"eval.sim_params {bad}: expected names from {list(baselines.SIM_PARAMS)} "
+            '(quote them in YAML: ["true", "mean"])'
+        )
+    metrics.coverage(np.zeros((1, 2)), np.ones((1, 2)), np.zeros((1, 2)), ev["coverage_levels"])
+    for key in ("batch_size", "event_window"):
+        if not _positive_int(ev[key]):
+            raise ValueError(f"eval.{key} = {ev[key]!r}: expected an integer >= 1")
+    if ev["probes"]["enabled"] and not (
+        _positive_int(ev["probes"]["train_windows"]) and ev["probes"]["train_windows"] >= 2
+    ):
+        raise ValueError(
+            f"eval.probes.train_windows = {ev['probes']['train_windows']!r}: expected >= 2"
+        )
+
+
 def evaluate_run(
     run_dir: str | Path,
     eval_cfg: dict,
@@ -454,6 +488,7 @@ def evaluate_run(
     splits = list(dict.fromkeys(splits))
     if not splits or not set(splits) <= set(HELD_OUT):
         raise ValueError(f"splits {splits}: --run scores {list(HELD_OUT)} only")
+    check_eval_block(ev)  # before any model, data or lock: a typo shouldn't cost a GPU pass
     device = pick_device(ev["device"])
     run = load_run(run_dir, checkpoint, torch.device("cpu"))  # moved to the device under the lock
     cfg = run.cfg
@@ -543,11 +578,15 @@ def evaluate_run(
 
 
 def format_goal_table(metrics_: dict) -> str:
-    """k, the goal head's mean error, its ratio to each baseline, and 50/90% joint coverage."""
+    """k, the goal head's mean error, its ratio to each baseline, and joint coverage at each of
+    eval.coverage_levels."""
     goal = metrics_["goal_head"]
     names = list(goal["ratio_to_baseline"])
+    levels = list(goal["calibration"][str(goal["horizons"][0])])
     head = (
-        f"{'k':>4} {'error m':>9} " + " ".join(f"{'/' + n:>22}" for n in names) + "  cov50  cov90"
+        f"{'k':>4} {'error m':>9} "
+        + " ".join(f"{'/' + n:>22}" for n in names)
+        + "".join(f"  {'cov' + p:>8}" for p in levels)
     )
     lines = [head]
     for k in goal["horizons"]:
@@ -560,7 +599,7 @@ def format_goal_table(metrics_: dict) -> str:
         lines.append(
             f"{k:>4} {goal['error_m'][ks]['mean']:9.4f} "
             + " ".join(cells)
-            + f"  {cal['0.5']['joint']:.3f}  {cal['0.9']['joint']:.3f}"
+            + "".join(f"  {cal[p]['joint']:8.3f}" for p in levels)
         )
     return "\n".join(lines)
 

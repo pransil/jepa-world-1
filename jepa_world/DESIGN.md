@@ -86,6 +86,10 @@ split ─► EpisodeSet ─► windows (ep, t): t ∈ valid_starts(T, C, max(mod
   before it is released.
 - **Simulator params.** They come from `eval.sim_params`, the proposed `["true", "mean"]`.
   `--sim-params` replaces them, and with no values it turns the simulator off.
+- **Validation first.** `check_eval_block` validates the whole `eval:` block before any model,
+  data or lock. That covers sim params (an unquoted YAML `true` is a bool), coverage levels,
+  sizes and the probe window count. `--checkpoint` may be a bare file name in the run's
+  checkpoints/. The default checkpoint is the highest step by number.
 - **Output** is never overwritten. Each invocation writes one new JSON, holding the checkpoint,
   step, git and the eval config with the report. It is serialised first, written to a temp
   file, and hard-linked into place, so a failure leaves no partial file and an existing name

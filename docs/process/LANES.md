@@ -74,9 +74,9 @@ nothing is uncommitted or unpulled, and no live session is inside it. Otherwise 
 and says why. It is the only allowed way to delete a worktree. The user's settings deny a raw
 `git worktree remove` (`tools/DESIGN.md`).
 
-Run `tools/lane-owners.sh` to see the rest. Merged, clean trees show as `merged: removable`. A
-worktree with no live session might be paused, not abandoned, so ask the user before removing
-anyone else's.
+Run `tools/lane-owners.sh` to see the rest. Merged, clean trees show as `merged: candidate`, and
+`finish-lane.sh` makes the final call. A worktree with no live session might be paused, not
+abandoned, so ask the user before removing anyone else's.
 
 **About branch protection.** `main` requires a PR and a green `fast-tests` check, with no
 approvals, and admins are included. GitHub rejects a direct push of any commit that hasn't passed

@@ -16,6 +16,18 @@ lane_cwd_of() {
   printf '%s\n' "$cwd"
 }
 
+# Every process of this user, one "pid<TAB>command<TAB>cwd" line each (command is "?" on Linux
+# without lsof). One lsof call takes about 0.3 s on macOS, so callers run it last.
+lane_process_cwds() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -a -u "$(id -u)" -d cwd -Fpcn 2>/dev/null |
+      awk '/^p/ { p = substr($0, 2) } /^c/ { c = substr($0, 2) } /^n/ { print p "\t" c "\t" substr($0, 2) }'
+  else
+    ls -l /proc/[0-9]*/cwd 2>/dev/null |
+      awk -F' -> ' '{ n = split($1, a, "/"); print a[n - 1] "\t?\t" $2 }'
+  fi
+}
+
 # Live Claude Code sessions, one "pid<TAB>cwd" line each. $CC_SOCKS_DIR/<pid>.sock (default
 # /tmp/cc-socks) names each session's pid. Liveness is `kill -0`, not a timestamp, because a
 # sleeping laptop suspends sessions rather than killing them.

@@ -1,22 +1,18 @@
 """tools/finish-lane.sh: removes a merged lane, and nothing that might still hold work.
 
 One throwaway main clone per module, with one lane per scenario under .claude/worktrees/. A fake
-`gh` reports which branch heads have a merged PR. CC_SOCKS_DIR points at a temp dir, so a "live
-session" is a real child process plus a real unix socket named by its pid. This repo's own
-worktrees are never touched. Design: tools/DESIGN.md.
+`gh` reports which branch heads have a merged PR. A "running process" is a real `sleep` child.
+This repo's own worktrees are never touched. Design: tools/DESIGN.md.
 
-The script gathers every problem, then refuses through one gate. So a single run on a lane with
-several faults checks each detector, by its message, without paying for a run per fault.
+The script gathers every problem from its fast checks, then refuses through one gate. So a single
+run on a lane with several faults checks each detector, by its message, without a run per fault.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
-import socket
 import subprocess
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -35,12 +31,22 @@ while read -r b oid; do [ "$b" = "$head" ] && echo "$oid"; done < "$FAKE_GH_MERG
 exit 0
 """
 
+# The parts of this repo's .gitignore that matter here: caches, local settings, and a data file.
+GITIGNORE = """.claude/worktrees/
+.claude/settings.local.json
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.npz
+"""
+
 
 class Lanes:
     """A main clone at <tmp>/main whose lanes live in .claude/worktrees/wt-*."""
 
-    def __init__(self, tmp: Path, socks: Path):
-        self.main, self.socks = tmp / "main", socks
+    def __init__(self, tmp: Path):
+        self.main = tmp / "main"
         self.merged, self.gh_log = tmp / "gh-merged", tmp / "gh-log"
         self.merged.write_text("")
         (tmp / "bin").mkdir()
@@ -51,7 +57,6 @@ class Lanes:
             "PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}",
             "FAKE_GH_MERGED": str(self.merged),
             "FAKE_GH_LOG": str(self.gh_log),
-            "CC_SOCKS_DIR": str(socks),
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_AUTHOR_NAME": "t",
@@ -62,9 +67,7 @@ class Lanes:
         self.env.pop("FAKE_GH_FAIL", None)
         self.main.mkdir()
         self.git("init", "-q", "-b", "main")
-        (self.main / ".gitignore").write_text(
-            ".claude/worktrees/\n.venv/\n__pycache__/\n*.py[cod]\n*.npz\n"
-        )
+        (self.main / ".gitignore").write_text(GITIGNORE)
         self.git("add", ".gitignore")
         self.git("commit", "-q", "-m", "init")
 
@@ -78,7 +81,7 @@ class Lanes:
         return self.main / ".claude" / "worktrees" / name
 
     def lane(self, name: str, commit: bool = True) -> Path:
-        """A lane as EnterWorktree makes it, optionally with one commit."""
+        """A lane as EnterWorktree makes it, optionally with one commit (pkg/<name>.py)."""
         self.git("worktree", "add", "-q", "-b", f"worktree-{name}", str(self.wt(name)), "main")
         if commit:
             (self.wt(name) / "pkg").mkdir(exist_ok=True)
@@ -110,48 +113,72 @@ class Lanes:
         listed = f"worktree {self.wt(name)}" in self.git("worktree", "list", "--porcelain").split(
             "\n"
         )
-        return listed and self.wt(name).is_dir(), bool(
-            self.git("branch", "--list", f"worktree-{name}")
-        )
+        branch = bool(self.git("branch", "--list", f"worktree-{name}"))
+        return listed and self.wt(name).is_dir(), branch
 
-    @contextmanager
-    def session(self, cwd: Path, alive: bool = True):
-        """A Claude session as lane-lib sees one: a process with this cwd, and <pid>.sock."""
-        proc = subprocess.Popen(["sleep", "30"] if alive else ["true"], cwd=cwd)
-        if not alive:
-            proc.wait()
-        sock = socket.socket(socket.AF_UNIX)
-        try:
-            sock.bind(str(self.socks / f"{proc.pid}.sock"))
-            yield proc.pid
-        finally:
-            proc.kill()
-            proc.wait()
-            sock.close()
-            (self.socks / f"{proc.pid}.sock").unlink(missing_ok=True)
+
+@contextmanager
+def process_in(cwd: Path):
+    """A process of this user whose working directory is `cwd`, as a session or a job would be."""
+    proc = subprocess.Popen(["sleep", "30"], cwd=cwd)
+    try:
+        yield proc
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 @pytest.fixture(scope="module")
 def lanes(tmp_path_factory):
-    # Unix socket paths are limited to ~104 bytes, and macOS tmp paths are longer than that.
-    socks = Path(tempfile.mkdtemp(prefix="ccs", dir="/tmp"))
-    yield Lanes(tmp_path_factory.mktemp("lanes").resolve(), socks)
-    shutil.rmtree(socks, ignore_errors=True)
+    return Lanes(tmp_path_factory.mktemp("lanes").resolve())
 
 
 def output(r: subprocess.CompletedProcess) -> str:
     return r.stdout + r.stderr
 
 
-def test_removes_a_merged_clean_lane(lanes):
-    # Caches, a session in the main clone, and a dead session's leftover socket don't block it.
+def listed(r: subprocess.CompletedProcess, label: str) -> set[str]:
+    """The paths a refusal lists after `label:`, e.g. 'uncommitted or untracked: a b'."""
+    line = next(ln for ln in output(r).splitlines() if f"{label}:" in ln)
+    return set(line.split(f"{label}:", 1)[1].split())
+
+
+def test_refuses_a_lane_that_may_still_hold_work(lanes):
+    wt = lanes.lane("wt-busy")
+    lanes.merge("wt-busy")
+    lanes.git("mv", "pkg/wt-busy.py", "pkg/moved.py", cwd=wt)  # staged rename: a 2-field -z entry
+    (wt / "notes.md").write_text("draft\n")  # untracked
+    (wt / "episode.npz").write_bytes(b"data")  # ignored, and `git worktree remove` would delete it
+    (wt / ".venv").mkdir()  # ignored, but disposable
+    lanes.git("switch", "-q", "-c", "side", cwd=wt)
+    lanes.git("worktree", "lock", "--reason", "parked", str(wt))
+    # A user config that hides untracked files from `git status` must not hide them here.
+    hide = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "status.showUntrackedFiles"}
+    r = lanes.finish("wt-busy", **hide, GIT_CONFIG_VALUE_0="no")
+    assert r.returncode == 1, output(r)
+    assert listed(r, "uncommitted or untracked") == {"pkg/moved.py", "notes.md"}
+    assert listed(r, "ignored files that are not disposable") == {"episode.npz"}
+    assert "wt-busy has side checked out" in output(r)
+    assert "locked: parked" in output(r)
+    assert lanes.exists("wt-busy") == (True, True)
+
+
+def test_removes_a_merged_lane_once_no_process_runs_inside(lanes):
     wt = lanes.lane("wt-done")
     lanes.merge("wt-done")
+    # Caches and the lane's own permission grants are disposable.
     (wt / ".venv" / "bin").mkdir(parents=True)
     (wt / ".venv" / "bin" / "python").write_text("")
     (wt / "pkg" / "__pycache__").mkdir()
     (wt / "pkg" / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"")
-    with lanes.session(lanes.main), lanes.session(wt, alive=False):
+    (wt / ".claude").mkdir()
+    (wt / ".claude" / "settings.local.json").write_text("{}")
+    with process_in(lanes.main):  # a session in the main clone is not inside the lane
+        with process_in(wt / "pkg") as job:
+            r = lanes.finish("wt-done")
+            assert r.returncode == 1, output(r)
+            assert f"process {job.pid} " in output(r)
+            assert lanes.exists("wt-done") == (True, True)
         r = lanes.finish("wt-done")
     assert r.returncode == 0, output(r)
     assert lanes.exists("wt-done") == (False, False)
@@ -160,32 +187,7 @@ def test_removes_a_merged_clean_lane(lanes):
     assert asked in lanes.gh_log.read_text().splitlines()
 
 
-def test_refuses_a_lane_that_may_still_hold_work(lanes):
-    wt = lanes.lane("wt-busy")
-    lanes.merge("wt-busy")
-    (wt / "pkg" / "wt-busy.py").write_text("x = 2\n")  # uncommitted
-    (wt / "notes.md").write_text("draft\n")  # untracked
-    (wt / "episode.npz").write_bytes(b"data")  # ignored, and `git worktree remove` would delete it
-    (wt / ".venv").mkdir()  # ignored, but a cache
-    lanes.git("switch", "-q", "-c", "side", cwd=wt)
-    lanes.git("worktree", "lock", "--reason", "parked", str(wt))
-    with lanes.session(wt / "pkg") as pid:
-        r = lanes.finish("wt-busy")
-    assert r.returncode == 1, output(r)
-    for why in (
-        "pkg/wt-busy.py",
-        "notes.md",
-        "episode.npz",
-        "locked: parked",
-        f"pid {pid}",
-        "side",
-    ):
-        assert why in output(r), why
-    assert ".venv" not in output(r)
-    assert lanes.exists("wt-busy") == (True, True)
-
-
-@pytest.mark.parametrize("case", ["fresh", "reused-name", "unpulled", "gh-down"])
+@pytest.mark.parametrize("case", ["fresh", "reused-name", "unpulled", "gh-down", "head-elsewhere"])
 def test_refuses_a_branch_without_a_merge_at_its_tip(lanes, case):
     name, env = f"wt-{case}", {}
     if case == "fresh":
@@ -202,11 +204,21 @@ def test_refuses_a_branch_without_a_merge_at_its_tip(lanes, case):
         lanes.lane(name)
         lanes.merge(name, pulled=False)
         why = "git pull --ff-only"
-    else:
+    elif case == "gh-down":
         lanes.lane(name)
         lanes.merge(name)
         env, why = {"FAKE_GH_FAIL": "1"}, "gh failed"
-    r = lanes.finish(name, **env)
+    else:
+        # `main` has the merge, but the main clone's HEAD doesn't, so `git branch -d` would refuse
+        # after the worktree was already gone.
+        lanes.lane(name)
+        lanes.merge(name)
+        lanes.git("switch", "-q", "--detach", "HEAD~1")
+        why = "git branch -d would refuse"
+    try:
+        r = lanes.finish(name, **env)
+    finally:
+        lanes.git("switch", "-q", "main")
     assert r.returncode == 1, output(r)
     assert why in output(r)
     assert lanes.exists(name) == (True, True)

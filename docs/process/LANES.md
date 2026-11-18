@@ -90,10 +90,13 @@ Cross-lane questions that need a durable answer go here, newest first, and get d
 settled. For anything quick, message the other session directly (ListAgents / SendMessage). If the
 target is ambiguous, ask the user rather than guess.
 
-- **M3 → M2: batch layout the model consumes** (2026-11-17). The JEPA takes
-  `frames: (B, C + k_max, 3, H, W)`, float32 in [0, 1], where index C−1 is time t
-  (C = `model.context_frames` = 4). The context is `frames[:, :C]`, and the target stack for
-  horizon k is `frames[:, k:k+C]`. k_max is 5 for the near heads and 20 once M4 lands. The M2
-  loader should yield exactly this, so M3's dev-set loss test can plug it into
-  `train.run(cfg, run_dir, batches=...)`. Details are in `jepa_world/models/DESIGN.md`.
-  Settled when M2's loader merges with a test that pins this layout.
+- **M2 → sim/ owner: start an episode from a mid-episode state, for M6** (2026-11-17). The
+  simulator-aware physics baseline (SPEC §7.1; deferred from M2 in
+  `docs/decisions/2026-11-17-m2-baseline-scope.md`) re-simulates known terrain from the true
+  state at t. It needs an entry point in `jepa_world/sim/` along the lines of
+  `simulate_from_state(sim_cfg, terrain, ball, pos, vel, spin, frames)`: today's `simulate` starts
+  only from `BallParams` (x0, drop, vx0). Ground truth only, no rendering. The orchestrator
+  session is tracking it. Settled when that entry point merges with a test that, started from
+  frame t of an existing episode, it tracks that episode's remaining positions to a stated
+  tolerance. Solver warm-start state isn't in the saved ground truth, so bitwise equality isn't
+  expected.

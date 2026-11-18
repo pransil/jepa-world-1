@@ -235,3 +235,26 @@ def test_the_model_never_receives_ground_truth():
     for k in set(a) - goal_terms - {"loss/total"}:
         torch.testing.assert_close(a[k], b[k], rtol=0, atol=0, msg=k)
     assert not torch.equal(a["loss/goal"], b["loss/goal"])
+
+
+def test_a_bad_loss_config_fails_before_the_forward():
+    cfg = tiny_aux_cfg()
+    model = _model(cfg)
+    calls = []
+    model.register_forward_pre_hook(lambda *a: calls.append(1))
+    bad = {**cfg["loss"], "latent_distance": "cosine"}
+    with pytest.raises(ValueError, match="latent_distance"):
+        compute_world_losses(model, random_batch(cfg), bad)
+    assert calls == []
+
+
+def test_goalratio_is_nan_when_the_ball_does_not_move():
+    """Persistence error 0 (horizon 0, or a ball at rest): the ratio is undefined, not 1e12."""
+    cfg = tiny_aux_cfg("model.goal_horizons=[0, 1]")
+    batch = random_batch(cfg)
+    still = {**batch, "ball_pos": torch.ones_like(batch["ball_pos"])}
+    losses = _losses(_model(cfg), still, cfg)
+    assert torch.isnan(losses["goalratio/k0"]) and torch.isnan(losses["goalratio/k1"])
+    assert torch.isfinite(losses["goalerr/k1"]) and torch.isfinite(losses["loss/goal"])
+    moving = _losses(_model(cfg), batch, cfg)
+    assert torch.isnan(moving["goalratio/k0"]) and torch.isfinite(moving["goalratio/k1"])

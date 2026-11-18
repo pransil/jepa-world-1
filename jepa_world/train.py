@@ -115,7 +115,7 @@ def batch_k_max(cfg: dict, horizons: list[int]) -> int:
     return max(ks)
 
 
-def _with_gt(cfg: dict) -> bool:
+def needs_gt(cfg: dict) -> bool:
     return "goal" in cfg["train"]["stages"]  # only the goal loss needs a label beyond the frames
 
 
@@ -140,7 +140,7 @@ def _episode_batches(cfg: dict, horizons: list[int]) -> Iterator[Batch]:
     now, not on the first next(), so main() can do it before taking the GPU lock."""
     es = load_split(cfg, cfg["data"]["split"])
     c, k_max = cfg["model"]["context_frames"], batch_k_max(cfg, horizons)
-    with_gt = _with_gt(cfg)
+    with_gt = needs_gt(cfg)
     batches = episode_batches(es, cfg["train"]["batch_size"], c, k_max, cfg["seed"], with_gt)
     # with_gt carries every GT_KEYS field; the goal loss reads only ball_pos.
     return (
@@ -159,7 +159,7 @@ def _synthetic_batches(cfg: dict, horizons: list[int]) -> Iterator[Batch]:
             n,
             cfg["sim"]["frame_size"],
             generator=g,
-            with_gt=_with_gt(cfg),
+            with_gt=needs_gt(cfg),
         )
 
 

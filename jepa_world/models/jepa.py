@@ -138,7 +138,8 @@ class JEPA(nn.Module):
     This module knows nothing else about those consumers (SPEC §10).
 
     forward(frames (B, C + k_max, 3, H, W)) -> {
-        "context": {level: (B, ch, s, s)}   levels up to the deepest one a head reads,
+        "context": {level: (B, ch, s, s)}   levels up to the deepest one a head or an
+                                            extra_levels consumer reads,
         "pred":    {k: (B, ch, s, s)}       the mean, for every horizon,
         "logvar":  {k: (B, ch, s, s)}       far horizons only, bounded (GaussianHead),
         "target":  {k: (B, ch, s, s)}       detached, from the target encoder, after loss.target_norm,
@@ -318,9 +319,9 @@ def losses_from_output(
     model: JEPA, out: dict, loss_cfg: dict, active: Collection[int]
 ) -> dict[str, torch.Tensor]:
     """compute_losses' terms from an existing forward() output, so a caller that also needs the
-    output (models/world.py) runs the model once. The same terms and the same total."""
-    check_loss_cfg(model, loss_cfg)
-    active = model.check_active(active)
+    output (models/world.py) runs the model once. The same terms and the same total.
+    The caller validates first, before its forward: check_loss_cfg, and `active` from
+    model.check_active (compute_losses and world.compute_world_losses both do)."""
     losses: dict[str, torch.Tensor] = {}
     total = out["context"][model.level_names[0]].new_zeros(())
     for k in model.horizons:

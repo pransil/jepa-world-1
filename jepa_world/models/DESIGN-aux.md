@@ -119,6 +119,26 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
   them. For example, the goal head trains the L3 encoder stage while only near heads are active.
   The start steps and the head sizes are **proposed placeholders**:
   [m5-stage-starts-and-aux-sizes](../../docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md).
+- **Active aux losses train the context encoder.** This is deliberate, and it is the point of
+  the heads. SPEC §4.7's pixel decoder exists "to keep the scene grounded", which only a gradient
+  into the embedding can do. "It must not drive the embedding toward blur" is handled by its low
+  weight (w_pix = 0.05) and by keeping it a separate, logged term, not by detaching it. M7's
+  "pixel weight at 0, low, and high" ablation and the
+  [skip decision](../../docs/decisions/2026-11-17-skip-connections-meaning.md) ("reconstruction
+  must pass through L3"; L3 probe as the deciding metric) both assume this gradient. The goal
+  term likewise enters SPEC §5.4's total. To train an aux head without shaping the encoder, set
+  its weight to 0 or leave its stage out of `train.stages`.
+- **A built aux head whose stage hasn't started still runs every step**, under `no_grad`, to be
+  logged. This follows the accepted
+  [stage-schedule decision](../../docs/decisions/2026-11-17-stage-schedule-within-run.md)
+  ("every term logged every step", SPEC §5.4), the same as an inactive far head. The cost is one
+  no-grad pixel-decoder forward plus the L2/L3 encoder continuation per step until the stage
+  starts. A run that doesn't want it should leave the stage out of `train.stages`.
+- **A goal horizon past every model horizon lengthens every batch window** (`batch_k_max`), which
+  drops start times t near the episode end for ALL heads. With the base stages it changes nothing,
+  because far's k = 20 already sets k_max = 20, and goal_horizons = the model horizons. A run
+  that compares near-only with near + goal should cap `goal_horizons` at 5 (or include far), so
+  both see the same windows.
 - **`loss/goal` sums the per-horizon NLLs** (Σ_k, like the latent terms). The variance guard and
   `emb_std` still cover only the levels horizon heads read: the guard protects the latent
   targets from collapse, which the aux heads don't affect.

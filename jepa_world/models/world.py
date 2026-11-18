@@ -15,10 +15,11 @@ import torch
 from torch import nn
 
 from jepa_world.models.goal import GoalHead, displacement_targets, goal_nll
-from jepa_world.models.jepa import JEPA, losses_from_output
+from jepa_world.models.jepa import JEPA, check_loss_cfg, losses_from_output
 from jepa_world.models.pixel import PixelDecoder, pixel_l1
 
 AUX_STAGES = ("goal", "pixel")
+STILL_M = 1e-6  # below this mean displacement (m) the ball did not move: goalratio is undefined
 
 
 class WorldModel(JEPA):
@@ -126,12 +127,14 @@ def compute_world_losses(
       loss/goal/k<k>   goal NLL of the displacement ball_pos[t+k] - ball_pos[t], per goal horizon
       goalerr/k<k>     mean |mean - displacement| (world m), detached
       goalratio/k<k>   goalerr / mean |displacement|: the error relative to persistence (which
-                       predicts no motion), detached; < 1 beats persistence (SPEC §7.2, §11)
+                       predicts no motion), detached; < 1 beats persistence (SPEC §7.2, §11).
+                       NaN when the batch's mean displacement is < STILL_M (k = 0, ball at rest)
       loss/goal        sum of loss/goal/k<k> over the goal horizons (SPEC §5.2)
       loss/pix         mean |pixel decoder - frame t+1| (SPEC §5.3)
     loss/total adds w_goal * loss/goal and w_pix * loss/pix only for stages in `aux_active`
     (default: every built one). The model gets the frames only; ball_pos is a label."""
     frames, ball_pos = split_batch(batch)
+    check_loss_cfg(model, loss_cfg)  # every check before the forward, so bad input fails fast
     if model.goal is not None and ball_pos is None:
         raise ValueError(
             "the goal stage needs ball_pos: use batches with_gt=True (train.make_batches does "
@@ -147,7 +150,8 @@ def compute_world_losses(
         mean, logvar = out["goal"]
         nll = goal_nll(mean, logvar, target)  # (K,)
         err = (mean.detach() - target).norm(dim=-1).mean(dim=0)  # (K,) metres
-        persist = target.norm(dim=-1).mean(dim=0).clamp_min(1e-12)  # persistence's error
+        persist = target.norm(dim=-1).mean(dim=0)  # persistence's error: it predicts 0
+        persist = torch.where(persist < STILL_M, torch.nan, persist)
         for j, k in enumerate(model.goal.horizons):
             losses[f"loss/goal/k{k}"] = nll[j]
             losses[f"goalerr/k{k}"] = err[j]

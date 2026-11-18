@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 
 import torch
-from tiny import tiny_cfg, tiny_far_cfg
+from tiny import tiny_aux_cfg, tiny_cfg, tiny_far_cfg
 
 from jepa_world import bench
 
@@ -51,3 +51,10 @@ def test_fallback_recorder_catches_the_mps_fallback_warning():
         )
         warnings.warn("unrelated", UserWarning, stacklevel=1)
     assert len(got) == 1 and "aten::foo" in got[0]
+
+
+def test_bench_with_goal_and_pixel_stages_times_the_full_step():
+    """The full step needs a with_gt batch long enough for the goal horizons (review finding)."""
+    cfg = tiny_aux_cfg("model.goal_horizons=[1, 20]")  # longer than any model horizon
+    (row,) = bench.bench_heads(cfg, torch.device("cpu"), [(4, 3)], iters=1, warmup=0)["rows"]
+    assert row["ms_train_step"] > 0

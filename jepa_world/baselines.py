@@ -98,7 +98,10 @@ def match_clearance(
 
     dz is exactly 0 for the true radius. On flat ground it is Δr. Otherwise it comes from a
     bisection: the signed distance is 1-Lipschitz, so |dz| >= |Δr|, and the bracket grows from Δr
-    by doubling. Against a near-vertical face, no vertical shift helps, hence the fallback."""
+    by doubling, capped at exactly max_factor·Δr. Against a near-vertical face no vertical shift
+    helps, hence the fallback."""
+    if not max_factor >= 1.0:
+        raise ValueError(f"max_factor {max_factor} must be >= 1: |dz| is at least |Δr|")
     pos = np.asarray(pos, dtype=np.float64).reshape(-1, 2)
     n = len(pos)
     dr = float(radius) - float(true_radius)
@@ -106,6 +109,7 @@ def match_clearance(
         return np.zeros(n), np.zeros(n, dtype=bool)
     target = terrain.gap(pos, true_radius)
     sign = np.sign(dr)
+    limit = float(max_factor) * dr
 
     def past(dz: np.ndarray) -> np.ndarray:
         """True once the shifted ball is as clear as the true one (up for dr > 0, down for < 0)."""
@@ -113,11 +117,12 @@ def match_clearance(
         return sign * (terrain.gap(shifted, radius) - target) >= 0
 
     near, far = np.zeros(n), np.full(n, dr)  # past(near) is False: gap there is target − |dr|
-    for _ in range(int(np.ceil(np.log2(max_factor)))):
-        short = ~past(far)
-        if not short.any():
+    while True:
+        grow = ~past(far) & (far != limit)
+        if not grow.any():
             break
-        near, far = np.where(short, far, near), np.where(short, 2.0 * far, far)
+        near = np.where(grow, far, near)
+        far = np.where(grow, sign * np.minimum(2.0 * np.abs(far), abs(limit)), far)
     unmatched = ~past(far)
     for _ in range(60):  # |bracket| <= 8·0.2 m, so 60 halvings is far below float resolution
         mid = 0.5 * (near + far)
@@ -145,7 +150,9 @@ def simulator_predict(
     With `ball.radius` other than `true_radius`, the start is mapped to that ball: the same
     clearance (`match_clearance`, shift dz), the same surface speed (spin·r_true/r), and the
     predictions are the rollout minus dz. With the true radius, all three are exact no-ops.
-    Returns the predictions, and {"dz": (n,), "unmatched": (n,) bool}."""
+    Returns the predictions, and per start: "dz", "unmatched" (bool), "gap_true" (the true ball's
+    clearance at t) and "gap_as_given" (this ball's at the unshifted centre; negative = it would
+    have started inside the terrain). Raises if a rollout returns a non-finite position."""
     pos = np.asarray(pos, dtype=np.float64)
     vel = np.asarray(vel, dtype=np.float64)
     spin = np.asarray(spin, dtype=np.float64).ravel()
@@ -168,9 +175,19 @@ def simulator_predict(
             cam_pos=None if cam_pos is None else np.asarray(cam_pos)[t],
         )  # fmt: skip
         traj = np.asarray(roll.ball_pos, dtype=np.float64)
+        if not np.isfinite(traj[: k_max + 1]).all():
+            raise FloatingPointError(
+                f"simulator rollout from t={t} (radius {ball.radius}, dz {dz[i]:.4g}, "
+                f"unmatched {bool(unmatched[i])}) produced a non-finite position"
+            )
         for k in horizons:
             preds[k][i] = traj[k] - shift
-    return preds, {"dz": dz, "unmatched": unmatched}
+    return preds, {
+        "dz": dz,
+        "unmatched": unmatched,
+        "gap_true": terrain.gap(pos[starts], true_radius),
+        "gap_as_given": terrain.gap(pos[starts], ball.radius),
+    }
 
 
 # --- scoring ------------------------------------------------------------------------------------
@@ -216,7 +233,10 @@ def evaluate(
                 f"extra baseline {name!r} at k={k}: expected ({len(ep)}, 2) predictions, "
                 f"got {None if p is None else np.shape(p)}"
             )
-        return np.asarray(p, dtype=np.float64)
+        p = np.asarray(p, dtype=np.float64)
+        if not np.isfinite(p).all():
+            raise ValueError(f"extra baseline {name!r} at k={k} has non-finite predictions")
+        return p
 
     error, ratio, by_view = {}, {}, {}
     for name in [*names, *extra]:

@@ -23,7 +23,6 @@ import yaml
 from jepa_world import baselines
 from jepa_world.data.build import split_dir
 from jepa_world.data.dataset import EpisodeSet, load_split, read_manifest, valid_starts
-from jepa_world.sim.ball import mean_ball
 from jepa_world.sim.episode import simulate_from_state
 from jepa_world.sim.io import load_episode
 from jepa_world.utils.config import load_config
@@ -60,17 +59,22 @@ def _episode_physics(cfg: dict, split: str, es: EpisodeSet) -> list[_Physics]:
     return out
 
 
-def _params_record(params: str, sim_cfg: dict):
-    if params == "true":
-        return "episode"
-    mean = dataclasses.asdict(mean_ball(sim_cfg))
-    if params == "true_radius":
-        return {
-            "radius": "episode",
-            "friction": mean["friction"],
-            "restitution": mean["restitution"],
-        }
-    return mean
+HIDDEN = ("radius", "friction", "restitution")  # the only BallParams simulate_from_state reads
+
+
+def _params_record(balls: Sequence) -> dict:
+    """What the rollouts actually used, per hidden parameter: the value if every episode used the
+    same one, else "per-episode" (the true values, which vary)."""
+    out = {}
+    for name in HIDDEN:
+        values = {float(getattr(b, name)) for b in balls}
+        out[name] = values.pop() if len(values) == 1 else "per-episode"
+    return out
+
+
+def _quantiles(a: np.ndarray) -> dict:
+    q = np.quantile(a, [0.0, 0.5, 1.0])
+    return {"min": float(q[0]), "median": float(q[1]), "max": float(q[2])}
 
 
 def simulator_baselines(
@@ -83,14 +87,20 @@ def simulator_baselines(
     simulate: Callable = simulate_from_state,
 ) -> tuple[dict, dict]:
     """Predictions {simulator_<params>: {k: (M, 2)}} in `baselines.window_index` order, and a
-    record per params: what was used, how many starts were shifted (`match_clearance`), how many
-    found no vertical match, and the time taken. One rollout per window, CPU only (no GPU lock)."""
+    record per params:
+    - the parameters used;
+    - how many starts the true centre would have put inside the terrain (`inside_as_given`,
+      against `inside_true` for the true ball);
+    - how many were shifted (`match_clearance`), and how many found no vertical match;
+    - the time taken.
+
+    One rollout per window, on the CPU. Repeated params run once."""
     physics = _episode_physics(cfg, split, es)
     extra, info = {}, {}
-    for params in sim_params:
+    for params in dict.fromkeys(sim_params):
         t0 = time.perf_counter()
         per_k = {k: [] for k in horizons}
-        dz, unmatched = [], []
+        recs, balls = [], []
         for i, ph in enumerate(physics):
             ball = baselines.sim_ball(params, ph.ball, ph.sim_cfg)
             preds, rec = baselines.simulator_predict(
@@ -99,18 +109,21 @@ def simulator_baselines(
             )  # fmt: skip
             for k in horizons:
                 per_k[k].append(preds[k])
-            dz.append(rec["dz"])
-            unmatched.append(rec["unmatched"])
+            recs.append(rec)
+            balls.append(ball)
             if (i + 1) % 20 == 0:
                 print(f"[simulator {params}] {i + 1}/{len(physics)} episodes", file=sys.stderr)
-        dz, unmatched = np.concatenate(dz), np.concatenate(unmatched)
+        r = {key: np.concatenate([rec[key] for rec in recs]) for key in recs[0]}
         extra[baselines.simulator_name(params)] = {k: np.concatenate(v) for k, v in per_k.items()}
         info[params] = {
-            "params": _params_record(params, physics[0].sim_cfg),
-            "windows": int(len(dz)),
-            "shifted": int(np.count_nonzero(dz)),
-            "max_abs_dz_m": float(np.abs(dz).max()),
-            "unmatched": int(unmatched.sum()),
+            "params": _params_record(balls),
+            "windows": int(len(r["dz"])),
+            "inside_true": int((r["gap_true"] < 0).sum()),
+            "inside_as_given": int((r["gap_as_given"] < 0).sum()),
+            "gap_as_given_m": _quantiles(r["gap_as_given"]),
+            "shifted": int(np.count_nonzero(r["dz"])),
+            "abs_dz_m": _quantiles(np.abs(r["dz"])),
+            "unmatched": int(r["unmatched"].sum()),
             "seconds": round(time.perf_counter() - t0, 1),
         }
     return extra, info
@@ -154,9 +167,10 @@ def run_baselines(
 
 def format_table(result: dict) -> str:
     names = list(result["error_m"])
+    width = {n: max(20, len(n)) for n in names}
     head = (
         f"{'k':>4} "
-        + " ".join(f"{n:>20}" for n in names)
+        + " ".join(n.rjust(width[n]) for n in names)
         + "   (mean error m, ratio to persistence)"
     )
     lines = [head]
@@ -165,7 +179,7 @@ def format_table(result: dict) -> str:
         for n in names:
             mean = result["error_m"][n][str(k)]["mean"]
             r = result["ratio_to_persistence"][n][str(k)]
-            cells.append(f"{mean:9.4f} ({'  n/a' if r is None else f'{r:5.3f}'})".rjust(20))
+            cells.append(f"{mean:9.4f} ({'  n/a' if r is None else f'{r:5.3f}'})".rjust(width[n]))
         lines.append(f"{k:>4} " + " ".join(cells))
     return "\n".join(lines)
 
@@ -194,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.config:
         p.error("--baselines needs --config")
     cfg = load_config(args.config, args.set)
+    # No GPU lock: the simulator runs MuJoCo on the CPU with render=False (no MPS, no GL), and
+    # gpu_lock is for MPS jobs. Taking it would hold up GPU training for the whole eval.
     run, result = run_baselines(cfg, args.split, sim_params=args.sim_params)
     print(
         f"run dir: {run}\nsplit {args.split}: {result['episodes']} episodes, "

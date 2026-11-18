@@ -1,8 +1,7 @@
-"""Position baselines (SPEC §7.1): persistence and constant velocity, and the eval CLI."""
+"""Position baselines (SPEC §7.1): persistence, constant velocity, the simulator, and the eval CLI."""
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -247,6 +246,41 @@ def test_match_clearance_keeps_the_true_gap_on_a_slope(r_true, r):
     assert not unmatched.any()
 
 
+def test_match_clearance_searches_exactly_max_factor_radius_differences():
+    # On a slope s, a touching ball needs dz = Δr·sqrt(1 + s²). With s = 5.92 that is 6.0·Δr:
+    # beyond a range of 5·Δr, within one of 8·Δr.
+    x = np.linspace(-5.0, 5.0, 201)
+    s = np.sqrt(35.0)
+    steep = Terrain(x=x, heights=s * x)
+    pos = np.array([[0.2, s * 0.2 + 0.15 * np.sqrt(1 + s * s)]])  # touching with r_true = 0.15
+    dz8, un8 = baselines.match_clearance(steep, pos, 0.15, 0.25, max_factor=8.0)
+    assert not un8.any() and dz8[0] == pytest.approx(0.6, abs=1e-9)
+    dz5, un5 = baselines.match_clearance(steep, pos, 0.15, 0.25, max_factor=5.0)
+    assert un5.all() and dz5[0] == pytest.approx(0.1)
+    with pytest.raises(ValueError, match="max_factor"):
+        baselines.match_clearance(steep, pos, 0.15, 0.25, max_factor=0.5)
+
+
+def test_a_diverged_rollout_raises_instead_of_scoring_nan(short_sim_cfg, real_episode):
+    ep = real_episode
+
+    def blown(sim_cfg, terrain, ball, pos, vel, spin, frames, **kw):
+        out = _still(sim_cfg, terrain, ball, pos, vel, spin, frames)
+        out.ball_pos[-1] = np.nan
+        return out
+
+    with pytest.raises(FloatingPointError, match="t=4"):
+        baselines.simulator_predict(
+            short_sim_cfg, ep.terrain, ep.ball, ep.ball.radius,
+            ep.ball_pos, ep.ball_vel, ep.ball_spin, np.array([4]), [1, 5], simulate=blown,
+        )  # fmt: skip
+    pos, vel = motion("uniform", n=1)
+    starts = valid_starts(T, C, 5)
+    bad = {1: np.full((len(starts), 2), np.nan), 5: np.zeros((len(starts), 2))}
+    with pytest.raises(ValueError, match="non-finite"):
+        baselines.evaluate(pos, vel, DT, starts, [1, 5], C, extra={"bad": bad})
+
+
 def test_match_clearance_falls_back_beside_a_wall():
     # A 3 m step at x = 0. The ball rests against its face, well above the floor, so no vertical
     # shift short of climbing over the step changes its clearance.
@@ -372,14 +406,67 @@ def test_run_baselines_feeds_the_simulator_each_episodes_own_terrain_ball_and_sp
         assert s == pytest.approx(out["error_m"]["persistence"][k])
     windows_ = out["windows"]
     assert len(seen) == 2 * windows_ and {f for *_, f in seen} == {21}
-    sim = out["simulator"]
-    assert sim["true"]["params"] == "episode" and sim["true"]["shifted"] == 0
-    assert sim["mean"]["params"] == dataclasses.asdict(mean_ball(cfg["sim"]))
+    sim, mean = out["simulator"], mean_ball(cfg["sim"])
+    assert sim["true"]["params"] == dict.fromkeys(
+        ("radius", "friction", "restitution"), "per-episode"
+    )
+    assert (
+        sim["true"]["shifted"] == 0 and sim["true"]["inside_as_given"] == sim["true"]["inside_true"]
+    )
+    assert sim["mean"]["params"] == {
+        "radius": mean.radius, "friction": mean.friction, "restitution": mean.restitution
+    }  # fmt: skip
     assert sim["mean"]["windows"] == windows_ and sim["mean"]["unmatched"] >= 0
+    assert sim["mean"]["shifted"] == windows_  # a radius other than the true one always shifts
     true_balls = {b.radius for _, b, _, _ in seen[:windows_]}
     assert len(true_balls) == out["episodes"]  # each episode's own ball
     assert {b.radius for _, b, _, _ in seen[windows_:]} == {mean_ball(cfg["sim"]).radius}
     assert json.loads((run / "baselines.json").read_text())["simulator"] == sim
+
+
+def test_repeated_sim_params_run_once():
+    cfg = load_config(BASE, [*SHORT, "model.horizons=[1, 5]"])
+    build.build_split(cfg, "test", simulate=Recorder())
+    calls = []
+
+    def count(*args, **kw):
+        calls.append(1)
+        return _still(*args, **kw)
+
+    _, out = eval_cli.run_baselines(cfg, "test", sim_params=("mean", "mean"), simulate=count)
+    assert len(calls) == out["windows"] and list(out["simulator"]) == ["mean"]
+
+
+def test_cli_passes_sim_params_through(monkeypatch):
+    got = []
+
+    def fake_run(cfg, split, sim_params):
+        got.append(list(sim_params))
+        return paths.artifacts_root(), {
+            "episodes": 1, "windows": 1, "starts": [3, 3], "horizons": [1],
+            "error_m": {"simulator_true_radius": {"1": {"mean": 0.5}}},
+            "ratio_to_persistence": {"simulator_true_radius": {"1": None}},
+        }  # fmt: skip
+
+    monkeypatch.setattr(eval_cli, "run_baselines", fake_run)
+    base = ["--baselines", "--config", str(BASE), "--split", "test"]
+    assert eval_cli.main(base) == 0
+    assert eval_cli.main([*base, "--sim-params", "true_radius"]) == 0
+    assert eval_cli.main([*base, "--sim-params"]) == 0
+    assert got == [list(baselines.DEFAULT_SIM_PARAMS), ["true_radius"], []]
+    with pytest.raises(SystemExit):
+        eval_cli.main([*base, "--sim-params", "oracle"])
+
+
+def test_table_columns_fit_long_baseline_names():
+    name = "simulator_true_radius"
+    result = {
+        "horizons": [1],
+        "error_m": {name: {"1": {"mean": 0.5}}, "persistence": {"1": {"mean": 1.0}}},
+        "ratio_to_persistence": {name: {"1": 0.5}, "persistence": {"1": 1.0}},
+    }
+    head, row = eval_cli.format_table(result).splitlines()
+    assert head.index(name) + len(name) == row.index("(0.500)") + len("(0.500)")
 
 
 @pytest.mark.slow

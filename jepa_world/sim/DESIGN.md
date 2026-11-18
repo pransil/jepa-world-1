@@ -163,6 +163,18 @@ These are SPEC §3.2's `track_lagged_obstacles` and the M7 occlusion ablation
     least 2 px show.
 - **Recorded** as `meta["obstacles"]` (`x_lo`, `x_hi`, `z_lo`, `z_hi`) only when present. With the
   key absent, episode files are unchanged.
+- **Tuning** (`configs/m7_obstacles.yaml`: count [3, 6], width [0.8, 1.6] m, gap 1 m). The aim was
+  5–10% of frames occluded, from `python -m jepa_world.sim.preview` over terrain seeds 0–199:
+
+  | posts | occluded frames | episodes with occlusion | run frames median / p90 / max | preview run |
+  |---|---|---|---|---|
+  | **[3, 6]** | **7.7%** | 99 / 200 | 4 / 14 / 54 | `20261118T063646Z-…-sim-preview-1b41a8` (9b9241f, clean) |
+  | [4, 8] | 12.9% | 134 / 200 | 5 / 14 / 57 | `20261118T061354Z-…-4967d9` (before the wall-gap fix) |
+  | [2, 5] | 6.9% | 86 / 200 | 4 / 12 / 47 | `20261118T061534Z-…-e59880` (same) |
+
+  Those runs reproduced the M1 event rates exactly, so the posts left physics untouched (contact 0.656,
+  4.135 bounces per episode, 34 episodes out of view). The long runs are balls that settle behind
+  a post.
 - **From a state, the posts come from the `sim_cfg` you pass**, like every physics parameter. To
   continue a stored episode, pass its `meta["sim_cfg"]`: same posts, same contact settings.
 

@@ -28,6 +28,7 @@
       "Bash(tools/lane-owners.sh)",
       "Bash(tools/lane-owners.sh *)",
       "Bash(tools/gpu-status.sh)",
+      "Bash(tools/finish-lane.sh *)",
       "Bash(git status *)",
       "Bash(git status)",
       "Bash(git diff *)",

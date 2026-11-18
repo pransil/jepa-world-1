@@ -9,28 +9,25 @@
 # and live Claude sessions. There is no board file to keep current. Photolok ran one, and measured
 # it as the repo's most hand-resolved merge-conflict file while it caught nothing git did not.
 #
-# Live sessions: /tmp/cc-socks/<pid>.sock names each running Claude Code session's pid, and
-# `lsof -d cwd` gives its working directory. Liveness is `kill -0`, not a timestamp, because a
-# sleeping laptop suspends sessions rather than killing them.
+# Live sessions and their working directories come from lane-lib.sh (lane_live_sessions).
+#
+# "merged: candidate" means the PR merged and nothing is uncommitted. Whether the lane can really
+# go is decided by tools/finish-lane.sh, which checks more (PR head = branch tip, ignored files,
+# locks, running processes).
 #
 # No owner does NOT mean abandoned. A paused session and an abandoned one look the same, and only
 # the user knows which.
 set -uo pipefail
 
+. "$(dirname "$0")/lane-lib.sh" || exit 2
+
 BASE=${BASE:-origin/main}
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "not in a git repo"; exit 2; }
-MAIN=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
+MAIN=$(cd "$ROOT" && lane_main_clone)
 git -C "$MAIN" fetch -q origin 2>/dev/null || echo "(fetch failed: origin refs may be stale)"
 
-cwd_of() { lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; }
 LIVE=()   # "pid<TAB>cwd"
-for sock in /tmp/cc-socks/*.sock; do
-  [ -S "$sock" ] || continue
-  pid=$(basename "$sock" .sock)
-  case "$pid" in ''|*[!0-9]*) continue ;; esac
-  kill -0 "$pid" 2>/dev/null || continue
-  LIVE+=("$pid"$'\t'"$(cwd_of "$pid")")
-done
+while IFS= read -r e; do LIVE+=("$e"); done < <(lane_live_sessions)
 owner_of() {  # pids whose cwd is inside worktree $1 (but not inside a nested worktree of it)
   local out="" e pid cwd
   for e in "${LIVE[@]+"${LIVE[@]}"}"; do
@@ -71,7 +68,7 @@ while IFS=$'\t' read -r path br; do
   pr=$(pr_of "$br")
   if   [ "$owner" != - ] && [ "$pushed" = no ] && [ "$own$dirty" != 00 ]; then state="active, NOT PUSHED: invisible to other lanes"
   elif [ "$owner" != - ];                                        then state="active"
-  elif [ "${pr%% *}" = MERGED ] && [ "$dirty" = 0 ];             then state="merged: removable"
+  elif [ "${pr%% *}" = MERGED ] && [ "$dirty" = 0 ];             then state="merged: candidate"
   elif [ "${pr%% *}" = MERGED ];                                 then state="merged but $dirty uncommitted: ask user"
   else                                                                state="no live session: paused or abandoned? ask user"
   fi

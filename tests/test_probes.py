@@ -6,9 +6,10 @@ import json
 
 import numpy as np
 import pytest
-from jepa_world.metrics import SplitResult
 
 from jepa_world import probes
+from jepa_world.data.splits import LeakageError
+from jepa_world.metrics import SplitResult
 
 
 def _hidden(m, rng):
@@ -50,6 +51,13 @@ def test_pool_averages_space():
         probes.pool(np.zeros(3))
 
 
+def test_pool_accumulates_float32_maps_in_float64():
+    f = np.full((2, 3, 64, 64), 0.1, dtype=np.float32)
+    p = probes.pool(f)
+    assert p.dtype == np.float64
+    np.testing.assert_allclose(p, f.astype(np.float64).mean(axis=(2, 3)), rtol=0, atol=1e-12)
+
+
 def test_probe_data_validates_rows_and_feature_rank():
     rng = np.random.default_rng(0)
     ok = {"split": "train", "targets": {"radius": rng.normal(size=5)}, "terrain_seed": np.arange(5)}
@@ -67,7 +75,7 @@ def test_linearly_embedded_targets_are_recovered_on_held_out_terrains():
     held = _linear_data("test", 120, seed=2, first_terrain=100000, mix=mix)
     res = probes.run_probes(train, held)
     assert isinstance(res, SplitResult) and res.split == "test" and res.headline
-    by_level = res.metrics["by_level"]
+    by_level = res.metrics["probes"]["by_level"]
     assert set(by_level) == {"L1", "L2", "L3", "pooled"}
     for level, per_target in by_level.items():
         assert set(per_target) == {"pos", "friction", "restitution", "radius"}
@@ -75,8 +83,8 @@ def test_linearly_embedded_targets_are_recovered_on_held_out_terrains():
             assert s["r2"] > 0.99, (level, name, s)
         assert len(per_target["pos"]["r2_per_dim"]) == 2
         assert len(per_target["radius"]["rmse_per_dim"]) == 1
-    assert res.metrics["train_split"] == "train"
-    assert res.metrics["n_train"] == 300 and res.metrics["n_held_out"] == 120
+    assert res.metrics["probes"]["train_split"] == "train"
+    assert res.metrics["probes"]["n_train"] == 300 and res.metrics["probes"]["n_held_out"] == 120
     json.loads(json.dumps(res.metrics))
 
 
@@ -95,7 +103,7 @@ def test_features_unrelated_to_the_target_score_near_zero():
         _random_data("train", 400, 8, seed=3, first_terrain=0),
         _random_data("dev", 200, 8, seed=4, first_terrain=10_000),
     )
-    assert res.metrics["by_level"]["L1"]["friction"]["r2"] < 0.1
+    assert res.metrics["probes"]["by_level"]["L1"]["friction"]["r2"] < 0.1
     assert not res.headline
 
 
@@ -108,7 +116,9 @@ def test_the_probe_is_fit_on_train_rows_only():
         (y - y.mean()) ** 2
     )
     assert in_sample > 0.5  # the trap is real
-    assert probes.run_probes(train, held).metrics["by_level"]["L1"]["friction"]["r2"] < 0.1
+    assert (
+        probes.run_probes(train, held).metrics["probes"]["by_level"]["L1"]["friction"]["r2"] < 0.1
+    )
 
 
 def test_scoring_does_not_change_the_fitted_probe():
@@ -122,16 +132,16 @@ def test_scoring_does_not_change_the_fitted_probe():
 
 def test_never_fit_on_test():
     held = _random_data("test", 50, 4, seed=9, first_terrain=100000)
-    with pytest.raises(ValueError, match="test"):
+    with pytest.raises(LeakageError, match="test"):
         probes.fit_probes(held)
 
 
 def test_held_out_must_not_share_a_terrain_or_the_split_with_train():
     train = _random_data("train", 100, 4, seed=10, first_terrain=0)
     fitted = probes.fit_probes(train)
-    with pytest.raises(ValueError, match="terrain"):
+    with pytest.raises(LeakageError, match="terrain"):
         probes.score_probes(fitted, _random_data("test", 50, 4, seed=11, first_terrain=90))
-    with pytest.raises(ValueError, match="split"):
+    with pytest.raises(LeakageError, match="split"):
         probes.score_probes(fitted, _random_data("train", 50, 4, seed=12, first_terrain=5000))
 
 
@@ -155,7 +165,7 @@ def test_pooled_sees_what_the_levels_hold_jointly():
     r2 = {
         lvl: s["friction"]["r2"]
         for lvl, s in probes.run_probes(data("train", 300, 13, 0), data("test", 150, 14, 9000))
-        .metrics["by_level"]
+        .metrics["probes"]["by_level"]
         .items()
     }
     assert r2["pooled"] > 0.99
@@ -172,3 +182,37 @@ def test_held_out_needs_the_trained_levels_and_targets():
     )
     with pytest.raises(ValueError, match="L1"):
         probes.score_probes(fitted, bad)
+
+
+def test_pooled_is_rebuilt_from_the_levels_the_probes_were_fit_on():
+    # Fit on {L2, L3}; the held-out rows also carry L1, which pooled must not pick up.
+    mix = _mix()
+    train = _linear_data("train", 200, seed=16, first_terrain=1000, mix=mix)
+    train = probes.ProbeData(
+        split="train",
+        features={k: v for k, v in train.features.items() if k != "L1"},
+        targets=train.targets,
+        terrain_seed=train.terrain_seed,
+    )
+    fitted = probes.fit_probes(train)
+    assert fitted.pooled_from == ("L2", "L3")
+    res = probes.score_probes(fitted, _linear_data("test", 80, 17, 100000, mix=mix))
+    by_level = res.metrics["probes"]["by_level"]
+    assert set(by_level) == {"L2", "L3", "pooled"}
+    assert by_level["pooled"]["pos"]["r2"] > 0.99
+
+
+def test_held_out_levels_must_have_the_fitted_width():
+    fitted = probes.fit_probes(_random_data("train", 60, 4, seed=18, first_terrain=0))
+    with pytest.raises(ValueError, match="D=5"):
+        probes.score_probes(fitted, _random_data("test", 20, 5, seed=19, first_terrain=10_000))
+
+
+def test_pooled_is_not_a_level_you_can_pass():
+    with pytest.raises(ValueError, match="pooled"):
+        probes.ProbeData(
+            split="train",
+            features={"pooled": np.zeros((3, 2))},
+            targets={"radius": np.zeros(3)},
+            terrain_seed=np.arange(3),
+        )

@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 import pytest
 
-from jepa_world import metrics
+from jepa_world import baselines, metrics
 
 HORIZONS = (1, 2, 5)
 
@@ -336,6 +336,137 @@ def test_report_never_puts_dev_numbers_under_headline():
     json.loads(json.dumps(r))
 
 
-def test_report_rejects_two_results_for_one_split():
-    with pytest.raises(ValueError, match="test"):
-        metrics.report([metrics.SplitResult("test", {}), metrics.SplitResult("test", {})])
+def test_report_merges_families_of_one_split_and_rejects_clashes():
+    goal = metrics.SplitResult("test", {"goal_head": {"e": 1.0}})
+    probe = metrics.SplitResult("test", {"probes": {"r2": 0.9}})
+    r = metrics.report([goal, probe, metrics.SplitResult("dev", {"goal_head": {"e": 3.0}})])
+    assert r["headline"]["metrics"] == {"goal_head": {"e": 1.0}, "probes": {"r2": 0.9}}
+    assert r["development"] == {"dev": {"goal_head": {"e": 3.0}}}
+    with pytest.raises(ValueError, match="goal_head"):
+        metrics.report([goal, metrics.SplitResult("test", {"goal_head": {"e": 2.0}})])
+
+
+# --- review fixes: keys, empties, shapes, levels ------------------------------------------------
+
+
+def test_str_horizon_keys_as_this_module_emits_them_are_accepted():
+    truth = {"1": np.zeros((3, 2)), "10": np.zeros((3, 2))}
+    pred = {"1": np.ones((3, 2)), "10": 2 * np.ones((3, 2))}
+    errs = metrics.errors_by_horizon(pred, truth)
+    assert list(errs) == ["1", "10"]
+    d = metrics.rollout_drift({k: v["mean"] for k, v in errs.items()})
+    assert d["horizons"] == [1, 10]
+    out = metrics.evaluate_positions(pred, truth, {1: truth["1"], 10: truth["10"]})
+    assert out["ratio_to_persistence"] == {"1": None, "10": None}
+
+
+def test_a_horizon_given_twice_raises():
+    with pytest.raises(ValueError, match="twice"):
+        metrics.rollout_drift({1: 0.1, "1": 0.2})
+
+
+def test_no_windows_is_a_clear_error():
+    empty = {1: np.zeros((0, 2))}
+    with pytest.raises(ValueError, match="no windows"):
+        metrics.errors_by_horizon(empty, empty)
+
+
+def test_levels_may_be_a_generator_and_every_horizon_gets_calibration():
+    mean, var, truth, pers = _positions()
+    out = metrics.evaluate_positions(mean, truth, pers, var=var, levels=(p for p in (0.5, 0.9)))
+    assert all(set(c) == {"0.5", "0.9"} for c in out["calibration"].values())
+
+
+def test_levels_that_collide_as_keys_raise():
+    mean, var, truth = _gaussian(m=10)
+    with pytest.raises(ValueError, match="share the key"):
+        metrics.coverage(mean, var, truth, levels=(0.5, np.float64(0.5)))
+    with pytest.raises(ValueError, match="share the key"):
+        metrics.coverage(mean, var, truth, levels=(0.9, 0.9000000000000001))
+
+
+def test_a_misshaped_out_of_view_mask_is_a_clear_error():
+    mean, _, truth, pers = _positions()
+    gone = _by_k(lambda k: np.zeros((30, 1), bool))
+    with pytest.raises(ValueError, match="out_of_view"):
+        metrics.evaluate_positions(mean, truth, pers, out_of_view=gone)
+
+
+# --- parity with baselines.evaluate (the numbers are placed side by side) -----------------------
+
+
+def test_matches_baselines_evaluate_on_the_same_windows():
+    rng = _rng(7)
+    n, T, dt, horizons, starts = 3, 30, 1 / 15, [1, 2, 5, 10], np.arange(3, 20)  # noqa: N806
+    pos = np.cumsum(rng.normal(size=(n, T, 2)), axis=1)
+    vel = rng.normal(size=(n, T, 2))
+    oov = rng.random((n, T)) < 0.3
+    base = baselines.evaluate(pos, vel, dt, starts, horizons, context_frames=4, out_of_view=oov)
+    ep, t = (a.ravel() for a in np.meshgrid(np.arange(n), starts, indexing="ij"))
+    truth = {k: pos[ep, t + k] for k in horizons}
+    pers = {k: baselines.predict("persistence", pos, vel, ep, t, k, dt) for k in horizons}
+    model = {k: baselines.predict("const_velocity", pos, vel, ep, t, k, dt) for k in horizons}
+    gone = {k: oov[ep, t + k] for k in horizons}
+    ours = metrics.evaluate_positions(model, truth, pers, out_of_view=gone)
+    # Exact: the same numpy ops on the same arrays, so any drift between the two is a real change.
+    assert ours["windows"] == base["windows"]
+    assert ours["error_m"] == base["error_m"]["const_velocity"]
+    assert ours["ratio_to_persistence"] == base["ratio_to_persistence"]["const_velocity"]
+    assert (
+        ours["mean_error_m_by_view_at_t_plus_k"]
+        == base["mean_error_m_by_view_at_t_plus_k"]["const_velocity"]
+    )
+
+
+# --- hidden vs visible windows (M7's camera and obstacle ablations) -----------------------------
+
+
+def test_std_ratio_and_coverage_split_by_visibility():
+    rng = _rng(3)
+    m = 20_000
+    hidden = np.arange(m) % 4 == 0
+    mean = rng.normal(size=(m, 2))
+    var = np.where(hidden[:, None], 1.0, 0.25) * np.ones((m, 2))  # sigma 1.0 hidden, 0.5 visible
+    truth = mean + np.sqrt(var) * rng.standard_normal((m, 2))
+    v = metrics.by_visibility(mean, var, truth, hidden)
+    assert v["has_hidden"] and v["n_hidden"] == 5000 and v["n_visible"] == 15_000
+    assert v["std_hidden"] == pytest.approx(1.0) and v["std_visible"] == pytest.approx(0.5)
+    assert v["std_ratio"] == pytest.approx(2.0)
+    for side in ("hidden", "visible"):
+        for p in (0.5, 0.9):
+            assert v[f"coverage_{side}"][str(p)]["joint"] == pytest.approx(p, abs=0.025)
+    assert v["error_m_hidden"] > v["error_m_visible"]
+
+
+def test_no_hidden_windows_is_flagged_not_a_crash():
+    mean, var, truth = _gaussian(m=50)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        v = metrics.by_visibility(mean, var, truth, np.zeros(50, bool))
+    assert v["has_hidden"] is False and v["n_hidden"] == 0
+    assert v["std_hidden"] is None and v["std_ratio"] is None
+    assert v["coverage_hidden"] is None and v["error_m_hidden"] is None
+    assert v["coverage_visible"] is not None
+    json.dumps(v)
+
+
+def test_visibility_reports_out_of_view_occluded_and_their_union():
+    mean, var, truth = _gaussian(m=40)
+    oov = np.arange(40) < 10
+    occ = np.zeros(40, bool)  # until M7 adds obstacles
+    out = metrics.visibility(mean, var, truth, {"out_of_view": oov, "occluded": occ})
+    assert set(out) == {"out_of_view", "occluded", "hidden"}
+    assert out["occluded"]["has_hidden"] is False
+    assert out["hidden"] == out["out_of_view"]
+    occ = occ.copy()
+    occ[30:] = True
+    both = metrics.visibility(mean, var, truth, {"out_of_view": oov, "occluded": occ})
+    assert both["hidden"]["n_hidden"] == 20
+
+
+def test_visibility_validates_shapes():
+    mean, var, truth = _gaussian(m=10)
+    with pytest.raises(ValueError, match="hidden"):
+        metrics.by_visibility(mean, var, truth, np.zeros((10, 1), bool))
+    with pytest.raises(ValueError, match="shape"):
+        metrics.visibility(mean, var, truth, {"a": np.zeros(10, bool), "b": np.zeros(9, bool)})

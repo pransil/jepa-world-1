@@ -17,7 +17,7 @@ the experiment note, then fill in the shas and run dirs.
 
 | Needs | From | Why | State on 2026-11-17 |
 |---|---|---|---|
-| Episode datasets, loader, persistence and const-velocity baselines | M2 (lane m2) | Every run trains on episodes, and every result reports the baselines | branch `worktree-wt-m2-data`, not merged |
+| Episode datasets, loader, persistence and const-velocity baselines | M2 | Every run trains on episodes, and every result reports the baselines | **merged** (PR #7). The base datasets are built ([M2.md](M2.md)) |
 | Far heads (k = 10, 20) with Gaussian NLL | M4 | k = 20 is the headline horizon, and top-down extends these heads | branch `worktree-wt-m4-far-heads`, not merged |
 | Goal head (position mean and variance per k), pixel decoder, decoder path | M5 (lane m5) | Position error and calibration come from the goal head. The pixel and skip ablations need the decoder | in progress |
 | `metrics.py`, `probes.py`, `eval --run <dir> --split test`, the simulator-aware baseline | M6 (lane m6) | Every deciding metric below is an M6 metric | in progress. The simulator-aware baseline needs a `sim/` from-state entry point |
@@ -43,6 +43,14 @@ the experiment note, then fill in the shas and run dirs.
   camera is a pure function of the ball state, and the occluders don't collide. So one baseline
   table per test split serves every ablation. **Check this before sharing the table:** the GT
   `pos` and `vel` arrays of each rebuilt test split must equal the base split's exactly.
+
+  The base test table already exists: run `20261118T051751Z-worktree-wt-m2-data-baselines-test-73e338`,
+  with 200 episodes and 7400 windows, t ∈ [3, 39] ([M2.md](M2.md)).
+  - Persistence at k = 1 / 5 / 20 is 0.133 / 0.581 / 1.713 m.
+  - Constant velocity (true v) is 0.174 / 0.568 / **1.211** × persistence. It loses to persistence
+    at k = 20.
+
+  So "beats persistence at k = 20" is a real bar. M6 must score models on these same windows (M2.md).
 - **Configs:** `configs/m7_<slug>.yaml` with `base: base.yaml`, holding only the keys under test.
   The tree is clean when the run starts (`/experiment` Step 2).
 - **Training sanity before any conclusion** (`/experiment` Step 4):
@@ -72,11 +80,13 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 - That leaves out the real data loader and M6 eval time, neither yet measured.
 - Re-check against M5's bench, and scale linearly if real-data runs need more than 10k steps.
 
-**Dataset builds (CPU, no GPU lock):**
-- One full set of splits is dev 10×4 + train 500×4 + test 50×4 = 2240 episodes (base.yaml on the M2 branch).
-- Rendering takes 49–97 ms per episode, a rough figure taken unlocked on a shared machine
-  (docs/milestones/M1.md, run `20261118T023301Z-…-6c2ce8`). So a set takes **≈ 2–4 min** and ≈ 74 MB
-  (33 KB per episode).
+**Dataset builds:**
+- One full set of splits is dev 10×4 + train 500×4 + test 50×4 = 2240 episodes (`data.splits` in
+  `configs/base.yaml`).
+- M2 measured the whole base set at **4 min 39 s wall**, 69.3 MB (train 214 s, or 107 ms per
+  episode). That was at a load average of about 150, so it's an upper bound ([M2.md](M2.md)).
+- The build CLI (`python -m jepa_world.data.build --split all`) takes the GPU lock, so it queues
+  like a run.
 - Only §3 (track_full) and §5 (obstacles) need new sets.
 
 ## 1. Pixel weight: 0, low, high
@@ -142,13 +152,12 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 - **Switch:** `sim.camera_mode`. It **exists** in `jepa_world/sim/camera.py`, merged in M1
   ([decision](../decisions/2026-11-17-camera-mode-track-lagged.md)). No new code. Setting it to
   `track_full` changes the `sim` hash, so `build_dataset_once` builds a separate track_full dataset
-  (≈ 2–4 min of CPU). Every existing dataset stays as it is.
+  (under 5 min, per M2's build). Every existing dataset stays as it is.
 - **Evaluation windows:** the "OOV windows" are test windows whose last context frame t is
   `out_of_view` under `track_lagged`, flagged from the lagged dataset's GT. The same (episode, t)
   pairs are scored in both models, each on its own frames.
-  - M1 measured 2.4% of frames out of view, in 17% of episodes, on seeds 0–199. That suggests
-    roughly 290 out-of-view frames in the 200 test episodes, so the CIs will be wide. Bootstrap
-    over episodes.
+  - M2 counted 161–202 of 7400 test windows out of view at t+k (2.2–2.7%) ([M2.md](M2.md)). The
+    count for t is similar, so the CIs will be wide. Bootstrap over episodes.
 - **Hypothesis:** the lagged model's predicted goal-head std rises when the ball is out of view,
   and the full model's doesn't on the same windows. The rise comes from visibility, not difficulty.
 - **Deciding metric** (SPEC §7.2, event behavior): the goal-head predicted std at **k = 1** on OOV
@@ -241,7 +250,7 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 
 ### Flag: the obstacle work changes `sim/` and touches dataset hashes
 
-- M2's dataset key hashes the **whole** `sim` config (`data/build.py:split_key`, on the M2 branch).
+- M2's dataset key hashes the **whole** `sim` config (`jepa_world/data/build.py:split_key`).
   A new `sim.*` key in base.yaml, even one that is off, would re-key and orphan every dataset. The
   decision above avoids that: the key is absent, which means off.
 - **The sim lane must not start** until both of these hold:

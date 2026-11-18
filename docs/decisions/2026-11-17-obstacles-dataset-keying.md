@@ -5,7 +5,7 @@
 
 ## Question
 The M7 occlusion ablation needs foreground obstacles in `sim/`, which means new `sim.*` config
-keys. M2's dataset key (`data/build.py:split_key`, on the M2 branch pending merge) hashes the
+keys. M2's dataset key (`jepa_world/data/build.py:split_key`) hashes the
 **whole** `plain_json(cfg["sim"])`. So a new key in `configs/base.yaml`, even one that is off,
 would re-key every split and orphan the datasets m2 is about to build. How should the obstacle
 keys be added?
@@ -22,9 +22,9 @@ change.
   it must be in the yaml). Existing dataset hashes don't change, and there is no
   `generator_version` bump.
 - **B: a default-off key in base.yaml, and accept a rebuild.** This follows the usual convention,
-  but every split re-keys once. A rebuild is about 2–4 min of CPU for 2240 episodes, at 49–97 ms
-  each with rendering (docs/milestones/M1.md, rough unlocked timing). Runs trained before then
-  point at the old dataset dirs.
+  but every split re-keys once. A rebuild of all 2240 episodes took 4 min 39 s wall in M2 (an upper
+  bound, taken at a load average of about 150; docs/milestones/M2.md). Runs trained before then
+  point at the old dataset dirs, including the base datasets M2 just built.
 - **C: a default-off key, plus a hash exclusion.** Change `split_key` to drop the obstacle keys
   when they're off. No rebuild, but it adds a special case to m2's file.
 

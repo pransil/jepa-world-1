@@ -1,0 +1,55 @@
+[project]
+name = "jepa-world"
+version = "0.1.0"
+description = "JEPA world model with multi-horizon prediction on rolling-ball MuJoCo episodes"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mujoco>=4.0.1",
+    "numpy>=2.4.6",
+    "pyyaml>=6.0.3",
+    "scikit-learn>=1.9.1",
+    "tensorboard>=2.21.0",
+    "torch>=2.15.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["jepa_world"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+]
+
+# Linux (CI) gets the CPU-only torch wheel; the default PyPI wheel on Linux pulls ~2 GB of CUDA.
+# macOS uses PyPI torch, which includes MPS.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: takes more than ~2s (training loops, long episodes). Run with ./test all",
+    "render: needs an OpenGL context (MuJoCo rendering). Auto-skipped when none is available",
+    "mps: needs Apple MPS. Auto-skipped elsewhere. Run with ./test mps",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".claude/worktrees"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]

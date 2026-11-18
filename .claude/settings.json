@@ -1,0 +1,58 @@
+{
+  "//": "Shared project settings, COMMITTED, so every worktree gets them on checkout. Personal additions go in .claude/settings.local.json (gitignored). Rules: CLAUDE.md 'The floor' and docs/process/LANES.md.",
+
+  "//hooks": "lane_guard.py BLOCKS git add/commit/push in the main clone (escape hatch: JEPA_ALLOW_MAIN=1 prefix, only when the user explicitly asks), and WARNS through additionalContext on a Write/Edit in the main clone or to a file another worktree holds. It fails open. Its tests are in tests/test_lane_guard.py.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/lane_guard.py", "timeout": 20 }
+        ]
+      }
+    ]
+  },
+
+  "//worktree": "'fresh' = new worktrees branch from origin's default branch (main), never from whatever a local checkout happens to hold.",
+  "worktree": { "baseRef": "fresh" },
+
+  "permissions": {
+    "allow": [
+      "Bash(./test)",
+      "Bash(./test *)",
+      "Bash(uv sync)",
+      "Bash(uv sync *)",
+      "Bash(uv run *)",
+      "Bash(uv lock)",
+      "Bash(uv tree *)",
+      "Bash(tools/lane-owners.sh)",
+      "Bash(tools/lane-owners.sh *)",
+      "Bash(tools/gpu-status.sh)",
+      "Bash(git status *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git diff)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git fetch *)",
+      "Bash(git fetch)",
+      "Bash(git branch --show-current)",
+      "Bash(git worktree list *)",
+      "Bash(git worktree list)",
+      "Bash(git rev-parse *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push -u origin HEAD)",
+      "Bash(git push)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr merge * --merge --delete-branch)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "Bash(gh run watch *)"
+    ]
+  }
+}

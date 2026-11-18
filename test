@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# The ONE test entry point. Agents and CI both run this, never a bare `pytest`, so everyone means
+# the same thing by "tests pass".
+#
+#   ./test                fast tier: lint + every test not marked slow/render/mps (target < 20s)
+#   ./test all            every tier this machine can run (render/mps auto-skip where unavailable)
+#   ./test slow|render|mps   just that tier
+#   ./test fix            auto-format and auto-fix lint, then exit
+#   ./test <pytest args>  fast tier, narrowed, e.g.  ./test -k ema   or   ./test tests/test_infra.py
+#
+# Read the RESULT line, not the colour. A tier that collected nothing says so.
+set -uo pipefail
+cd "$(dirname "$0")"
+
+FAST='not slow and not render and not mps'
+mode=${1:-fast}
+
+if [ "$mode" = fix ]; then
+  uv run ruff format . && uv run ruff check --fix .
+  exit $?
+fi
+
+start=$(date +%s)
+if ! uv run ruff format --check --quiet . || ! uv run ruff check --quiet .; then
+  echo "RESULT: FAIL (lint). Run ./test fix, then re-run."
+  exit 1
+fi
+
+case "$mode" in
+  fast)            shift $(( $# > 0 ? 1 : 0 )); uv run pytest -q -m "$FAST" "$@"; rc=$? ;;
+  all)             shift; uv run pytest -q "$@"; rc=$? ;;
+  slow|render|mps) shift; uv run pytest -q -m "$mode" "$@"; rc=$? ;;
+  *)               mode="fast (filtered)"; uv run pytest -q -m "$FAST" "$@"; rc=$? ;;
+esac
+secs=$(( $(date +%s) - start ))
+
+case $rc in
+  0) echo "RESULT: PASS (tier=$mode, ${secs}s)" ;;
+  5) echo "RESULT: PASS, but NO TESTS collected for tier=$mode (${secs}s)"; rc=0 ;;
+  *) echo "RESULT: FAIL (tier=$mode, pytest exit $rc, ${secs}s)" ;;
+esac
+exit $rc

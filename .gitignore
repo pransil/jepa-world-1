@@ -1,0 +1,22 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# Claude Code: worktrees are lanes, not content. Without this the main clone is never clean and
+# `git add -A` there would stage every lane. Personal settings stay local.
+.claude/worktrees/
+.claude/settings.local.json
+
+# Datasets, runs and checkpoints live OUTSIDE the repo under $JEPA_ARTIFACTS
+# (default ~/devel/jepa/artifacts/world-1). These catch strays written by mistake.
+runs/
+datasets/
+*.pt
+*.ckpt
+*.npz
+tensorboard/
+.debug/

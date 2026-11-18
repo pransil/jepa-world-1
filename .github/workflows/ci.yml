@@ -1,0 +1,32 @@
+# Fast tier only: lint + every test not marked slow/render/mps, on Linux with CPU-only torch.
+# The slow, render and mps tiers run locally on the Mac (./test all). Branch protection on main
+# requires the `fast-tests` check.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Keyed per commit, so a late-delivered event for a superseded commit can never cancel the run for
+# the current head. Photolok lost a required check that way (PR #292).
+concurrency:
+  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fast-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - name: Install (locked)
+        run: uv sync --locked
+      - name: ./test
+        run: ./test

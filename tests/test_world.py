@@ -258,3 +258,25 @@ def test_goalratio_is_nan_when_the_ball_does_not_move():
     assert torch.isfinite(losses["goalerr/k1"]) and torch.isfinite(losses["loss/goal"])
     moving = _losses(_model(cfg), batch, cfg)
     assert torch.isnan(moving["goalratio/k0"]) and torch.isfinite(moving["goalratio/k1"])
+
+
+def test_a_pre_m5_run_config_still_builds_and_loads_its_checkpoint():
+    """Saved run configs from before M5 lack the aux keys: building without aux stages must not
+    read them (experiments/probe_embeddings.py and M6 eval rebuild old runs this way)."""
+    cfg = tiny_cfg()
+    for key in (
+        "goal_horizons",
+        "goal_l2",
+        "goal_hidden",
+        "goal_logvar_bound",
+        "pix_widths",
+        "unet_skips",
+    ):
+        del cfg["model"][key]
+    cfg["train"]["stage_start"] = {"near": 0, "far": 0}  # what pre-M5 run configs carry
+    torch.manual_seed(1)
+    old = JEPA(cfg, NEAR)
+    train.check_config(cfg)
+    world = train.build_model(cfg)
+    world.load_state_dict(old.state_dict())
+    assert world.goal is None and world.pixel is None

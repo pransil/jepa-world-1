@@ -57,19 +57,36 @@ def model_horizons(cfg: dict) -> list[int]:
     return horizons
 
 
-def _check_stage_start(cfg: dict) -> None:
-    """Every stage needs a start step >= 0, and one must start at 0 (or nothing would train)."""
-    stages, start = cfg["train"]["stages"], cfg["train"]["stage_start"]
+def _check_stage_start(cfg: dict, horizons: list[int]) -> None:
+    """stage_start.<s> = the number of steps completed before stage s joins the loss.
+
+    Every stage in train.stages needs an int >= 0 (a YAML bool is not a step). Among the stages
+    that own a built horizon, one must start at 0 (or step 1 would have nothing to train), and
+    each must start before train.steps (or it would be built and logged but never trained)."""
+    t = cfg["train"]
+    stages, start, steps = t["stages"], t["stage_start"], t["steps"]
     for s in stages:
-        if not isinstance(start.get(s), int) or start[s] < 0:
-            raise ValueError(f"train.stage_start.{s} must be an int >= 0, got {start.get(s)!r}")
-    if min(start[s] for s in stages) != 0:
-        raise ValueError(f"train.stage_start {start}: some stage in {stages} must start at step 0")
+        v = start.get(s)
+        if type(v) is not int or v < 0:
+            raise ValueError(f"train.stage_start.{s} must be an int >= 0, got {v!r}")
+    owned = sorted({_stage_of(cfg, k) for k in horizons}, key=stages.index)
+    if min(start[s] for s in owned) != 0:
+        raise ValueError(
+            f"train.stage_start {start}: one of the stages that own a horizon ({owned}) must "
+            "start at 0"
+        )
+    late = [s for s in owned if start[s] >= steps]
+    if late:
+        raise ValueError(
+            f"train.stage_start {start}: {late} would never train in train.steps={steps}"
+        )
 
 
 def active_horizons(cfg: dict, horizons: list[int], step: int | None) -> list[int]:
-    """The horizons whose stage has started by `step` (SPEC §5.5,
-    docs/decisions/2026-11-17-stage-schedule-within-run.md). step=None: all of them."""
+    """The horizons whose stage has started once `step` steps are complete (SPEC §5.5,
+    docs/decisions/2026-11-17-stage-schedule-within-run.md). `step` counts completed steps, so
+    run() passes metrics step - 1: far: 2000 -> metrics steps 1..2000 near-only, far from 2001.
+    step=None: all of them."""
     if step is None:
         return list(horizons)
     start = cfg["train"]["stage_start"]
@@ -121,7 +138,7 @@ def check_config(cfg: dict) -> list[int]:
             f"train.precision={cfg['train']['precision']!r}: only fp32 is implemented. A "
             "lower-precision path must be built and tested explicitly first (SPEC §6)"
         )
-    _check_stage_start(cfg)
+    _check_stage_start(cfg, horizons)
     return horizons
 
 
@@ -144,7 +161,8 @@ def train_step(
     step: int | None = None,
 ) -> dict[str, torch.Tensor]:
     """One step: losses -> backward -> optimizer step -> EMA update (in that order).
-    `step` selects the active stages (train.stage_start); None means every built stage.
+    `step` (steps completed before this one) selects the active stages via train.stage_start;
+    None means every built stage.
     Returns every term detached, still on the device (no host sync here)."""
     model.train()
     active = active_horizons(cfg, model.horizons, step)
@@ -215,7 +233,7 @@ def run(
         with open(run_dir / "metrics.jsonl", "a") as f:
             try:
                 for step in range(1, steps + 1):
-                    losses = train_step(model, opt, next(batches).to(device), cfg, step=step)
+                    losses = train_step(model, opt, next(batches).to(device), cfg, step=step - 1)
                     keys = keys or list(losses)
                     last = torch.stack([losses[k] for k in keys])
                     rows.append((step, last))

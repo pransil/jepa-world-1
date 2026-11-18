@@ -81,7 +81,12 @@ def test_run_logs_every_term_every_step_and_checkpoints(tmp_path):
     train.run(cfg, tmp_path, device=torch.device("cpu"))
     lines = [json.loads(s) for s in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert [r["step"] for r in lines] == [1, 2, 3, 4, 5]  # 5 is flushed even though 5 % 2 != 0
-    expected = {f"loss/k{k}" for k in NEAR} | {"loss/var", "loss/total", "emb_std/L1"}
+    expected = {f"{p}/k{k}" for p in ("loss", "relerr") for k in NEAR} | {
+        "loss/var",
+        "var/L1",
+        "loss/total",
+        "emb_std/L1",
+    }
     for r in lines:
         assert set(r) == expected | {"step"}
         assert all(isinstance(r[key], float) for key in expected)

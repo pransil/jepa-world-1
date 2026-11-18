@@ -1,0 +1,6 @@
+# M4 far-collapse comparison, variant (a): per-position LayerNorm'd targets. Synthetic only.
+# experiments/2026-11-17-m4-far-collapse.md
+base: m4_far_synthetic.yaml
+
+loss:
+  target_norm: layernorm

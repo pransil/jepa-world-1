@@ -1,0 +1,7 @@
+# M4 far-collapse comparison, variant (b): variance guard summed over channels (the latent losses'
+# scale) with VICReg's variance weight. Synthetic only. experiments/2026-11-17-m4-far-collapse.md
+base: m4_far_synthetic.yaml
+
+loss:
+  var_reduce: sum
+  w_var: 25.0

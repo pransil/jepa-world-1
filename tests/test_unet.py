@@ -77,3 +77,18 @@ def test_wrong_input_shape_raises():
 def test_encoder_has_no_buffers():
     # EMA covers parameters only. BatchNorm-style buffers would need explicit handling.
     assert list(encoder_from_cfg(tiny_cfg()).buffers()) == []
+
+
+def test_continuing_after_a_level_matches_one_full_pass():
+    enc = encoder_from_cfg(tiny_cfg())
+    x = torch.rand(2, 12, 16, 16)
+    full = enc(x)
+    rest = enc(full["L1"], after="L1")
+    assert list(rest) == ["L2", "L3"]
+    for level in rest:
+        torch.testing.assert_close(rest[level], full[level], rtol=0, atol=0)
+    assert list(enc(full["L1"], upto="L2", after="L1")) == ["L2"]
+    with pytest.raises(ValueError, match="expected"):
+        enc(x, after="L1")  # x is the input stack, not L1's output
+    with pytest.raises(ValueError, match="before"):
+        enc(full["L2"], upto="L1", after="L2")

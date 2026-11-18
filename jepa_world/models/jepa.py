@@ -55,6 +55,10 @@ def latent_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return (pred - target.detach()).square().sum(dim=1).mean()
 
 
+def _nll_from_err2(err2: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    return (0.5 * (err2 * torch.exp(-logvar) + logvar + LOG_2PI)).sum(dim=1).mean()
+
+
 def gaussian_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Diagonal-Gaussian NLL of sg(target), summed over channels and averaged over
     (batch, positions), the same reduction as latent_loss (SPEC §5.1, far heads):
@@ -63,8 +67,28 @@ def gaussian_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor)
 
     The log(2 pi) term makes it a true NLL. With logvar = 0 it is 0.5 * latent_loss + const."""
     _check_same_shape(mean=mean, logvar=logvar, target=target)
-    err2 = (target.detach() - mean).square()
-    return (0.5 * (err2 * torch.exp(-logvar) + logvar + LOG_2PI)).sum(dim=1).mean()
+    return _nll_from_err2((target.detach() - mean).square(), logvar)
+
+
+def relative_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """Scale-free error: latent_loss(pred, target) / latent_loss(batch mean of target, target).
+    1.0 = no better than predicting the batch-mean target; 0 = exact. Shrinking the embeddings
+    cannot lower it, so it shows real prediction quality when the raw losses are collapsing.
+    Detached: a diagnostic only."""
+    _check_same_shape(pred=pred, target=target)
+    pred, target = pred.detach(), target.detach()
+    spread = batch_var(target).sum(dim=0).mean()  # = latent_loss(batch mean, target)
+    return latent_loss(pred, target) / spread.clamp_min(eps)
+
+
+def normalize_target(target: torch.Tensor, mode: str) -> torch.Tensor:
+    """loss.target_norm: 'none' (raw, the 2026-11-17 latent-distance decision) or 'layernorm'
+    (zero mean, unit variance over channels at each position; no affine, as in I-JEPA)."""
+    if mode == "none":
+        return target
+    if mode == "layernorm":
+        return F.layer_norm(target.movedim(1, -1), (target.shape[1],)).movedim(-1, 1)
+    raise ValueError(f"loss.target_norm={mode!r}: expected 'none' or 'layernorm'")
 
 
 def batch_var(z: torch.Tensor) -> torch.Tensor:
@@ -73,14 +97,20 @@ def batch_var(z: torch.Tensor) -> torch.Tensor:
     return z.var(dim=0, correction=0)
 
 
-def _guard_from_var(var: torch.Tensor, gamma: float, eps: float) -> torch.Tensor:
-    return F.relu(gamma - torch.sqrt(var + eps)).mean()
+def _guard_from_var(var: torch.Tensor, gamma: float, eps: float, reduce: str) -> torch.Tensor:
+    g = F.relu(gamma - torch.sqrt(var + eps))  # (C, H, W)
+    if reduce == "mean":
+        return g.mean()
+    if reduce == "sum":  # same scale as the latent losses: sum over channels, mean over positions
+        return g.sum(dim=0).mean()
+    raise ValueError(f"loss.var_reduce={reduce!r}: expected 'mean' or 'sum'")
 
 
-def variance_guard(z: torch.Tensor, gamma: float, eps: float) -> torch.Tensor:
-    """VICReg-style floor: mean over features of relu(gamma - batch std)
+def variance_guard(z: torch.Tensor, gamma: float, eps: float, reduce: str = "mean") -> torch.Tensor:
+    """VICReg-style floor on relu(gamma - batch std) of every (channel, position) feature,
+    averaged over features ('mean') or summed over channels ('sum')
     (docs/decisions/2026-11-17-collapse-guard-on.md)."""
-    return _guard_from_var(batch_var(z), gamma, eps)
+    return _guard_from_var(batch_var(z), gamma, eps, reduce)
 
 
 # ---------------------------------------------------------------- model
@@ -139,19 +169,45 @@ class JEPA(nn.Module):
         yield from self.context_encoder.parameters()
         yield from self.heads.parameters()
 
-    def forward(self, frames: torch.Tensor, action: torch.Tensor | None = None) -> dict:
+    def check_active(self, active: Collection[int] | None) -> set[int]:
+        active = set(self.horizons if active is None else active)
+        if not active or not active <= set(self.horizons):
+            raise ValueError(
+                f"active horizons {sorted(active)} must be a non-empty subset of {self.horizons}"
+            )
+        return active
+
+    def forward(
+        self,
+        frames: torch.Tensor,
+        action: torch.Tensor | None = None,
+        active: Collection[int] | None = None,
+    ) -> dict:
+        """`active` (default: all) are the horizons that will be trained. Every head still runs,
+        but inactive heads, and context levels only they read, run without autograd: same values,
+        no graph kept for a backward that would never use it."""
+        active = self.check_active(active)
         need = self.context_frames + max(self.horizons)
         if frames.ndim != 5 or frames.shape[1] < need:
             raise ValueError(
                 f"need frames (B, >= {need}, 3, H, W) for horizons {self.horizons}, "
                 f"got {tuple(frames.shape)}"
             )
+        deepest_active = max((self.head_level[k] for k in active), key=self.level_names.index)
         context = self.context_encoder(
-            context_stack(frames, self.context_frames), upto=self.deepest
+            context_stack(frames, self.context_frames), upto=deepest_active
         )
+        if deepest_active != self.deepest:
+            with torch.no_grad():
+                context.update(
+                    self.context_encoder(
+                        context[deepest_active], upto=self.deepest, after=deepest_active
+                    )
+                )
         pred, logvar = {}, {}
         for k in self.horizons:
-            out = self.heads[str(k)](context[self.head_level[k]], action)
+            with torch.set_grad_enabled(torch.is_grad_enabled() and k in active):
+                out = self.heads[str(k)](context[self.head_level[k]], action)
             if k in self.far_horizons:
                 pred[k], logvar[k] = out
             else:
@@ -200,10 +256,12 @@ def compute_losses(
     active: Collection[int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Every term as a 0-d tensor, for EVERY built horizon (SPEC §5.4):
-      loss/k<k>    squared L2 (near) or Gaussian NLL (far)
+      loss/k<k>    squared L2 (near) or Gaussian NLL (far), against the (normalized) target
+      relerr/k<k>  scale-free error of the mean (relative_error), detached
       sqerr/k<k>   far only: the mean's squared L2, detached (is the prediction itself improving?)
       logvar/k<k>  far only: mean predicted log-variance, detached
-      loss/var     variance guard over the levels read by ACTIVE heads (if the guard is on)
+      var/<L>      each read level's variance guard, detached (if the guard is on)
+      loss/var     SUM of the guards of the levels ACTIVE heads read (if the guard is on)
       loss/total   sum of w_k * loss/k over ACTIVE horizons, plus w_var * loss/var
       emb_std/<L>  batch std of every level any head reads, detached
 
@@ -214,35 +272,41 @@ def compute_losses(
             f"loss.latent_distance={loss_cfg['latent_distance']!r}: only 'mse' (squared L2) "
             "is implemented (docs/decisions/2026-11-17-latent-distance-sq-l2.md)"
         )
-    active = set(model.horizons if active is None else active)
-    if not active or not active <= set(model.horizons):
-        raise ValueError(
-            f"active horizons {sorted(active)} must be a non-empty subset of {model.horizons}"
-        )
-    out = model(frames, action)
+    active = model.check_active(active)
+    out = model(frames, action, active=active)
     losses: dict[str, torch.Tensor] = {}
     total = frames.new_zeros(())
     for k in model.horizons:
-        pred, target = out["pred"][k], out["target"][k]
+        pred = out["pred"][k]
+        target = normalize_target(out["target"][k], loss_cfg["target_norm"])
+        _check_same_shape(pred=pred, target=target)
+        err2 = (target - pred).square()  # target is already detached (encode_targets)
+        sqerr = err2.sum(dim=1).mean()
         if k in model.far_horizons:
-            lk = gaussian_nll(pred, out["logvar"][k], target)
-            losses[f"sqerr/k{k}"] = latent_loss(pred.detach(), target)
+            lk = _nll_from_err2(err2, out["logvar"][k])
+            losses[f"sqerr/k{k}"] = sqerr.detach()
             losses[f"logvar/k{k}"] = out["logvar"][k].detach().mean()
         else:
-            lk = latent_loss(pred, target)
+            lk = sqerr  # = latent_loss(pred, target)
         losses[f"loss/k{k}"] = lk
+        losses[f"relerr/k{k}"] = relative_error(pred, target)
         if k in active:
             total = total + loss_cfg["w_k"] * lk
     active_levels = {model.head_level[k] for k in active}
-    guards, stds = [], {}
+    guards, extra = [], {}
     for lv in sorted(set(model.head_level.values()), key=model.level_names.index):
         var = batch_var(out["context"][lv])  # one reduction, used for the guard and the log
-        stds[f"emb_std/{lv}"] = var.detach().sqrt().mean()
-        if loss_cfg["collapse_guard"] and lv in active_levels:
-            guards.append(_guard_from_var(var, loss_cfg["var_gamma"], loss_cfg["var_eps"]))
-    if guards:
-        losses["loss/var"] = torch.stack(guards).mean()
+        extra[f"emb_std/{lv}"] = var.detach().sqrt().mean()
+        if loss_cfg["collapse_guard"]:
+            g = _guard_from_var(
+                var, loss_cfg["var_gamma"], loss_cfg["var_eps"], loss_cfg["var_reduce"]
+            )
+            extra[f"var/{lv}"] = g.detach()
+            if lv in active_levels:
+                guards.append(g)
+    if guards:  # summed, so a level's weight never changes when another level joins
+        losses["loss/var"] = torch.stack(guards).sum()
         total = total + loss_cfg["w_var"] * losses["loss/var"]
     losses["loss/total"] = total
-    losses.update(stds)
+    losses.update(extra)
     return losses

@@ -36,16 +36,33 @@ def test_active_horizons_follow_stage_start(step, expected):
 
 
 @pytest.mark.parametrize(
-    "stage_start, match",
+    "overrides, match",
     [
-        ("{near: 0}", "far"),  # a stage without a start step
-        ("{near: 5, far: 10}", "step 0"),  # nothing would train at step 0
-        ("{near: 0, far: -1}", "far"),  # negative
+        (["train.stage_start={near: 0}"], "far"),  # a stage without a start step
+        (["train.stage_start={near: 5, far: 10}", "train.steps=20"], "start at 0"),  # none at 0
+        (["train.stage_start={near: 0, far: -1}"], "far"),  # negative
+        (["train.stage_start={near: 0, far: true}"], "far"),  # a YAML bool is not a step
+        (["train.stage_start={near: 0, far: 3}", "train.steps=3"], "never"),  # starts after the end
+        # far owns no horizon here, so its 0 must not count as "something trains at step 0"
+        (["train.stage_start={near: 1, far: 0}", "model.horizons=[1, 2]"], "start at 0"),
     ],
 )
-def test_bad_stage_start_is_refused(stage_start, match):
+def test_bad_stage_start_is_refused(overrides, match):
     with pytest.raises(ValueError, match=match):
-        train.check_config(tiny_far_cfg(f"train.stage_start={stage_start}"))
+        train.check_config(tiny_far_cfg(*overrides))
+
+
+def test_stage_start_counts_completed_steps(tmp_path):
+    # far: 2 -> steps 1 and 2 (as numbered in metrics.jsonl) are near-only, far joins at step 3
+    cfg = tiny_far_cfg("train.steps=4", "train.stage_start={near: 0, far: 2}")
+    train.run(cfg, tmp_path, device=torch.device("cpu"))
+    lines = [json.loads(s) for s in (tmp_path / "metrics.jsonl").read_text().splitlines()]
+    for r in lines:
+        near_only = sum(r[f"loss/k{k}"] for k in NEAR) + r["var/L1"]
+        if r["step"] <= 2:
+            assert r["loss/total"] == pytest.approx(near_only, rel=1e-5), r["step"]
+        else:
+            assert r["loss/total"] != pytest.approx(near_only, rel=1e-3), r["step"]
 
 
 def test_far_heads_do_not_move_before_their_stage_starts():
@@ -86,9 +103,11 @@ def test_run_with_far_stage_logs_every_term_every_step(tmp_path):
     assert [r["step"] for r in lines] == [1, 2, 3, 4]
     expected = (
         {f"loss/k{k}" for k in ALL}
+        | {f"relerr/k{k}" for k in ALL}
         | {f"sqerr/k{k}" for k in FAR}
         | {f"logvar/k{k}" for k in FAR}
-        | {"loss/var", "loss/total", "emb_std/L1", "emb_std/L2", "emb_std/L3", "step"}
+        | {"loss/var", "var/L1", "var/L2", "var/L3", "loss/total", "step"}
+        | {"emb_std/L1", "emb_std/L2", "emb_std/L3"}
     )
     for r in lines:
         assert set(r) == expected  # far terms are logged before their stage starts, too

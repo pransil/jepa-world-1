@@ -53,6 +53,7 @@ class UNetEncoder(nn.Module):
             )
         self.in_ch, self.input_size = in_ch, input_size
         self.names: list[str] = []
+        self.level_shape: dict[str, tuple[int, int]] = {}  # name -> (channels, size)
         self.stages = nn.ModuleList()
         c_prev, s_prev = in_ch, input_size
         for i, (name, ch, size) in enumerate(levels):
@@ -75,19 +76,28 @@ class UNetEncoder(nn.Module):
                 ConvBlock(ch, ch, groups=norm_groups),
             ]
             self.names.append(name)
+            self.level_shape[name] = (ch, size)
             self.stages.append(nn.Sequential(*layers))
             c_prev, s_prev = ch, size
 
-    def forward(self, x: torch.Tensor, upto: str | None = None) -> dict[str, torch.Tensor]:
-        if x.ndim != 4 or x.shape[1] != self.in_ch or x.shape[-2:] != (self.input_size,) * 2:
-            raise ValueError(
-                f"expected (B, {self.in_ch}, {self.input_size}, {self.input_size}), "
-                f"got {tuple(x.shape)}"
-            )
-        if upto is not None and upto not in self.names:
-            raise ValueError(f"upto={upto!r}: no such level (have {self.names})")
+    def forward(
+        self, x: torch.Tensor, upto: str | None = None, *, after: str | None = None
+    ) -> dict[str, torch.Tensor]:
+        """x is the input stack, or, with `after`, that level's output: the stages after it run
+        and only the new levels are returned (used to finish an encoding under no_grad)."""
+        for name in (upto, after):
+            if name is not None and name not in self.names:
+                raise ValueError(f"level {name!r}: no such level (have {self.names})")
+        if after is None:
+            c, s, first = self.in_ch, self.input_size, 0
+        else:
+            (c, s), first = self.level_shape[after], self.names.index(after) + 1
+            if upto is not None and self.names.index(upto) < first:
+                raise ValueError(f"upto={upto!r} comes before after={after!r}")
+        if x.ndim != 4 or x.shape[1] != c or x.shape[-2:] != (s, s):
+            raise ValueError(f"expected (B, {c}, {s}, {s}), got {tuple(x.shape)}")
         out: dict[str, torch.Tensor] = {}
-        for name, stage in zip(self.names, self.stages, strict=True):
+        for name, stage in zip(self.names[first:], self.stages[first:], strict=True):
             x = stage(x)
             out[name] = x
             if name == upto:

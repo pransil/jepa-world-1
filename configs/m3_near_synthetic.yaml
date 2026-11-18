@@ -1,0 +1,10 @@
+# M3: near heads only, on the synthetic moving-disc source. For smoke runs and the L1 head
+# benchmark. Not evidence about the real task (that needs data.source: episodes, from M2).
+base: base.yaml
+
+data:
+  source: synthetic
+
+train:
+  stages: [near]
+  steps: 300

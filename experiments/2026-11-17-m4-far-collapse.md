@@ -1,9 +1,21 @@
 # Does the far heads' Gaussian NLL collapse L2/L3, and which switch stops it?
 
-- **Date:** 2026-11-17   **Lane/branch:** worktree-wt-m4-far-heads   **Commit:** 2e7d888 (synthetic), c695143 (dev), clean
-- **Config:** synthetic: `configs/m4_far_synthetic.yaml`, `m4_collapse_layernorm.yaml`,
-  `m4_collapse_guardsum.yaml`, `m4_collapse_both.yaml`. Dev: `configs/m4_far_dev.yaml` with
-  `--set` overrides (commands below)
+- **Date:** 2026-11-17   **Lane/branch:** worktree-wt-m4-far-heads
+- **Commit:** the runs' meta.json record 2e7d888 (synthetic, clean) and c695143 (dev; run 1
+  clean, runs 2–4 dirty: see the dev table). Those commits were later rebased onto main, so they
+  are on no branch. The same M4 code is at:
+  - **a8e7eff** for the synthetic runs. `git diff 2e7d888 a8e7eff` touches only M2's loader in
+    `train.py` (the synthetic path became `_synthetic_batches`) and a `synthetic.py` docstring.
+  - **c257c54** for the dev runs. `git diff c695143 c257c54 -- jepa_world` adds only M5's
+    unused `goal.py` / `pixel.py`.
+- **Config:** every variant pins all three loss switches (`target_norm`, `var_reduce`,
+  `w_var`), so it reproduces regardless of base.yaml's defaults:
+  - synthetic: `configs/m4_collapse_{baseline,layernorm,guardsum,both}.yaml`;
+  - dev: `configs/m4_far_dev.yaml` (pins the baseline), plus the `--set` commands below.
+  - At run time, the baseline used `m4_far_synthetic.yaml` / `m4_far_dev.yaml` with the
+    then-default guard (mean, w_var 1), which is what `m4_collapse_baseline.yaml` pins now.
+  - Each run dir's `config.yaml` is the full resolved config, and
+    `train --config <run>/config.yaml` re-runs it exactly.
 - **Run dirs:** listed in each results table. All MPS, seed 0, B = 32, under the GPU lock.
 
 ## Hypothesis
@@ -41,13 +53,16 @@ All values were finite in every run.
 
 ## Results: real episodes, M2 dev split (600 steps, far joins after step 200) — dev, debugging only
 
-Commands (config `configs/m4_far_dev.yaml`, commit c695143):
+Commands. Every variant pins all three switches; `m4_far_dev.yaml` itself pins the baseline:
 ```
-uv run python -m jepa_world.train --config configs/m4_far_dev.yaml --name dev-baseline
-  ... --set loss.target_norm=layernorm --name dev-layernorm
-  ... --set loss.var_reduce=sum --set loss.w_var=25.0 --name dev-guardsum
-  ... --set loss.target_norm=layernorm --set loss.var_reduce=sum --set loss.w_var=25.0 --name dev-both
+T="uv run python -m jepa_world.train --config configs/m4_far_dev.yaml"
+$T --name dev-baseline
+$T --set loss.target_norm=layernorm --set loss.var_reduce=mean --set loss.w_var=1.0 --name dev-layernorm
+$T --set loss.target_norm=none --set loss.var_reduce=sum --set loss.w_var=25.0 --name dev-guardsum
+$T --set loss.target_norm=layernorm --set loss.var_reduce=sum --set loss.w_var=25.0 --name dev-both
 ```
+At run time the baseline and layernorm rows set only the switches they changed, because base.yaml
+then defaulted to mean and w_var 1. Their run dirs' `config.yaml` show exactly those values.
 Runs 2–4 record `dirty: true`, because a YAML comment in base.yaml and some docs were edited
 while they ran. `git diff c695143 -- '*.py'` is empty, so the code is identical.
 

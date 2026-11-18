@@ -1,11 +1,18 @@
 # M4 far-collapse comparison on REAL episodes (M2's dev split: debugging only, SPEC §3.5).
-# Near-only for 200 steps, then far joins. Variants pass the switches with --set
-# (see experiments/2026-11-17-m4-far-collapse.md for the exact commands).
+# Near-only for 200 steps, then far joins. The loss block pins the comparison's BASELINE (the
+# guard before the M4 decision); variants override it with --set, all three keys each time.
+# The shipped default is variant (b): docs/decisions/2026-11-17-far-collapse-guard-sum.md.
+# Commands: experiments/2026-11-17-m4-far-collapse.md
 base: base.yaml
 
 data:
   source: episodes
   split: dev
+
+loss:
+  target_norm: none
+  var_reduce: mean
+  w_var: 1.0
 
 train:
   stages: [near, far]

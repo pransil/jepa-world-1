@@ -507,6 +507,12 @@ def test_relative_error_is_one_for_the_batch_mean_and_zero_for_the_target():
     torch.testing.assert_close(relative_error(5 * pred, 5 * target), relative_error(pred, target))
 
 
+def test_relative_error_is_undefined_for_a_single_sample():
+    # One sample has no batch variance: NaN, not a 1e11 that passes every isfinite check.
+    t = torch.rand(1, 3, 2, 2)
+    assert torch.isnan(relative_error(torch.rand(1, 3, 2, 2), t))
+
+
 def test_relerr_is_logged_for_every_horizon():
     model, losses = _far_losses()
     out = model(random_frames(tiny_far_cfg()))
@@ -529,19 +535,43 @@ def test_layernorm_targets_have_zero_mean_unit_variance_over_channels():
         normalize_target(t, "batchnorm")
 
 
-def test_target_norm_switch_scores_heads_against_normalized_targets():
+def test_target_norm_switch_normalizes_the_targets_the_model_returns():
+    # forward()["target"] is exactly what the heads are scored against, so any consumer (an M6
+    # eval, a probe) compares prediction and target in the same space.
     cfg = tiny_far_cfg("loss.target_norm=layernorm")
-    model = _far_model()
+    torch.manual_seed(0)
+    model = JEPA(cfg, ALL)
     frames = random_frames(cfg)
     losses = compute_losses(model, frames, cfg["loss"])
     out = model(frames)
+    raw = JEPA(tiny_far_cfg(), ALL)
+    raw.load_state_dict(model.state_dict())
+    raw_targets = raw(frames)["target"]
+    for k in ALL:
+        torch.testing.assert_close(out["target"][k], normalize_target(raw_targets[k], "layernorm"))
     for k in NEAR:
-        tgt = normalize_target(out["target"][k], "layernorm")
-        torch.testing.assert_close(losses[f"loss/k{k}"], latent_loss(out["pred"][k], tgt))
+        torch.testing.assert_close(
+            losses[f"loss/k{k}"], latent_loss(out["pred"][k], out["target"][k])
+        )
     for k in FAR:
-        tgt = normalize_target(out["target"][k], "layernorm")
-        nll = gaussian_nll(out["pred"][k], out["logvar"][k], tgt)
+        nll = gaussian_nll(out["pred"][k], out["logvar"][k], out["target"][k])
         torch.testing.assert_close(losses[f"loss/k{k}"], nll)
+    for k in ALL:
+        torch.testing.assert_close(
+            losses[f"relerr/k{k}"], relative_error(out["pred"][k], out["target"][k])
+        )
+
+
+def test_loss_config_must_match_the_models_target_norm():
+    model = _far_model()  # built with target_norm: none
+    cfg = tiny_far_cfg("loss.target_norm=layernorm")
+    with pytest.raises(ValueError, match="target_norm"):
+        compute_losses(model, random_frames(cfg), cfg["loss"])
+
+
+def test_unknown_target_norm_fails_at_build_time():
+    with pytest.raises(ValueError, match="target_norm"):
+        JEPA(tiny_far_cfg("loss.target_norm=batchnorm"), ALL)
 
 
 def test_var_reduce_sum_sums_over_channels_and_averages_over_positions():
@@ -552,12 +582,13 @@ def test_var_reduce_sum_sums_over_channels_and_averages_over_positions():
         variance_guard(z, 1.0, 1e-4, reduce="max")
 
 
-def test_var_reduce_switch_reaches_the_loss():
-    cfg = tiny_far_cfg("loss.var_reduce=sum")
+@pytest.mark.parametrize("reduce", ["mean", "sum"])  # both, so neither can be hard-coded
+def test_var_reduce_switch_reaches_the_loss(reduce):
+    cfg = tiny_far_cfg(f"loss.var_reduce={reduce}")
     model = _far_model()
     frames = random_frames(cfg)
     losses = compute_losses(model, frames, cfg["loss"])
     out = model(frames)
     for lv in ("L1", "L2", "L3"):
-        expected = variance_guard(out["context"][lv], 1.0, 1e-4, reduce="sum")
+        expected = variance_guard(out["context"][lv], 1.0, 1e-4, reduce=reduce)
         torch.testing.assert_close(losses[f"var/{lv}"], expected)

@@ -49,14 +49,33 @@ def _check_same_shape(**tensors: torch.Tensor) -> None:
         raise ValueError(f"shape mismatch: {shapes}")
 
 
-def latent_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """mean over (batch, positions) of ||pred - sg(target)||^2 over channels (SPEC §5.1)."""
+# The one place each loss is defined. latent_loss / gaussian_nll (public) and compute_losses
+# (training) both go through these, so the two can never drift apart.
+
+
+def _err2(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     _check_same_shape(pred=pred, target=target)
-    return (pred - target.detach()).square().sum(dim=1).mean()
+    return (target.detach() - pred).square()
+
+
+def _sq_from_err2(err2: torch.Tensor) -> torch.Tensor:
+    return err2.sum(dim=1).mean()
 
 
 def _nll_from_err2(err2: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     return (0.5 * (err2 * torch.exp(-logvar) + logvar + LOG_2PI)).sum(dim=1).mean()
+
+
+def _relerr_from_sq(sq: torch.Tensor, target: torch.Tensor, eps: float) -> torch.Tensor:
+    if target.shape[0] < 2:  # a batch variance needs two samples
+        return torch.full_like(sq, float("nan"))
+    spread = batch_var(target.detach()).sum(dim=0).mean()  # = latent_loss(batch mean, target)
+    return sq.detach() / spread.clamp_min(eps)
+
+
+def latent_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """mean over (batch, positions) of ||pred - sg(target)||^2 over channels (SPEC §5.1)."""
+    return _sq_from_err2(_err2(pred, target))
 
 
 def gaussian_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -66,19 +85,16 @@ def gaussian_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor)
         mean_{b,h,w} sum_c 0.5 * [(t - mu)^2 * exp(-logvar) + logvar + log(2 pi)]
 
     The log(2 pi) term makes it a true NLL. With logvar = 0 it is 0.5 * latent_loss + const."""
-    _check_same_shape(mean=mean, logvar=logvar, target=target)
-    return _nll_from_err2((target.detach() - mean).square(), logvar)
+    _check_same_shape(mean=mean, logvar=logvar)
+    return _nll_from_err2(_err2(mean, target), logvar)
 
 
 def relative_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     """Scale-free error: latent_loss(pred, target) / latent_loss(batch mean of target, target).
     1.0 = no better than predicting the batch-mean target; 0 = exact. Shrinking the embeddings
     cannot lower it, so it shows real prediction quality when the raw losses are collapsing.
-    Detached: a diagnostic only."""
-    _check_same_shape(pred=pred, target=target)
-    pred, target = pred.detach(), target.detach()
-    spread = batch_var(target).sum(dim=0).mean()  # = latent_loss(batch mean, target)
-    return latent_loss(pred, target) / spread.clamp_min(eps)
+    NaN when the batch has one sample (no batch variance). Detached: a diagnostic only."""
+    return _relerr_from_sq(latent_loss(pred.detach(), target), target, eps)
 
 
 def normalize_target(target: torch.Tensor, mode: str) -> torch.Tensor:
@@ -123,7 +139,7 @@ class JEPA(nn.Module):
         "context": {level: (B, ch, s, s)}   levels up to the deepest one a head reads,
         "pred":    {k: (B, ch, s, s)}       the mean, for every horizon,
         "logvar":  {k: (B, ch, s, s)}       far horizons only, bounded (GaussianHead),
-        "target":  {k: (B, ch, s, s)}       detached, from the target encoder,
+        "target":  {k: (B, ch, s, s)}       detached, from the target encoder, after loss.target_norm,
     }
     """
 
@@ -134,6 +150,10 @@ class JEPA(nn.Module):
         self.horizons = sorted(horizons)
         self.far_horizons = sorted(set(self.horizons) & set(m["far_horizons"]))
         self.head_level = {k: m["head_level"][k] for k in self.horizons}
+        # What the heads are scored against IS part of the target, so it is applied here (in
+        # encode_targets), not in the loss: forward()["target"] is exactly what heads predict.
+        self.target_norm = cfg["loss"]["target_norm"]
+        normalize_target(torch.zeros(1, 2, 1, 1), self.target_norm)  # fail at build time if unknown
         self.context_encoder = encoder_from_cfg(cfg)
         if list(self.context_encoder.buffers()):
             raise RuntimeError("encoder has buffers; ema_update covers parameters only")
@@ -223,7 +243,7 @@ class JEPA(nn.Module):
     def encode_targets(self, frames: torch.Tensor) -> dict[int, torch.Tensor]:
         """One target-encoder call per level: the stacks of every head reading that level go in
         one batch, encoded only `upto` that level, so near stacks never pay for L2/L3. GroupNorm is
-        per sample, so the grouping cannot change any result."""
+        per sample, so the grouping cannot change any result. loss.target_norm is applied here."""
         b = frames.shape[0]
         targets: dict[int, torch.Tensor] = {}
         for level in self.level_names:
@@ -231,7 +251,7 @@ class JEPA(nn.Module):
             if not ks:
                 continue
             stacks = torch.cat([target_stack(frames, self.context_frames, k) for k in ks])
-            z = self.target_encoder(stacks, upto=level)[level]
+            z = normalize_target(self.target_encoder(stacks, upto=level)[level], self.target_norm)
             for i, k in enumerate(ks):
                 targets[k] = z[i * b : (i + 1) * b].detach()
         return targets
@@ -272,24 +292,27 @@ def compute_losses(
             f"loss.latent_distance={loss_cfg['latent_distance']!r}: only 'mse' (squared L2) "
             "is implemented (docs/decisions/2026-11-17-latent-distance-sq-l2.md)"
         )
+    if loss_cfg["target_norm"] != model.target_norm:
+        raise ValueError(
+            f"loss.target_norm={loss_cfg['target_norm']!r} but the model was built with "
+            f"{model.target_norm!r}: the targets are normalized inside the model"
+        )
     active = model.check_active(active)
     out = model(frames, action, active=active)
     losses: dict[str, torch.Tensor] = {}
     total = frames.new_zeros(())
     for k in model.horizons:
-        pred = out["pred"][k]
-        target = normalize_target(out["target"][k], loss_cfg["target_norm"])
-        _check_same_shape(pred=pred, target=target)
-        err2 = (target - pred).square()  # target is already detached (encode_targets)
-        sqerr = err2.sum(dim=1).mean()
+        pred, target = out["pred"][k], out["target"][k]  # target: detached, already normalized
+        err2 = _err2(pred, target)  # computed once, shared by the loss and the diagnostics
+        sqerr = _sq_from_err2(err2)  # = latent_loss(pred, target)
         if k in model.far_horizons:
-            lk = _nll_from_err2(err2, out["logvar"][k])
+            lk = _nll_from_err2(err2, out["logvar"][k])  # = gaussian_nll(pred, logvar, target)
             losses[f"sqerr/k{k}"] = sqerr.detach()
             losses[f"logvar/k{k}"] = out["logvar"][k].detach().mean()
         else:
-            lk = sqerr  # = latent_loss(pred, target)
+            lk = sqerr
         losses[f"loss/k{k}"] = lk
-        losses[f"relerr/k{k}"] = relative_error(pred, target)
+        losses[f"relerr/k{k}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
             total = total + loss_cfg["w_k"] * lk
     active_levels = {model.head_level[k] for k in active}

@@ -92,3 +92,6 @@ def test_continuing_after_a_level_matches_one_full_pass():
         enc(x, after="L1")  # x is the input stack, not L1's output
     with pytest.raises(ValueError, match="before"):
         enc(full["L2"], upto="L1", after="L2")
+    assert enc(full["L3"], upto="L3", after="L3") == {}  # nothing left to compute
+    assert enc(full["L1"], upto="L1", after="L1") == {}  # ...also mid-encoder (L2/L3 not run)
+    assert enc(full["L3"], after="L3") == {}

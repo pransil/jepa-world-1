@@ -84,7 +84,8 @@ class UNetEncoder(nn.Module):
         self, x: torch.Tensor, upto: str | None = None, *, after: str | None = None
     ) -> dict[str, torch.Tensor]:
         """x is the input stack, or, with `after`, that level's output: the stages after it run
-        and only the new levels are returned (used to finish an encoding under no_grad)."""
+        and only the new levels are returned (used to finish an encoding under no_grad).
+        upto == after means nothing is left to compute, and returns {}."""
         for name in (upto, after):
             if name is not None and name not in self.names:
                 raise ValueError(f"level {name!r}: no such level (have {self.names})")
@@ -92,10 +93,12 @@ class UNetEncoder(nn.Module):
             c, s, first = self.in_ch, self.input_size, 0
         else:
             (c, s), first = self.level_shape[after], self.names.index(after) + 1
-            if upto is not None and self.names.index(upto) < first:
+            if upto is not None and self.names.index(upto) < first - 1:
                 raise ValueError(f"upto={upto!r} comes before after={after!r}")
         if x.ndim != 4 or x.shape[1] != c or x.shape[-2:] != (s, s):
             raise ValueError(f"expected (B, {c}, {s}, {s}), got {tuple(x.shape)}")
+        if after is not None and upto == after:
+            return {}
         out: dict[str, torch.Tensor] = {}
         for name, stage in zip(self.names[first:], self.stages[first:], strict=True):
             x = stage(x)

@@ -41,6 +41,11 @@ matters, because SPEC §7.2 calibrates those variances.
   marked [OPEN]. The switches remain for ablations (M7).
 - The guard now dominates `loss/total` early on: var/L3 starts around 150 at w_var 25. Read the
   per-term logs, not the total.
+- **Every config that inherits base.yaml changes behaviour**, including M3's
+  `m3_near_synthetic.yaml`: its near-only runs now carry the summed ×25 guard on L1. Runs from
+  before this decision reproduce exactly from their own run dir (`train --config
+  <run>/config.yaml`; the resolved config records `var_reduce: mean, w_var: 1.0`). The
+  comparison configs (`m4_collapse_*.yaml`, `m4_far_dev.yaml`) pin all three switches.
 - **Open:** k = 20 under (b) was still near relerr 1.0 after 600 steps. A longer run on the
   train split, with several seeds, should check that the far heads learn under the stronger
   guard before M5's goal head relies on pooled L3. Revisit if k = 20 stays at relerr ≥ 0.9.

@@ -1,5 +1,5 @@
-# M4 far-collapse comparison, variants (a) + (b) together. Synthetic only.
-# experiments/2026-11-17-m4-far-collapse.md
+# M4 far-collapse comparison, variants (a) + (b) together. All three loss switches pinned.
+# Synthetic only. experiments/2026-11-17-m4-far-collapse.md
 base: m4_far_synthetic.yaml
 
 loss:

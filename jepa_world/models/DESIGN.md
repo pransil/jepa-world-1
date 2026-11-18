@@ -74,11 +74,18 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
 - **Diagnostics, all detached, logged every step:**
   - `relerr/k`, for every horizon: the error relative to predicting the batch-mean target. It is
     scale-free, so shrinking the embeddings cannot improve it: 1.0 = no better than the mean.
+    NaN for a one-sample batch (no batch variance). It reuses the loss's squared error.
   - `sqerr/k` and `logvar/k` for far heads: the mean's squared L2, and the mean predicted
     log-variance. NLL can fall just by tightening the variance; these show whether the
     prediction improved.
   - `var/<L>`: each level's guard value.
   - `emb_std/<L>`: the context embeddings' batch std.
+- **`loss.target_norm` is applied inside the model** (`encode_targets`), not in the loss, so
+  `forward()["target"]` is exactly what the heads are scored against. M6 evals and probes see
+  the same space. `compute_losses` refuses a loss config whose `target_norm` differs from the
+  model's.
+- **Each loss is defined once:** `_err2`, `_sq_from_err2` and `_nll_from_err2` serve both the
+  public `latent_loss` / `gaussian_nll` and `compute_losses`, so the two cannot drift apart.
 - **Variance guard: summed over active levels**, each level weighted `w_var`. Averaging lost: the
   L1 guard's weight would drop 3× the moment far starts.
 - **Stage schedule within a run** (SPEC §5.5): `train.stage_start.<s>` is the number of steps

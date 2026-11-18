@@ -78,7 +78,9 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
 - **Ground truth is opt-in** (`batches(..., with_gt=True)`). The default still yields the bare
   frames tensor, so `train.run` and its callers are unchanged. The alternative, always yielding
   a dict, lost because it would have changed every consumer at once, including M4's lane. Both
-  modes draw the same windows from the same seed. GT positions are cast to float32 because MPS
+  modes draw the same windows from the same seed. **GT after index C−1 is the future.** It is
+  for labels (targets at t+k) and evaluation only, never model input, just as hidden ball
+  parameters never reach the model. GT positions are cast to float32 because MPS
   has no float64. At |x| ≤ 20 m that rounds a position by under 2e-6 m, and
   `test_m5_and_m6_consumers_accept_gt_batches` holds displacements to 1e-5 m.
 - **Sampling is uniform over (episode, valid t) windows**, with replacement, from a numpy

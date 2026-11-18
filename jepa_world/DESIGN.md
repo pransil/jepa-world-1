@@ -88,7 +88,7 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
   covers offsets −W..−1, and after covers 0..W−1. `delta` is the mean over events of each event's
   own after − before, so episodes with different baseline uncertainty don't bias it. A blackout
   shorter than W puts the reappearance inside "after", and this is documented rather than
-  filtered. No events (`occluded` until M7) gives `n_events: 0` and None everywhere, without
+  filtered. No events (`occluded` on base datasets, which have no obstacles) gives `n_events: 0` and None everywhere, without
   numpy warnings.
 - **Hidden versus visible windows (`by_visibility`, `visibility`)**, for M7's camera and
   obstacle ablations (docs/milestones/M7-plan.md):
@@ -127,29 +127,44 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 
 - **The simulator baseline's ball parameters are an argument.** The three choices are `true`
   (the episode's own, an oracle), `mean` (`sim.ball.mean_ball`, each range's midpoint) and
-  `true_radius` (the visible radius with mean friction and restitution). It reports `true` and
-  `mean` by default. Which one is the headline bar is the user's call, and the
-  [proposed decision](../docs/decisions/2026-11-17-simulator-baseline-params.md) recommends `mean`.
-- **A different radius at the true state** (`match_clearance`). The true centre with a larger
-  radius starts inside the terrain at 56% of contact frames, by up to 8.8 cm. The true ball
-  itself penetrates up to 1.8 cm during impacts, so lifting every penetrating start would break
-  the `true` oracle. The state is instead mapped to the other ball:
-  - the centre moves vertically so that `Terrain.gap` equals the true ball's gap at t (bisection
-    over dz; dz = 0 exactly for the true radius);
+  `true_radius` (the visible radius with mean friction and restitution). It is opt-in:
+  `eval --baselines` stays M2's quick closed-form report unless `--sim-params` is given. Which
+  one is the headline bar is the user's call. The
+  [proposed decision](../docs/decisions/2026-11-17-simulator-baseline-params.md) recommends
+  reporting `true` and `mean` (`PROPOSED_SIM_PARAMS`), with `mean` as the bar.
+- **A different radius at the true state** (`match_clearance`). On the test split (run
+  `20261118T065246Z-…-baselines-test-590f46`, `baselines.json` → `simulator`):
+  - the true ball itself starts inside the terrain at 2648 of 7400 windows, down to −3.4 cm, in
+    impacts;
+  - the mean-radius ball at the true centre would start inside at 2095, down to −10.7 cm.
+
+  So "lift any penetrating start" would break the `true` oracle, and using the state as given
+  launches the bigger ball. Instead the state is mapped to the other ball:
+  - the centre moves along the outward surface normal until `Terrain.gap` equals the true ball's
+    gap at t, by stepping p ← p + (target − gap(p))·n(p). On smooth terrain one step gives Δr·n,
+    beside a face the step is horizontal, and in a floor-and-riser corner the second step clears
+    the other face;
   - spin is scaled by r_true / r, so the surface speed, and with it rolling or slipping, is
     unchanged;
-  - predictions are the rollout minus dz, so the radius offset isn't counted as error.
+  - predictions are the rollout minus the shift, so the radius offset isn't counted as error.
 
-  Two alternatives lost:
-  - using the state as given launches a penetrating ball off the surface;
-  - lifting only penetrating starts treats a smaller radius (dropped onto the surface)
-    differently from a larger one (lifted).
+  All three are exact no-ops for the true radius. The first version shifted only vertically,
+  with a fallback of Δr when nothing matched within 8·|Δr|. That lost:
+  - 307 of 7400 windows found no match (run `20261118T064214Z-…-9fa587`);
+  - those were balls against ledge faces, which the fallback launched;
+  - they carried about half of `simulator_mean`'s error, 0.253 m mean at k = 20, against
+    0.137 m with the normal shift.
 
-  If no vertical shift matches the gap within 8·|Δr|, which can happen against a near-vertical
-  ledge face, dz falls back to Δr and the window is counted in `unmatched`.
+  Now |shift| is at most 0.16 m. The 54 windows flagged `unmatched` (tolerance 1e-9 m) all end
+  within 4.4e-8 m (`clearance_miss_m`).
 - **One rollout per window serves every horizon.** Each rollout has k_max + 1 frames, and windows
   are scored on `evaluate`'s window set. Its `extra` argument scores precomputed predictions with
   the same stats, ratio and out-of-view split as the closed-form baselines.
+- **Each rollout uses its episode's own stored `meta["sim_cfg"]`**, not the eval config. Physics,
+  and on M7's obstacle datasets the posts, then match the episode.
+- **No GPU lock.** It is MuJoCo on the CPU with `render=False`, so no MPS and no GL, and
+  `gpu_lock` is for MPS jobs. Each params option took 46–58 s on the 7400 test windows in the
+  run above, and 443–655 s at load average ~265 (run `…-9fa587`).
 
 ## Seams
 

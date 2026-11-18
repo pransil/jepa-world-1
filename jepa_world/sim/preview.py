@@ -24,7 +24,7 @@ from jepa_world.utils.config import load_config
 from jepa_world.utils.paths import new_run_dir
 from jepa_world.utils.repro import run_metadata
 
-_RED, _YELLOW = (255, 40, 40), (255, 220, 0)
+_RED, _YELLOW, _BLUE = (255, 40, 40), (255, 220, 0), (60, 120, 255)
 
 
 def _runs(flags: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -34,28 +34,32 @@ def _runs(flags: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return starts, ends - starts
 
 
+def _run_stats(lengths: list[int]) -> dict | None:
+    if not lengths:
+        return None
+    return {
+        "median": float(np.median(lengths)),
+        "p90": float(np.percentile(lengths, 90)),
+        "max": int(max(lengths)),
+    }
+
+
 def episode_stats(episodes: list[Episode]) -> dict:
-    """Event rates and ranges over a sample of episodes. Every number the M1 summary cites."""
+    """Event rates and ranges over a sample of episodes. Every number the M1 summary cites, plus
+    the occlusion rates M7 tunes the posts with."""
     n = len(episodes)
     oov = [ep.out_of_view for ep in episodes]
-    lengths, below, above = [], 0, 0
+    occ = [ep.occluded for ep in episodes]
+    lengths, occ_lengths, below, above = [], [], 0, 0
     for ep in episodes:
         starts, runs = _runs(ep.out_of_view)
         lengths += runs.tolist()
+        occ_lengths += _runs(ep.occluded)[1].tolist()
         for s in starts:
             if ep.ball_pos[s, 1] < ep.cam_pos[s, 1]:
                 below += 1
             else:
                 above += 1
-    run_stats = (
-        {
-            "median": float(np.median(lengths)),
-            "p90": float(np.percentile(lengths, 90)),
-            "max": int(max(lengths)),
-        }
-        if lengths
-        else None
-    )
     return {
         "episodes": n,
         "contact_rate": float(np.mean([ep.contact.mean() for ep in episodes])),
@@ -65,7 +69,10 @@ def episode_stats(episodes: list[Episode]) -> dict:
         "out_of_view_rate": float(np.mean([o.mean() for o in oov])),
         "episodes_with_out_of_view": int(sum(bool(o.any()) for o in oov)),
         "out_of_view_exits": {"below": below, "above": above},
-        "out_of_view_run_frames": run_stats,
+        "out_of_view_run_frames": _run_stats(lengths),
+        "occluded_rate": float(np.mean([o.mean() for o in occ])),
+        "episodes_with_occlusion": int(sum(bool(o.any()) for o in occ)),
+        "occluded_run_frames": _run_stats(occ_lengths),
         "max_speed_p90": float(
             np.percentile([np.linalg.norm(ep.ball_vel, axis=1).max() for ep in episodes], 90)
         ),
@@ -94,6 +101,7 @@ def _tints(ep: Episode) -> np.ndarray:
     tint = np.full((len(ep.t), 3), 64, np.uint8)
     tint[ep.bounce] = _YELLOW
     tint[ep.out_of_view] = _RED
+    tint[ep.occluded] = _BLUE
     return tint
 
 
@@ -122,8 +130,11 @@ def main(argv: list[str] | None = None) -> Path:
     physics = [simulate_episode(sim_cfg, ts, 0, render=False) for ts in range(args.stats_episodes)]
     sim_ms = (time.perf_counter() - t0) * 1000 / args.stats_episodes
 
-    # Show the episodes with out-of-view frames first, then fill up with the rest.
-    order = sorted(range(args.stats_episodes), key=lambda i: not physics[i].out_of_view.any())
+    # Show the episodes with hidden-ball frames (out of view or occluded) first, then the rest.
+    order = sorted(
+        range(args.stats_episodes),
+        key=lambda i: not (physics[i].out_of_view.any() or physics[i].occluded.any()),
+    )
     rendered_ms, size_kb = [], None
     for ts in order[: args.episodes]:
         t0 = time.perf_counter()

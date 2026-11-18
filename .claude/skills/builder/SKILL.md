@@ -143,8 +143,11 @@ or merge a PR with failing tests.
 - **Milestone finished?** `docs/milestones/M<n>.md` (template in that dir's README) goes in
   the PR **before** merging: what was built, which tests prove it, measured numbers (e.g. the L1
   head benchmark), and open issues.
-- After the merge: `ExitWorktree` and choose remove. If it reports uncommitted changes, stop and
-  tell the user. Never force-remove a dirty tree. Then run `git fetch --prune` from the main clone.
+- After the merge, fast-forward the main clone first, with `git -C <main clone> pull --ff-only`.
+  ExitWorktree refuses to remove a tree whose commits aren't on the main clone's `main` yet.
+- Then `ExitWorktree` with `action: "remove"`. If it still lists uncommitted files or unmerged
+  commits, stop and tell the user. Never pass `discard_changes: true` without their say-so.
+- Finally run `git -C <main clone> fetch --prune`.
 
 ## Output
 

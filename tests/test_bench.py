@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 
 import torch
-from tiny import tiny_cfg
+from tiny import tiny_cfg, tiny_far_cfg
 
 from jepa_world import bench
 
@@ -30,6 +30,15 @@ def test_bench_works_for_any_data_source():
         tiny_cfg("data.source=episodes"), torch.device("cpu"), [(4, 1)], iters=1, warmup=0
     )
     assert len(result["rows"]) == 1
+
+
+def test_bench_with_far_stage_times_the_l1_heads_and_the_full_step():
+    near = bench.bench_heads(tiny_cfg(), torch.device("cpu"), [(4, 3)], iters=1, warmup=0)
+    far = bench.bench_heads(tiny_far_cfg(), torch.device("cpu"), [(4, 3)], iters=1, warmup=0)
+    (rn,), (rf,) = near["rows"], far["rows"]
+    assert rf["head_params"] == rn["head_params"]  # the variant under test: the L1 heads only
+    assert rn["far_head_params"] == 0 < rf["far_head_params"]
+    assert rf["total_trainable_params"] > rn["total_trainable_params"]
 
 
 def test_fallback_recorder_catches_the_mps_fallback_warning():

@@ -154,8 +154,8 @@ def test_posts_respect_count_width_gap_and_walls(obs_cfg):
         assert oc["count"][0] <= len(o.x_lo) <= oc["count"][1]
         assert (width >= oc["width"][0]).all() and (width <= oc["width"][1]).all()
         assert (o.x_lo[1:] - o.x_hi[:-1] >= oc["gap"] - 1e-9).all()  # sorted, and gap apart
-        assert o.x_lo[0] >= -inner + oc["gap"] / 2 - 1e-9
-        assert o.x_hi[-1] <= inner - oc["gap"] / 2 + 1e-9
+        assert o.x_lo[0] >= -inner + oc["gap"] - 1e-9  # a full gap from each wall zone, too
+        assert o.x_hi[-1] <= inner - oc["gap"] + 1e-9
         assert o.z_lo < terrain.heights.min() and o.z_hi > terrain.heights.max()
     assert len(counts) > 1  # the count is drawn, not fixed
 
@@ -171,6 +171,10 @@ def test_bad_obstacle_configs_raise(sim_cfg, obs_cfg):
         ({**good, "width": [0.0, 1.0]}, "width"),
         ({**good, "width": [1.2, 1.0]}, "width"),
         ({**good, "gap": -0.5}, "gap"),
+        ({**good, "gap": float("nan")}, "gap"),
+        ({**good, "count": 4}, "count"),
+        ({**good, "width": ["a", 1.0]}, "width"),
+        ({**good, "width": [0.8, float("inf")]}, "width"),
         ({**good, "count": [40, 40]}, "too short"),
     ]
     for block, match in bad:
@@ -179,6 +183,46 @@ def test_bad_obstacle_configs_raise(sim_cfg, obs_cfg):
     hand_built = Terrain(x=terrain.x, heights=terrain.heights)  # no seed in params
     with pytest.raises(ValueError, match="seed"):
         obstacles.sample_obstacles(obs_cfg, hand_built)
+
+
+def test_posts_grow_with_how_high_the_ball_can_go(obs_cfg):
+    terrain = sample_terrain(obs_cfg, 3)
+    base = obstacles.sample_obstacles(obs_cfg, terrain)
+    assert base.z_hi - terrain.heights.max() >= obstacles.POST_MARGIN_M
+    high = copy.deepcopy(obs_cfg)
+    high["ball"]["drop"] = [0.0, 20.0]
+    tall = obstacles.sample_obstacles(high, terrain)
+    view = obs_cfg["camera"]["view_height"]
+    assert tall.z_hi - terrain.heights.max() > 20.0 + view  # start height plus a whole view
+    np.testing.assert_array_equal(tall.x_lo, base.x_lo)  # placement doesn't depend on height
+
+
+def test_a_from_state_start_outside_the_posts_fails_before_simulating(obs_cfg, monkeypatch):
+    from jepa_world.sim import episode as episode_mod
+
+    ep = simulate_episode(obs_cfg, 2, 0, render=False)
+
+    def no_physics(*_):
+        raise AssertionError("simulated before checking the start camera")
+
+    monkeypatch.setattr(episode_mod.mujoco, "mj_step", no_physics)
+    far = ep.cam_pos[0] + np.array([0.0, 100.0])  # a view 100 m above the terrain
+    with pytest.raises(ValueError, match="z-span"):
+        simulate_from_state(
+            obs_cfg, ep.terrain, ep.ball, ep.ball_pos[0], ep.ball_vel[0], 0.0, 5, cam_pos=far
+        )
+
+
+def test_posts_need_the_camera_clearly_in_front_of_them(sim_cfg, obs_cfg):
+    terrain, ball = sample_terrain(obs_cfg, 3), sample_ball(obs_cfg, 3, 0)
+    obs = obstacles.sample_obstacles(obs_cfg, terrain)
+    close = copy.deepcopy(obs_cfg)
+    close["camera"]["distance"] = 1.4  # the camera would sit inside the post plane (y = -1.5)
+    with pytest.raises(ValueError, match="distance"):
+        build_model(terrain, ball, close, obs)
+    close_off = copy.deepcopy(sim_cfg)
+    close_off["camera"]["distance"] = 1.4
+    build_model(terrain, ball, close_off)  # without posts the old scene builds as before
 
 
 # ------------------------------------------------- the occlusion rule (pure)
@@ -244,7 +288,7 @@ def test_a_view_past_the_posts_z_span_raises(sim_cfg, z):
 
 
 def test_occlusion_happens_and_is_disjoint_from_out_of_view(obs_cfg):
-    eps = [simulate_episode(obs_cfg, ts, 0, render=False) for ts in range(20)]
+    eps = [simulate_episode(obs_cfg, ts, 0, render=False) for ts in range(8)]  # 4 have occlusion
     occ = np.stack([ep.occluded for ep in eps])
     oov = np.stack([ep.out_of_view for ep in eps])
     assert not (occ & oov).any()

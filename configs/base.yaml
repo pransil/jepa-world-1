@@ -55,7 +55,7 @@ sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
   #   width: [0.8, 1.6]       # metres along x
   #   gap: 1.0                # metres: min clear space between posts, and from the wall zones
 
-data:                        # SPEC §3.5, split by terrain seed, never by frame. Design: jepa_world/data/DESIGN.md
+data:                         # SPEC §3.5, split by terrain seed, never by frame. Design: jepa_world/data/DESIGN.md
   source: episodes            # episodes (the M2 loader) | synthetic (moving disc; smoke runs and benchmarks only)
   split: train                # the split train.py reads (dev: debugging only, SPEC §3.5)
   format_version: 1           # bump if the dataset layout (files, manifest) changes

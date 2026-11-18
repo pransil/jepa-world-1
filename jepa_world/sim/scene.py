@@ -28,6 +28,7 @@ HFIELD_HALF_DEPTH = 1.0  # y half-extent of the terrain slab; the ball runs at y
 POST_RGBA = "0.3 0.4 0.85 1"
 POST_Y = -(HFIELD_HALF_DEPTH + 0.5)  # between the camera (y = -distance) and the slab's front face
 POST_HALF_DEPTH = 0.05
+POST_CLEARANCE_M = 1.0  # camera to post front face, at least: clear of MuJoCo's near clip plane
 
 
 def _vec(v) -> str:
@@ -58,6 +59,12 @@ def build_model(
         np.diff(terrain.x), 2 * half / (len(terrain.x) - 1)
     ):
         raise ValueError("terrain columns must be uniform and centred on x = 0 (hfield layout)")
+    distance = float(sim_cfg["camera"]["distance"])
+    if obstacles is not None and distance < POST_CLEARANCE_M - POST_Y + POST_HALF_DEPTH:
+        raise ValueError(
+            f"camera.distance {distance} m puts the camera within {POST_CLEARANCE_M} m of the posts "
+            f"(y = {POST_Y}): they would be clipped or behind it, while `occluded` still counts them"
+        )
     p = contact.contact_params(ball, sim_cfg)
     geom_contact = (
         f'condim="{p["condim"]}" friction="{_vec(p["friction"])}" '

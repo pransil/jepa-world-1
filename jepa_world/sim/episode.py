@@ -236,6 +236,9 @@ def _run(
     rig_y = -float(sim_cfg["camera"]["distance"])
 
     obs = obstacles.sample_obstacles(sim_cfg, terrain)  # None when the key is absent
+    obstacles.check_view(
+        [cam0[1]], obs, sim_cfg
+    )  # a bad (from-state) start fails before simulating
     m = build_model(terrain, ball, sim_cfg, obs)
     d = mujoco.MjData(m)
     d.qpos[:] = qpos

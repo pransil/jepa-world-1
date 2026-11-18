@@ -116,24 +116,32 @@ These are SPEC §3.2's `track_lagged_obstacles` and the M7 occlusion ablation
 |---|---|
 | `count: [lo, hi]` | posts per terrain, a uniform integer |
 | `width: [lo, hi]` | metres along x, uniform |
-| `gap` | metres: the minimum clear space between posts, and between a post and the wall zones |
+| `gap` | metres: the minimum clear space between posts, and between a post and a wall zone |
 
-- **Posts, full height.** Each occluder is a box spanning z from the terrain's lowest point minus
-  `POST_MARGIN_M` (10 m) to its highest plus 10 m.
-  - The camera stays within a few metres of the ball, so a post covers the whole image height in
-    every frame. Occlusion then depends on x alone, and `occluded` is an exact 1-D interval test.
-  - `occluded` raises if a frame's view ever reaches past a post's z-span, so that assumption
-    can't fail silently.
+- **Posts, full height.** Each occluder is a box spanning z from below the terrain's lowest point
+  to above its highest. The margins are `_post_margins`: at least `POST_MARGIN_M` (10 m), and more
+  if the config lets the view reach further. The view can reach at most about 3.6 m below and
+  6.6 m above at base settings:
+  - the camera centre stays within the ball's z-range widened by `view_height`;
+  - the ball can't rise above its start (drop + r) plus 0.7 v²/g of kinetic energy.
+
+  So a post covers the whole image height in every frame. Occlusion then depends on x alone, and
+  `occluded` is an exact 1-D interval test. `check_view` makes that assumption loud:
+  - `_run` checks the start camera before simulating, since a from-state call can pass any `cam_pos`;
+  - `visible_width_px` checks every frame as a backstop.
   - Floating boxes, which would hide the ball only at some heights, lost. An exact test of a disc
     against a union of rectangles is harder, and posts already make the events.
 - **In front of everything, colliding with nothing.** The posts stand in the plane y = −1.5, between
   the camera (y = −`camera.distance`) and the terrain slab's front face (y = −1), so they hide
-  terrain and ball alike. They have `contype = conaffinity = 0` and sit in their own static body
-  after the ball, so the terrain and ball geom ids don't move. Physics and every ground-truth array
+  terrain and ball alike. `build_model` refuses posts when `camera.distance` doesn't leave at
+  least 1 m between the camera and the posts' front face. Otherwise the posts would be clipped,
+  while `occluded` still counted them. They have `contype = conaffinity = 0` and sit in their own
+  static body after the ball, so the terrain and ball geom ids don't move. Physics and every ground-truth array
   except `occluded` are bitwise equal to the same episode without obstacles, through both entry
   points (tests).
 - **Placement belongs to the terrain.** There is one post per equal-width bin over the interior
-  (walls excluded), at least `gap / 2` inside each bin, like the ledges. The draws come from
+  (the walls excluded, shrunk by gap/2 at each end), at least `gap / 2` inside each bin, like the
+  ledges. So posts are at least `gap` apart and at least `gap` from a wall zone. The draws come from
   `SeedSequence([OBSTACLE_STREAM, terrain_seed])`, with `terrain_seed` taken from
   `Terrain.params["seed"]`. So:
   - every ball seed on a terrain sees the same posts;
@@ -149,8 +157,14 @@ These are SPEC §3.2's `track_lagged_obstacles` and the M7 occlusion ablation
     counts only its chord at the image edge.
   - It is computed from geometry, not from segmentation, so physics-only builds (no GL, CI) get it
     too. The render tier cross-checks it against segmentation.
+  - It is continuous geometry, as `out_of_view` is: a visible sliver narrower than a pixel counts as
+    visible even if it covers no pixel centre. Both flags share this convention, so
+    `out_of_view | occluded` stays consistent. The render test asserts ball pixels only where at
+    least 2 px show.
 - **Recorded** as `meta["obstacles"]` (`x_lo`, `x_hi`, `z_lo`, `z_hi`) only when present. With the
   key absent, episode files are unchanged.
+- **From a state, the posts come from the `sim_cfg` you pass**, like every physics parameter. To
+  continue a stored episode, pass its `meta["sim_cfg"]`: same posts, same contact settings.
 
 ## Key decisions
 

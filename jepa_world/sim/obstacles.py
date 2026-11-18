@@ -18,7 +18,9 @@ from jepa_world.sim.terrain import Terrain
 
 OBSTACLE_STREAM = 0x0B57AC  # SeedSequence stream id, distinct from the terrain's and the ball's
 KEYS = ("count", "width", "gap")
-POST_MARGIN_M = 10.0  # posts reach this far below the terrain's lowest point and above its highest
+POST_MARGIN_M = (
+    10.0  # posts reach at least this far below the terrain's lowest point and above its highest
+)
 
 
 @dataclass(frozen=True, eq=False)
@@ -37,6 +39,19 @@ class Obstacles:
         }
 
 
+def _pair(block: dict, key: str) -> tuple[float, float]:
+    v = block[key]
+    try:
+        lo, hi = (float(x) for x in v)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"sim.obstacles.{key} must be a [lo, hi] pair of numbers, got {v!r}"
+        ) from None
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        raise ValueError(f"sim.obstacles.{key} must be finite, got {v!r}")
+    return lo, hi
+
+
 def _check(block: dict) -> tuple[int, int, float, float, float]:
     if not isinstance(block, dict):
         raise ValueError(f"sim.obstacles must be a mapping with keys {KEYS}, got {block!r}")
@@ -46,24 +61,60 @@ def _check(block: dict) -> tuple[int, int, float, float, float]:
             f"sim.obstacles: unknown keys {sorted(unknown)}, missing keys {sorted(missing)} "
             f"(expected exactly {KEYS})"
         )
-    (c_lo, c_hi), (w_lo, w_hi), gap = block["count"], block["width"], float(block["gap"])
+    (c_lo, c_hi), (w_lo, w_hi) = _pair(block, "count"), _pair(block, "width")
     if int(c_lo) != c_lo or int(c_hi) != c_hi or not 0 <= c_lo <= c_hi:
         raise ValueError(
             f"sim.obstacles.count must be integers 0 <= lo <= hi, got {block['count']}"
         )
     if not 0 < w_lo <= w_hi:
         raise ValueError(f"sim.obstacles.width must satisfy 0 < lo <= hi, got {block['width']}")
-    if gap < 0:
-        raise ValueError(f"sim.obstacles.gap must be >= 0, got {gap}")
-    return int(c_lo), int(c_hi), float(w_lo), float(w_hi), gap
+    try:
+        gap = float(block["gap"])
+    except (TypeError, ValueError):
+        raise ValueError(f"sim.obstacles.gap must be a number, got {block['gap']!r}") from None
+    if not (np.isfinite(gap) and gap >= 0):
+        raise ValueError(f"sim.obstacles.gap must be finite and >= 0, got {block['gap']!r}")
+    return int(c_lo), int(c_hi), w_lo, w_hi, gap
+
+
+def _post_margins(sim_cfg: dict) -> tuple[float, float]:
+    """(below, above): how far past the terrain's extremes the camera's view can reach, plus 1 m.
+
+    The camera centre stays within the ball's z-range widened by `view_height` in every mode:
+    track_lagged lerps toward a deadzone edge (at most `deadzone_z` from the ball), and track_full
+    clamps to view/2 - r. The ball stays at or above the surface, and below its start height
+    (at most drop + r above the terrain) plus the height its kinetic energy can buy:
+    0.7 v^2 / g for a rolling sphere, with v the largest initial speed. Restitution never adds
+    energy (calibrated e <= 1). The posts extend at least POST_MARGIN_M beyond this.
+    """
+    vh, b = float(sim_cfg["camera"]["view_height"]), sim_cfg["ball"]
+    v = max(abs(float(x)) for x in b["vx0"])
+    rise = float(b["drop"][1]) + float(b["radius"][1]) + 0.7 * v * v / float(sim_cfg["gravity"])
+    return max(POST_MARGIN_M, vh + 1.0), max(POST_MARGIN_M, rise + vh + 1.0)
+
+
+def check_view(cam_z, obs: Obstacles | None, sim_cfg: dict) -> None:
+    """Raise if any camera centre's view reaches past the posts' z-span. The 1-D occlusion rule
+    needs every post to cover the image's full height. `_run` calls it on the start camera, before
+    simulating (a from-state start can give any camera), and visible_width_px on every frame."""
+    if obs is None or len(obs.x_lo) == 0:
+        return
+    z = np.asarray(cam_z, dtype=np.float64)
+    view = float(sim_cfg["camera"]["view_height"]) / 2
+    if (z - view < obs.z_lo).any() or (z + view > obs.z_hi).any():
+        raise ValueError(
+            f"a camera view reaches past the posts' z-span [{obs.z_lo}, {obs.z_hi}], so a post "
+            "would not cover the full image height and the 1-D occlusion rule would not hold"
+        )
 
 
 def sample_obstacles(sim_cfg: dict, terrain: Terrain) -> Obstacles | None:
     """The posts for this terrain, or None when `sim.obstacles` is absent.
 
-    One post per equal-width bin over the interior (the wall zones excluded), each at least gap/2
-    inside its bin, so neighbours are at least `gap` apart. The draws come from the terrain's seed
-    alone, so every ball on a terrain sees the same posts, and the split by terrain seed covers them.
+    One post per equal-width bin over the interior shrunk by gap/2 at each end, each post at least
+    gap/2 inside its bin. So neighbours are at least `gap` apart, and so are a post and a wall zone.
+    The draws come from the terrain's seed alone, so every ball on a terrain sees the same posts, and
+    the split by terrain seed covers them.
     """
     block = sim_cfg.get("obstacles")
     if block is None:
@@ -75,22 +126,23 @@ def sample_obstacles(sim_cfg: dict, terrain: Terrain) -> Obstacles | None:
             "obstacles need a seeded terrain (Terrain.params['seed']); this one has none"
         )
     tc = sim_cfg["terrain"]
-    inner = float(tc["length"]) / 2 - float(tc["wall_width"])
+    inner = float(tc["length"]) / 2 - float(tc["wall_width"]) - gap / 2  # bins span [-inner, inner]
     if c_hi > 0 and 2 * inner / c_hi < w_hi + gap:
         raise ValueError(
             f"terrain too short for {c_hi} posts: each needs a {w_hi + gap} m bin (width + gap), "
-            f"but the interior between the walls is {2 * inner:.2f} m"
+            f"but the interior between the walls, less gap/2 at each end, is {2 * inner:.2f} m"
         )
     rng = np.random.default_rng(np.random.SeedSequence([OBSTACLE_STREAM, int(seed)]))
     n = int(rng.integers(c_lo, c_hi + 1))
     width = rng.uniform(w_lo, w_hi, size=n)
     edges = np.linspace(-inner, inner, n + 1)
     lo = rng.uniform(edges[:-1] + gap / 2, edges[1:] - gap / 2 - width)
+    below, above = _post_margins(sim_cfg)
     return Obstacles(
         x_lo=lo,
         x_hi=lo + width,
-        z_lo=float(terrain.heights.min()) - POST_MARGIN_M,
-        z_hi=float(terrain.heights.max()) + POST_MARGIN_M,
+        z_lo=float(terrain.heights.min()) - below,
+        z_hi=float(terrain.heights.max()) + above,
     )
 
 
@@ -113,17 +165,12 @@ def visible_width_px(uv, radius: float, cam_xz, obs: Obstacles | None, sim_cfg: 
     width = np.where(dv <= rho, np.clip(hi - lo, 0.0, None), 0.0)
     if obs is None or len(obs.x_lo) == 0:
         return width
-    view = float(sim_cfg["camera"]["view_height"]) / 2
-    if (cam[:, 1] - view < obs.z_lo).any() or (cam[:, 1] + view > obs.z_hi).any():
-        raise ValueError(
-            f"a frame's view leaves the posts' z-span [{obs.z_lo}, {obs.z_hi}], so a post would "
-            "not cover the full image height and the 1-D occlusion rule would not hold"
-        )
+    check_view(cam[:, 1], obs, sim_cfg)
+    edges = np.stack([obs.x_lo, obs.x_hi], axis=1)  # (K, 2) world x
     out = width.copy()
     for t in np.flatnonzero(width > 0):
-        b_lo = (obs.x_lo - cam[t, 0]) * k + S / 2
-        b_hi = (obs.x_hi - cam[t, 0]) * k + S / 2
-        out[t] = _uncovered(lo[t], hi[t], b_lo, b_hi)
+        u = camera.project(np.stack([edges, np.zeros_like(edges)], axis=-1), cam[t], sim_cfg)
+        out[t] = _uncovered(lo[t], hi[t], u[:, 0, 0], u[:, 1, 0])
     return out
 
 
@@ -148,7 +195,7 @@ def occluded(uv, radius: float, cam_xz, obs: Obstacles | None, sim_cfg: dict) ->
     Fully hidden, mirroring `out_of_view` ("no pixel visible"), so the two flags never overlap. A
     partly hidden ball is not occluded."""
     uv = np.atleast_2d(np.asarray(uv, dtype=np.float64))
-    in_view = ~np.asarray(camera.out_of_view(uv, radius, sim_cfg), dtype=bool)
     if obs is None:
         return np.zeros(len(uv), bool)
+    in_view = ~np.asarray(camera.out_of_view(uv, radius, sim_cfg), dtype=bool)
     return in_view & (visible_width_px(uv, radius, cam_xz, obs, sim_cfg) == 0.0)

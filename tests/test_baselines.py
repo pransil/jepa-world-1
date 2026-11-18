@@ -397,7 +397,11 @@ def test_run_baselines_feeds_the_simulator_each_episodes_own_terrain_ball_and_sp
         seen.append((terrain, ball, float(spin), frames))
         return _still(sim_cfg, terrain, ball, pos, vel, spin, frames, **kw)
 
-    run, out = eval_cli.run_baselines(cfg, "test", sim_params=("true", "mean"), simulate=spy)
+    # "mean" twice: repeated params run once (len(seen) below counts every rollout)
+    run, out = eval_cli.run_baselines(
+        cfg, "test", sim_params=("true", "mean", "mean"), simulate=spy
+    )
+    assert list(out["simulator"]) == ["true", "mean"]
     names = {"simulator_true", "simulator_mean"}
     assert names <= set(out["error_m"]) and names <= set(out["mean_error_m_by_view_at_t_plus_k"])
     # The stand-in stays put, so the simulator must score exactly like persistence.
@@ -422,19 +426,6 @@ def test_run_baselines_feeds_the_simulator_each_episodes_own_terrain_ball_and_sp
     assert len(true_balls) == out["episodes"]  # each episode's own ball
     assert {b.radius for _, b, _, _ in seen[windows_:]} == {mean_ball(cfg["sim"]).radius}
     assert json.loads((run / "baselines.json").read_text())["simulator"] == sim
-
-
-def test_repeated_sim_params_run_once():
-    cfg = load_config(BASE, [*SHORT, "model.horizons=[1, 5]"])
-    build.build_split(cfg, "test", simulate=Recorder())
-    calls = []
-
-    def count(*args, **kw):
-        calls.append(1)
-        return _still(*args, **kw)
-
-    _, out = eval_cli.run_baselines(cfg, "test", sim_params=("mean", "mean"), simulate=count)
-    assert len(calls) == out["windows"] and list(out["simulator"]) == ["mean"]
 
 
 def test_cli_passes_sim_params_through(monkeypatch):

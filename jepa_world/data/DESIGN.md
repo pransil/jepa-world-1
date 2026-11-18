@@ -29,11 +29,12 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
 |---|---|---|
 | episode file | M1's `.npz` (`sim/io.py`) | frames (T, S, S, 3) uint8, plus the GT fields |
 | `EpisodeSet.frames` | (N, T, 3, S, S) uint8, torch, CPU | the whole split in RAM. Train: 2000·60·12288 B ≈ 1.5 GB |
-| `EpisodeSet.ball_pos`, `.ball_vel` | (N, T, 2) float64 | world (x, z), (vx, vz) |
-| `EpisodeSet.out_of_view` | (N, T) bool | |
+| `EpisodeSet.ball_pos`, `.ball_vel`, `.cam_pos` | (N, T, 2) float64 | world (x, z), (vx, vz), camera centre |
+| `EpisodeSet.out_of_view`, `.occluded` | (N, T) bool | `occluded` is all False until M7's obstacles |
 | `EpisodeSet.terrain_seed`, `.ball_seed` | (N,) int64 | checked against the manifest and each file's meta |
 | `valid_starts(T, C, k_max)` | (n_t,) int | t ∈ [C−1, T−1−k_max]. T=60, C=4, k_max=20 gives 3..39 |
 | batch | (B, C+k_max, 3, S, S) float32 in [0, 1] | index C−1 is time t. Context `[:, :C]`, target stack k `[:, k:k+C]` |
+| batch, `with_gt=True` | dict: `frames` as above, plus `GT_KEYS`: `ball_pos`, `ball_vel`, `cam_pos` (B, C+k_max, 2) float32; `out_of_view`, `occluded` (B, C+k_max) bool | the same window and time axis as `frames`. For M5's `goal.displacement_targets` and M6's visibility metrics (flags at index C−1) |
 
 ## Key decisions
 
@@ -53,8 +54,10 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
     manifest's terrain and ball seeds against its split. It also checks terrain seeds, terrain
     hashes, and train/test ball seeds across every built split's manifest, so the same terrain
     under two seeds would still be caught;
-  - the batch: `window_frames` refuses any index outside [0, T). A negative index would otherwise
-    wrap silently to the end of the episode, putting future frames in the context.
+  - the batch: one shared index check (`_window_index`, used by `window_frames`, `window_gt` and
+    `batches`) refuses any frame index outside [0, T) and any episode index outside [0, N). A
+    negative index would otherwise wrap silently: to the end of the episode, putting future
+    frames in the context, or to another episode.
 - **Training never reads test.** `train.check_config` refuses `data.split: test` with
   `LeakageError`, and only `dev` and `train` are trainable (`splits.TRAINABLE`).
 - **Not checked here: leakage across configs.** The on-disk check sees only the splits of the
@@ -72,6 +75,14 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
 - **Whole split in RAM as uint8.** The alternative was reading npz per batch. That lost because
   each sample would decompress a whole 60-frame file to use 24 frames of it. 1.5 GB fits easily in
   36 GB. Each batch is one advanced-indexing gather plus a cast.
+- **Ground truth is opt-in** (`batches(..., with_gt=True)`). The default still yields the bare
+  frames tensor, so `train.run` and its callers are unchanged. The alternative, always yielding
+  a dict, lost because it would have changed every consumer at once, including M4's lane. Both
+  modes draw the same windows from the same seed. **GT after index C−1 is the future.** It is
+  for labels (targets at t+k) and evaluation only, never model input, just as hidden ball
+  parameters never reach the model. GT positions are cast to float32 because MPS
+  has no float64. At |x| ≤ 20 m that rounds a position by under 2e-6 m, and
+  `test_m5_and_m6_consumers_accept_gt_batches` holds displacements to 1e-5 m.
 - **Sampling is uniform over (episode, valid t) windows**, with replacement, from a numpy
   Generator seeded by `cfg.seed`. Every episode has the same number of windows, so this is also
   uniform over episodes.
@@ -98,5 +109,5 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
 |---|---|
 | `splits.py` | seed lists per split, `LeakageError`, `check_disjoint`, `check_split_config` |
 | `build.py` | `split_key`, `build_split` (write-once through `paths.build_dataset_once`), `terrain_sha`, CLI |
-| `dataset.py` | `EpisodeSet`, `load_dir`, `load_split`, `valid_starts`, `window_frames`, `batches` |
+| `dataset.py` | `EpisodeSet`, `load_dir`, `load_split`, `valid_starts`, `window_frames`, `window_gt`, `batches` |
 | `synthetic.py` | M3's moving-disc stand-in (smoke runs and benchmarks only) |

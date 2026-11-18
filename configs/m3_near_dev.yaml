@@ -1,0 +1,12 @@
+# M3 on real episodes: near heads only, on the dev split (SPEC §8 M3: "loss decreases on the
+# development set"). Dev numbers are for debugging, never a generalisation claim (SPEC §7.3).
+# The slow test tests/test_m3_dev.py runs this config on CPU at a smaller batch and step count.
+base: base.yaml
+
+data:
+  source: episodes
+  split: dev
+
+train:
+  stages: [near]
+  steps: 600

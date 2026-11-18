@@ -62,7 +62,7 @@ def embed(encoder, es, context_frames: int, k_max: int, device, batch: int, max_
     feats = {level: [] for level in LEVELS}
     for i in range(0, len(t), batch):
         # k_max = 0: only frames t-C+1 .. t are read, nothing after t
-        frames = window_frames(es.frames, ep[i : i + batch], t[i : i + batch], context_frames, 0)
+        frames = window_frames(es, ep[i : i + batch], t[i : i + batch], context_frames, 0)
         levels = encoder(context_stack(frames.to(device), context_frames))
         for level in LEVELS:
             feats[level].append(levels[level].mean(dim=(2, 3)).cpu().numpy().astype(np.float64))

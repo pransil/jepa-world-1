@@ -1,7 +1,9 @@
 # Does near+far JEPA training make ball position and velocity linearly decodable from each level?
 
 - **Date:** 2026-11-17   **Lane/branch:** worktree-wt-exp-first-real-run
-- **Commit:** e95576c (training, clean); 9b1fcb1 (probe script `experiments/probe_embeddings.py`, clean)
+- **Commit:** e95576c (training, clean); 9b1fcb1 (probe script `experiments/probe_embeddings.py`, clean).
+  After merging main, `window_frames` takes the `EpisodeSet` (PR #13), so the script was updated
+  to match. A 6-episode smoke run gives an identical report before and after the change.
 - **Config:** `configs/exp_first_real_run.yaml` (seed 0), plus `--set seed=1`
 - **Run dirs** (each also holds `probes.json` and `probes_random_init.json`):
   - `20261118T060158Z-worktree-wt-exp-first-real-run-first-real-s0-f3a0d2` (seed 0)

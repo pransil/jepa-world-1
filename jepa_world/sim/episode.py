@@ -147,19 +147,96 @@ def simulate(
     segmentation: bool = False,
     seeds: tuple[int | None, int | None] = (None, None),
 ) -> Episode:
-    """Run one episode on a given terrain and ball. simulate_episode is the seeded entry point; this
-    one serves hand-built scenes (tests, and physics baselines that re-simulate known terrain)."""
+    """Run one episode on a given terrain and ball, from the ball's own start (x0, drop, vx0).
+    simulate_episode is the seeded entry point; this one serves hand-built scenes (tests)."""
+    qpos = [ball.x0, start_z(terrain, ball), 0.0]
+    qvel = [ball.vx0, 0.0, ball.vx0 / ball.radius]
+    cam0 = camera.initial(np.array(qpos[:2]), ball.drop, sim_cfg)
+    frames = int(sim_cfg["episode_frames"])
+    return _run(sim_cfg, terrain, ball, qpos, qvel, cam0, frames, render, segmentation, seeds, {})
+
+
+def simulate_from_state(
+    sim_cfg: dict,
+    terrain: Terrain,
+    ball: BallParams,
+    pos,
+    vel,
+    spin: float,
+    frames: int,
+    cam_pos=None,
+    render: bool = False,
+    segmentation: bool = False,
+) -> Episode:
+    """Re-simulate known terrain from a mid-episode state: the ball centre `pos` (x, z), velocity
+    `vel` (vx, vz) and `spin` (rad/s about +y), as in an Episode's ground truth at frame t.
+
+    Returns `frames` frames. Frame 0 is the given state, and `t` counts from it. `ball` supplies the
+    hidden parameters: the true ones, or `jepa_world.sim.ball.mean_ball(sim_cfg)`. Its x0, drop and
+    vx0 are unused.
+    `cam_pos` continues an episode's camera (its `cam_pos[t]`); by default the camera is centred on
+    the ball. The state is used as given, and `meta["from_state"]["start_gap"]` reports whether it
+    starts inside the terrain (negative). Renders nothing unless asked.
+
+    Started from frame t of an episode with its true ball and `cam_pos[t]`, it reproduces the rest of
+    that episode's ground truth bitwise if MuJoCo has no contact at the start (the result's
+    `contact[0]` is False), and to solver tolerance if it does (sim/DESIGN.md, "Re-simulating from a
+    state"). It is a rollout, not a dataset episode: `meta["terrain_seed"]` and `["ball_seed"]` are
+    None, and the terrain's seed is in `meta["from_state"]`."""
+    if int(frames) != frames or frames < 1:
+        raise ValueError(f"frames must be a positive integer, got {frames!r}")
+    named = {"pos": pos, "vel": vel} | ({} if cam_pos is None else {"cam_pos": cam_pos})
+    vecs = {k: np.asarray(v, dtype=np.float64) for k, v in named.items()}
+    for k, v in vecs.items():
+        if v.shape != (2,) or not np.isfinite(v).all():
+            raise ValueError(f"{k} must be a finite (2,) array, got {named[k]!r}")
+    spin_arr = np.asarray(spin, dtype=np.float64)
+    if spin_arr.shape != () or not np.isfinite(spin_arr):
+        raise ValueError(f"spin must be a finite scalar, got {spin!r}")
+    spin = float(spin_arr)
+    x, z = (float(c) for c in vecs["pos"])
+    vx, vz = (float(c) for c in vecs["vel"])
+    cam0 = vecs["cam_pos"] if cam_pos is not None else camera.initial(vecs["pos"], 0.0, sim_cfg)
+    start = {
+        "pos": [x, z],
+        "vel": [vx, vz],
+        "spin": float(spin),
+        "cam_pos": [float(c) for c in cam0],
+        "start_gap": float(terrain.gap(vecs["pos"], ball.radius)),
+        "terrain_seed": (terrain.params or {}).get("seed"),
+    }
+    return _run(
+        sim_cfg, terrain, ball, [x, z, 0.0], [vx, vz, spin], cam0, int(frames),
+        render, segmentation, (None, None), {"from_state": start},
+    )  # fmt: skip
+
+
+def _run(
+    sim_cfg: dict,
+    terrain: Terrain,
+    ball: BallParams,
+    qpos: list[float],
+    qvel: list[float],
+    cam0: np.ndarray,
+    T: int,
+    render: bool,
+    segmentation: bool,
+    seeds: tuple[int | None, int | None],
+    extra_meta: dict,
+) -> Episode:
+    """The one simulation loop behind both entry points. Anything added to the scene or the loop
+    (obstacles, from `sim_cfg.get("obstacles")`) applies to both."""
     if segmentation and not render:
         raise ValueError("segmentation requires render=True")
     cfg_plain = plain_json(sim_cfg)  # fail before simulating, not halfway through a dataset build
-    T, n, S = int(sim_cfg["episode_frames"]), int(sim_cfg["substeps"]), int(sim_cfg["frame_size"])
+    n, S = int(sim_cfg["substeps"]), int(sim_cfg["frame_size"])
     h = timestep(sim_cfg)
     rig_y = -float(sim_cfg["camera"]["distance"])
 
     m = build_model(terrain, ball, sim_cfg)
     d = mujoco.MjData(m)
-    d.qpos[:] = [ball.x0, start_z(terrain, ball), 0.0]
-    d.qvel[:] = [ball.vx0, 0.0, ball.vx0 / ball.radius]
+    d.qpos[:] = qpos
+    d.qvel[:] = qvel
     tracker = ContactTracker(geom_id(m, "ball"), h, sim_cfg)
 
     pos, vel = np.zeros((T, 2)), np.zeros((T, 2))
@@ -186,11 +263,7 @@ def simulate(
                         contact[t] |= touching
                         bounce[t] |= landing
             pos[t], vel[t], spin[t] = d.qpos[:2], d.qvel[:2], d.qvel[2]
-            cam[t] = (
-                camera.initial(pos[t], ball.drop, sim_cfg)
-                if t == 0
-                else camera.track(cam[t - 1], pos[t], ball.radius, sim_cfg)
-            )
+            cam[t] = cam0 if t == 0 else camera.track(cam[t - 1], pos[t], ball.radius, sim_cfg)
             d.mocap_pos[0] = [cam[t, 0], rig_y, cam[t, 1]]
             mujoco.mj_forward(m, d)  # contacts at this instant + camera pose for rendering
             touching, landing = tracker.visit(d, d.qvel[:2].copy())
@@ -215,6 +288,7 @@ def simulate(
         "damping": -float(m.geom_solref[geom_id(m, "ball")][1]),  # what MuJoCo actually used
         "sim_cfg_hash": config_hash(cfg_plain),
         "sim_cfg": cfg_plain,
+        **extra_meta,
     }
     return Episode(
         t=np.arange(T) / sim_cfg["fps"],

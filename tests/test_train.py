@@ -115,8 +115,9 @@ def test_cli_creates_a_complete_run_dir():
     assert list((run / "checkpoints").iterdir())
 
 
-def test_episode_source_says_it_needs_m2():
-    with pytest.raises(NotImplementedError, match="M2"):
+def test_episode_source_needs_its_split_built():
+    # The episode loader itself is tested in test_train_episodes.py.
+    with pytest.raises(FileNotFoundError, match=r"jepa_world\.data\.build"):
         train.check_config(tiny_cfg("data.source=episodes"))
 
 
@@ -128,7 +129,7 @@ def test_later_stages_say_which_milestone_builds_them(stage, milestone):
 
 def test_cli_rejects_bad_config_before_creating_a_run_dir():
     sets = [arg for s in TINY for arg in ("--set", s)]
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(FileNotFoundError):  # episodes, but no split built in this artifact root
         train.main(["--config", str(CONFIGS / "base.yaml"), *sets, "--set", "data.source=episodes"])
     assert not (paths.artifacts_root() / "runs").exists()
 

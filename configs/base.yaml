@@ -48,12 +48,14 @@ sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
     min_air_s: 0.1            # bounce = contact onset after >= this long airborne...
     bounce_min_speed: 0.5     # ...with normal approach speed >= this (m/s)
 
-data:                         # SPEC §3.5, split by terrain seed, never by frame
+data:                         # SPEC §3.5, split by terrain seed, never by frame. Design: jepa_world/data/DESIGN.md
   source: episodes            # episodes (the M2 loader) | synthetic (moving disc; smoke runs and benchmarks only)
-  dev_terrain_seeds: 10
-  train_terrain_seeds: 500
-  test_terrain_seeds: 50
-  ball_samples_per_terrain: null   # "several", TBD in M2
+  split: train                # the split train.py reads (dev: debugging only, SPEC §3.5)
+  format_version: 1           # bump if the dataset layout (files, manifest) changes
+  splits:                     # seeds as [first, count]; every terrain gets every ball seed of its split
+    dev:   {terrain_seeds: [0, 10],      ball_seeds: [0, 4]}     # 4 balls/terrain: docs/decisions/*-ball-samples-per-terrain.md
+    train: {terrain_seeds: [1000, 500],  ball_seeds: [0, 4]}     # terrains outside 0-199, which M1 tuned on
+    test:  {terrain_seeds: [100000, 50], ball_seeds: [1000, 4]}  # new ball draws, same ranges: docs/decisions/*-test-split-ball-params.md
 
 model:                        # SPEC §4
   context_frames: 4

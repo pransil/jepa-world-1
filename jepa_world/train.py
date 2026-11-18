@@ -20,6 +20,9 @@ from pathlib import Path
 import torch
 import yaml
 
+from jepa_world.data.dataset import batches as episode_batches
+from jepa_world.data.dataset import load_split, require_split
+from jepa_world.data.splits import TRAINABLE, LeakageError
 from jepa_world.data.synthetic import moving_disc_batch
 from jepa_world.models.jepa import JEPA, compute_losses
 from jepa_world.utils.config import load_config
@@ -50,11 +53,35 @@ def model_horizons(cfg: dict) -> list[int]:
 
 
 def _require_built_source(cfg: dict) -> None:
+    """'episodes' needs data.split to be dev or train (never test) and built for this config
+    (FileNotFoundError names the command)."""
     source = cfg["data"]["source"]
-    if source != "synthetic":
-        raise NotImplementedError(
-            f"data.source={source!r}: the episode loader is built in M2 (jepa_world/data). "
-            "Until then only 'synthetic' exists"
+    if source == "episodes":
+        split = cfg["data"]["split"]
+        if split not in TRAINABLE:
+            raise LeakageError(
+                f"data.split={split!r}: training reads only {list(TRAINABLE)}. The test "
+                "terrains are held out for evaluation (SPEC §3.5, §7.3)"
+            )
+        require_split(cfg, split)
+    elif source != "synthetic":
+        raise ValueError(f"data.source={source!r}: expected 'episodes' or 'synthetic'")
+
+
+def _episode_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
+    """The M2 loader on data.split, in the same layout as the synthetic source. Loads the split
+    now, not on the first next(), so main() can do it before taking the GPU lock."""
+    es = load_split(cfg, cfg["data"]["split"])
+    c = cfg["model"]["context_frames"]
+    return episode_batches(es, cfg["train"]["batch_size"], c, max(horizons), cfg["seed"])
+
+
+def _synthetic_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
+    g = torch.Generator().manual_seed(cfg["seed"])
+    n = cfg["model"]["context_frames"] + max(horizons)
+    while True:
+        yield moving_disc_batch(
+            cfg["train"]["batch_size"], n, cfg["sim"]["frame_size"], generator=g
         )
 
 
@@ -101,12 +128,9 @@ def train_step(
 def make_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
     """Endless CPU batches in the M3 layout (B, C + k_max, 3, S, S), seeded from cfg['seed']."""
     _require_built_source(cfg)
-    g = torch.Generator().manual_seed(cfg["seed"])
-    n = cfg["model"]["context_frames"] + max(horizons)
-    while True:
-        yield moving_disc_batch(
-            cfg["train"]["batch_size"], n, cfg["sim"]["frame_size"], generator=g
-        )
+    if cfg["data"]["source"] == "episodes":
+        return _episode_batches(cfg, horizons)
+    return _synthetic_batches(cfg, horizons)
 
 
 def _flush(rows: list[tuple[int, torch.Tensor]], keys: list[str], f, writer) -> None:
@@ -198,12 +222,13 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     cfg = load_config(args.config, args.set)
-    check_config(cfg)  # before a run dir exists
+    horizons = check_config(cfg)  # before a run dir exists
+    batches = make_batches(cfg, horizons)  # loads an episode split here, not under the GPU lock
     device = pick_device(cfg["train"]["device"])
     run_dir = start_run(cfg, args.name or Path(args.config).stem, device)
     print(f"run dir: {run_dir}  device: {device}", flush=True)
     with gpu_lock(f"train {run_dir.name}"):
-        final = run(cfg, run_dir, device=device)
+        final = run(cfg, run_dir, batches=batches, device=device)
     print(json.dumps({"final": final}, indent=2))
     return 0
 

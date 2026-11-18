@@ -1,7 +1,7 @@
 """Synthetic moving-disc clips, in the M3 batch layout (B, T, 3, S, S).
 
-A stand-in batch source until M2's episode loader exists. Use it for smoke runs and benchmarks
-ONLY. It shares the shapes and rough look of the real task (a flat-shaded ball over a static 1-D
+A stand-in batch source (data.source: synthetic). The real one is M2's episode loader
+(data/dataset.py). Use this for smoke runs and benchmarks ONLY. It shares the shapes and rough look of the real task (a flat-shaded ball over a static 1-D
 terrain profile, seen side-on), but not its physics: the disc flies ballistically and bounces off
 the frame edges, ignoring the terrain. Nothing measured on it is evidence about the real task.
 """

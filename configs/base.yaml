@@ -85,6 +85,7 @@ model:                        # SPEC §4
   l3_head_kernel: 3
   ema_momentum: 0.996         # [OPEN] maybe toward 0.999 later
   action_dim: 0               # slot exists, zeros in v1
+  top_down: false             # M7 / SPEC §9.2: each far head's level also predicts the next-finer target at its k (docs/decisions/2026-11-17-top-down-targets.md)
   # Auxiliary heads (SPEC §4.6-4.7), built when train.stages has goal / pixel. models/DESIGN-aux.md
   goal_horizons: [1, 2, 3, 4, 5, 10, 20]  # ball displacement from t (world m) at these k (docs/decisions/2026-11-17-goal-target-displacement.md)
   goal_l2: false              # also pool L2 into the goal head (SPEC §4.6 "optionally"); L3 only by default
@@ -104,6 +105,7 @@ loss:                         # SPEC §5
   w_k: 1.0
   w_goal: 0.5                 # x loss/goal = sum over goal_horizons of the goal NLL (SPEC §5.4)
   w_pix: 0.05                 # x loss/pix = mean |pred - frame t+1| in [0, 1] units, so <= w_pix
+  w_td: 0.5                   # x each loss/td/k (top-down NLL), only with model.top_down (same decision)
 
 train:                        # SPEC §6
   device: auto                # auto | mps | cpu

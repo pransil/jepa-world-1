@@ -1,8 +1,10 @@
 """JEPA core: context encoder, EMA target encoder, horizon heads, latent losses. SPEC §4-§5.1.
 
 Near heads (k = 1..5) predict a mean on L1, scored by squared L2. Far heads (k = 10 on L2,
-k = 20 on L3) predict a mean and a log-variance, scored by a Gaussian NLL. Independent of the goal
-head and the pixel decoder (SPEC §10). See models/DESIGN.md for the batch contract and decisions.
+k = 20 on L3) predict a mean and a log-variance, scored by a Gaussian NLL. With model.top_down (M7,
+off by default), each far head's level also predicts the next-finer target at its horizon (SPEC
+§9.2). Independent of the goal head and the pixel decoder (SPEC §10). See models/DESIGN.md for the
+batch contract and decisions.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from jepa_world.models.heads import GaussianHead, HorizonHead
+from jepa_world.models.heads import GaussianHead, HorizonHead, TopDownHead
 from jepa_world.models.losses import gaussian_nll_terms
 from jepa_world.models.unet import encoder_from_cfg
 
@@ -143,7 +145,9 @@ class JEPA(nn.Module):
         "pred":    {k: (B, ch, s, s)}       the mean, for every horizon,
         "logvar":  {k: (B, ch, s, s)}       far horizons only, bounded (GaussianHead),
         "target":  {k: (B, ch, s, s)}       detached, from the target encoder, after loss.target_norm,
-    }
+    } plus, only with model.top_down, for each far horizon k with a finer level below its own:
+        "td_pred", "td_logvar": {k: (B, ch', s', s')}   the branch's Gaussian on the finer level,
+        "td_target":            {k: (B, ch', s', s')}   that level of the target stack ending at t+k.
     """
 
     def __init__(self, cfg: dict, horizons: Sequence[int], extra_levels: Collection[str] = ()):
@@ -189,11 +193,53 @@ class JEPA(nn.Module):
             else:
                 heads[str(k)] = HorizonHead(ch, ch, **common)
         self.heads = nn.ModuleDict(heads)
+        self._build_top_down(m, channels)
+
+    def _build_top_down(self, m: dict, channels: dict[str, int]) -> None:
+        """M7 top-down branches (docs/decisions/2026-11-17-top-down-targets.md). Off, nothing is
+        built, so the state-dict keys stay as before. A config saved before M7 has no
+        model.top_down and reads as off. Built after the heads, so their init is unchanged."""
+        self.top_down = bool(m.get("top_down", False))
+        self.td_level: dict[int, str] = {}  # far horizon -> the finer level its branch predicts
+        self.td_heads: nn.ModuleDict | None = None
+        if not self.top_down:
+            return
+        for k in self.far_horizons:
+            i = self.level_names.index(self.head_level[k])
+            if i > 0:
+                self.td_level[k] = self.level_names[i - 1]
+        if not self.td_level:
+            raise ValueError(
+                "model.top_down needs a far head on a level with a finer level below it, and none "
+                f"is built (far horizons {self.far_horizons}; add the far stage to train.stages)"
+            )
+        size = {name: lv["size"] for name, lv in m["levels"].items()}
+        td: dict[str, nn.Module] = {}
+        for k, fine in self.td_level.items():
+            coarse = self.head_level[k]
+            scale = size[fine] // size[coarse]
+            if scale * size[coarse] != size[fine]:
+                raise ValueError(f"top-down {coarse} -> {fine}: sizes {size} are not a whole ratio")
+            key = fine.lower()  # the branch's output lives at the finer level: use its head shape
+            td[str(k)] = TopDownHead(
+                channels[coarse],
+                channels[fine],
+                scale=scale,
+                logvar_bound=m["far_logvar_bound"],
+                hidden=m[f"{key}_head_hidden"],
+                kernel=m[f"{key}_head_kernel"],
+                embed_dim=m["horizon_embed_dim"],
+                action_dim=m["action_dim"],
+                norm_groups=m["norm_groups"],
+            )
+        self.td_heads = nn.ModuleDict(td)
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
         """Everything the optimizer may touch: the context encoder and the heads, never the target."""
         yield from self.context_encoder.parameters()
         yield from self.heads.parameters()
+        if self.td_heads is not None:
+            yield from self.td_heads.parameters()
 
     def check_active(self, active: Collection[int] | None) -> set[int]:
         active = set(self.horizons if active is None else active)
@@ -242,29 +288,48 @@ class JEPA(nn.Module):
                 pred[k], logvar[k] = out
             else:
                 pred[k] = out
-        return {
-            "context": context,
-            "pred": pred,
-            "logvar": logvar,
-            "target": self.encode_targets(frames),
-        }
+        targets, td_targets = self._encode(frames)
+        result = {"context": context, "pred": pred, "logvar": logvar, "target": targets}
+        if self.td_heads is not None:
+            td_pred, td_logvar = {}, {}
+            for k in self.td_level:  # each branch trains exactly when its far horizon does
+                with torch.set_grad_enabled(torch.is_grad_enabled() and k in active):
+                    td_pred[k], td_logvar[k] = self.td_heads[str(k)](
+                        context[self.head_level[k]], action
+                    )
+            result.update(td_pred=td_pred, td_logvar=td_logvar, td_target=td_targets)
+        return result
 
     @torch.no_grad()
     def encode_targets(self, frames: torch.Tensor) -> dict[int, torch.Tensor]:
         """One target-encoder call per level: the stacks of every head reading that level go in
         one batch, encoded only `upto` that level, so near stacks never pay for L2/L3. GroupNorm is
         per sample, so the grouping cannot change any result. loss.target_norm is applied here."""
+        return self._encode(frames)[0]
+
+    @torch.no_grad()
+    def _encode(
+        self, frames: torch.Tensor
+    ) -> tuple[dict[int, torch.Tensor], dict[int, torch.Tensor]]:
+        """encode_targets, plus the top-down targets: for each branch, the finer level of its
+        horizon's stack. That level is computed on the way to the far head's level anyway, so it
+        costs no extra encoder pass."""
         b = frames.shape[0]
         targets: dict[int, torch.Tensor] = {}
+        td: dict[int, torch.Tensor] = {}
         for level in self.level_names:
             ks = [k for k in self.horizons if self.head_level[k] == level]
             if not ks:
                 continue
             stacks = torch.cat([target_stack(frames, self.context_frames, k) for k in ks])
-            z = normalize_target(self.target_encoder(stacks, upto=level)[level], self.target_norm)
+            zs = self.target_encoder(stacks, upto=level)
+            z = normalize_target(zs[level], self.target_norm)
             for i, k in enumerate(ks):
                 targets[k] = z[i * b : (i + 1) * b].detach()
-        return targets
+                if k in self.td_level:
+                    fine = zs[self.td_level[k]][i * b : (i + 1) * b]
+                    td[k] = normalize_target(fine, self.target_norm).detach()
+        return targets, td
 
     @torch.no_grad()
     def ema_update(self, momentum: float) -> None:
@@ -294,6 +359,9 @@ def compute_losses(
       loss/var     SUM of the guards of the levels ACTIVE heads read (if the guard is on)
       loss/total   sum of w_k * loss/k over ACTIVE horizons, plus w_var * loss/var
       emb_std/<L>  batch std of every level any head reads, detached
+    and, with model.top_down, for each branch k (M7):
+      loss/td/k<k>  Gaussian NLL of the finer target at t+k; w_td * it joins loss/total if k ACTIVE
+      sqerr/td/k<k>, logvar/td/k<k>, relerr/td/k<k>   as for the far heads, detached
 
     `active` (default: all built horizons) is the §5.5 stage schedule. Inactive horizons are
     still computed and logged, but stay out of loss/total, so their heads get no gradient."""
@@ -308,6 +376,8 @@ def check_loss_cfg(model: JEPA, loss_cfg: dict) -> None:
             f"loss.latent_distance={loss_cfg['latent_distance']!r}: only 'mse' (squared L2) "
             "is implemented (docs/decisions/2026-11-17-latent-distance-sq-l2.md)"
         )
+    if model.td_heads is not None and "w_td" not in loss_cfg:
+        raise ValueError("model.top_down is on, so loss.w_td must be set (base.yaml: 0.5)")
     if loss_cfg["target_norm"] != model.target_norm:
         raise ValueError(
             f"loss.target_norm={loss_cfg['target_norm']!r} but the model was built with "
@@ -338,6 +408,16 @@ def losses_from_output(
         losses[f"relerr/k{k}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
             total = total + loss_cfg["w_k"] * lk
+    for k in model.td_level:  # empty unless model.top_down
+        err2 = _err2(out["td_pred"][k], out["td_target"][k])
+        sqerr = _sq_from_err2(err2)
+        ltd = _nll_from_err2(err2, out["td_logvar"][k])  # the far heads' NLL and reduction
+        losses[f"loss/td/k{k}"] = ltd
+        losses[f"sqerr/td/k{k}"] = sqerr.detach()
+        losses[f"logvar/td/k{k}"] = out["td_logvar"][k].detach().mean()
+        losses[f"relerr/td/k{k}"] = _relerr_from_sq(sqerr, out["td_target"][k], eps=1e-12)
+        if k in active:
+            total = total + loss_cfg["w_td"] * ltd
     active_levels = {model.head_level[k] for k in active}
     guards, extra = [], {}
     for lv in sorted(set(model.head_level.values()), key=model.level_names.index):

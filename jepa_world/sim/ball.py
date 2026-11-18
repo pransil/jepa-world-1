@@ -40,6 +40,26 @@ def sample_ball(sim_cfg: dict, terrain_seed: int, ball_seed: int) -> BallParams:
     )
 
 
+def mean_ball(sim_cfg: dict) -> BallParams:
+    """The mean of `sample_ball`'s distribution: every draw is uniform, so each field is its range's
+    midpoint. For re-simulating with unknown hidden parameters (`simulate_from_state` uses only
+    radius, friction and restitution)."""
+    bc = sim_cfg["ball"]
+
+    def mid(key: str) -> float:
+        lo, hi = bc[key]
+        return (float(lo) + float(hi)) / 2
+
+    return BallParams(
+        radius=mid("radius"),
+        friction=mid("friction"),
+        restitution=mid("restitution"),
+        x0=mid("start_x"),
+        drop=mid("drop"),
+        vx0=mid("vx0"),
+    )
+
+
 def start_z(terrain: Terrain, ball: BallParams) -> float:
     """Initial z of the centre: `drop` above the highest terrain under the ball's footprint, so the
     ball never starts inside the surface."""

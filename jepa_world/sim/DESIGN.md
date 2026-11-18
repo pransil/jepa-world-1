@@ -8,7 +8,8 @@ per-frame ground truth (SPEC §3).
 
 **Not here:** datasets, the seed→split mapping and loaders (M2, `data/`, which calls
 `simulate_episode` and `save_episode`). Obstacles and occlusion (M7; `occluded` is recorded
-but always False). Physics baselines (M2/M6, which can reuse `build_model`).
+but always False). Physics baselines themselves (M2/M6 in `baselines.py`). They re-simulate known
+terrain through `simulate_from_state`, below.
 
 ## Data flow and shapes
 
@@ -18,6 +19,7 @@ cfg["sim"], terrain_seed, ball_seed ─► sample_ball ─► BallParams(radius,
 Terrain, BallParams ─► build_model ─► MjModel (hfield, 3-joint ball, mocap camera rig)
 simulate (simulate_episode = seeded wrapper): per frame, `substeps` mj_steps ─► contact/bounce
           flags ─► camera.track ─► render ─► Episode
+simulate_from_state(Terrain, BallParams, pos (2,), vel (2,), spin, frames) ─► the same loop ─► Episode
 ```
 
 | Episode field | shape, dtype | meaning |
@@ -41,6 +43,51 @@ simulate (simulate_episode = seeded wrapper): per frame, `substeps` mj_steps ─
   airborne substeps (counted as an integer), with normal approach speed ≥ `bounce_min_speed`.
   `ContactTracker` implements it, and `test_tracker_*` pins each threshold.
 - `out_of_view[t]`: the projected ball disc lies entirely outside the image.
+
+## Re-simulating from a state (`simulate_from_state`)
+
+The simulator-aware physics baseline (SPEC §7.1, for M6;
+[scope decision](../../docs/decisions/2026-11-17-m2-baseline-scope.md)) restarts known terrain from
+the ball's state at frame t. `simulate_from_state(sim_cfg, terrain, ball, pos, vel, spin, frames,
+cam_pos=None, render=False)` returns an `Episode` of `frames` frames. Frame 0 is the given state, and
+`t` counts from it.
+
+- **One loop.** `simulate` and `simulate_from_state` share `_run`, and both build the scene with
+  `build_model(terrain, ball, sim_cfg)`. So whatever later reads `sim_cfg.get("obstacles")` there
+  applies to both, and a missing key means off
+  ([decision](../../docs/decisions/2026-11-17-obstacles-dataset-keying.md)). Seeded placement can
+  use `terrain.params["seed"]`. `simulate` itself is unchanged: its ground truth is bitwise equal
+  to before the refactor (80 episodes, checked in this lane's PR).
+- **Ball parameters are an argument**, the true `Episode.ball` or `mean_ball(sim_cfg)`, which is
+  the midpoint of each sampled range (sampling is uniform). Only radius, friction and restitution
+  matter here. Which one M6 uses is the user's call. With a radius other than the true one, the
+  given centre can start inside the terrain. `meta["from_state"]["start_gap"]` (`Terrain.gap`, in
+  metres, negative = penetrating) reports it, and the state is used as given. What to do about
+  penetration is the baseline's policy, not the simulator's.
+- **How exactly it reproduces an episode.** Started from frame t of an episode, with the true ball
+  and the episode's `cam_pos[t]`:
+  - **If the ball isn't touching at t** (`Terrain.gap > 0`), every later frame's ground truth is
+    bitwise identical. Rendered frames are too, except within 1.5 px of the ball. The ball's
+    rotation angle (`qpos[2]`) isn't in the ground truth, only its spin rate, so a restart begins
+    at angle 0, and MuJoCo's tessellated sphere shades and outlines differently as it turns. From
+    frame 0 the original's angle is also 0, and the frames are bitwise identical. Storing the angle
+    would change the episode format, which is M2's. Baselines use ground truth, so it lost.
+  - **If it is touching**, MuJoCo's constraint solver starts from a warm start (`qacc_warmstart`,
+    the previous substep's accelerations), which the saved ground truth doesn't contain. The new
+    solve converges to the same contact forces only within solver tolerance, and later contacts
+    can amplify the difference. Scratch measurement over 181 touching starts (80 episodes × 7 t):
+    median drift 5e-10 m, p90 9e-8 m, p99 3.5e-4 m, max 3.8 mm, which is 0.07 px. The test
+    allows 1 cm (0.18 px) on any frame, and a median under 1e-6 m. Bitwise equality would need
+    `warmstart` off in both simulations. That changes `simulate`'s output, so it would mean a
+    `generator_version` bump and a dataset rebuild. It lost.
+- **Event flags near the start.** `contact[0]` is the touch state at the start instant only.
+  There is no frame t−1 in the new run. `ContactTracker` starts with no airborne history, so a
+  landing within `min_air_s` of the start isn't a bounce, though it may have been one in the
+  original. From frame 1 (contact) and frame 3 (bounce, at 40 substeps per frame), the flags match
+  the original wherever the trajectory does. `test_airborne_start_reproduces_the_episode_exactly`
+  pins this.
+- **Fast by default:** `render=False` skips GL. 60 frames take about 15 ms (the M1 physics-only
+  rate).
 
 ## Key decisions
 
@@ -116,11 +163,11 @@ simulate (simulate_episode = seeded wrapper): per frame, `substeps` mj_steps ─
 | file | responsibility |
 |---|---|
 | `terrain.py` | `Terrain`, `sample_terrain`: heights (waves, ledges, walls), `height_at`, `slope_at`, `gap`, `hfield` |
-| `ball.py` | `BallParams`, `sample_ball`: hidden parameters and the initial state |
+| `ball.py` | `BallParams`, `sample_ball`: hidden parameters and the initial state; `mean_ball` |
 | `contact.py` | restitution calibration, `contact_params`: solref, solimp, friction triple |
 | `scene.py` | `build_model`: MJCF, hfield data, ids |
 | `camera.py` | `initial`, `track`, `project`, `out_of_view`, `px_per_m` (pure) |
-| `episode.py` | `Episode`, `simulate_episode` (seeded) / `simulate` (given terrain and ball), `ContactTracker`, `plain_json` |
+| `episode.py` | `Episode`, `simulate_episode` (seeded) / `simulate` (given terrain and ball) / `simulate_from_state` (given a mid-episode state), all through `_run`; `ContactTracker`, `plain_json` |
 | `render.py` | `FrameRenderer`: RGB and segmentation (GL) |
 | `io.py` | `save_episode` / `load_episode` (.npz plus JSON metadata) |
 | `preview.py` | CLI: contact sheets and `stats.json` into a run dir |

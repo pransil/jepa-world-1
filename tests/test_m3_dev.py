@@ -4,6 +4,12 @@ Slow (a few hundred SPEC-shape training steps on CPU) and render (it builds the 
 MuJoCo's renderer into the test's own artifact root, never the shared one). Its fast siblings
 are test_train.py::test_training_lowers_the_latent_loss_on_a_fixed_batch (the loss mechanics)
 and test_train_episodes.py::test_train_runs_on_episode_source (the loader → train.run path).
+
+The main criterion is the scale-free relerr/k (error relative to predicting the batch-mean
+target, models/jepa.py::relative_error). The raw latent loss scales with the embedding spread,
+which the variance guard grows (about 2x over this run under the guard settings of
+docs/decisions/2026-11-17-far-collapse-guard-sum.md). So a raw-loss margin measures the guard as
+much as the predictor. The raw loss is still required to fall, which is SPEC's literal claim.
 """
 
 from __future__ import annotations
@@ -30,7 +36,14 @@ CPU_RUN = [
     "train.ckpt_every=100000",
 ]
 WINDOW = 25  # steps averaged at each end, so one noisy batch can't decide the test
-MARGIN = 0.5  # the last window's mean must be below (1 - MARGIN) x the first window's
+# Measured on this setup (docs/milestones/M3.md): relerr 2.42 -> 0.38, raw 110 -> 31.
+RELERR_RATIO = 0.5  # last-window mean relerr below half the first window's
+RAW_RATIO = 0.8  # last-window mean raw latent loss below 0.8x the first window's
+
+
+def _mean(values) -> float:
+    values = list(values)
+    return sum(values) / len(values)
 
 
 def test_near_latent_loss_decreases_on_the_dev_set(tmp_path):
@@ -44,11 +57,14 @@ def test_near_latent_loss_decreases_on_the_dev_set(tmp_path):
 
     rows = [json.loads(s) for s in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert [r["step"] for r in rows] == list(range(1, cfg["train"]["steps"] + 1))
-    latent = [sum(r[f"loss/k{k}"] for k in horizons) for r in rows]
-    assert all(math.isfinite(v) for v in latent)
-    first = sum(latent[:WINDOW]) / WINDOW
-    last = sum(latent[-WINDOW:]) / WINDOW
-    assert last < (1 - MARGIN) * first, (first, last)
+    raw = [sum(r[f"loss/k{k}"] for k in horizons) for r in rows]
+    rel = [_mean(r[f"relerr/k{k}"] for k in horizons) for r in rows]
+    assert all(math.isfinite(v) for v in raw + rel)
+    first, last = _mean(rel[:WINDOW]), _mean(rel[-WINDOW:])
+    assert last < RELERR_RATIO * first, ("relerr", first, last)
+    assert last < 1.0, ("relerr: no better than predicting the batch-mean target", last)
+    first, last = _mean(raw[:WINDOW]), _mean(raw[-WINDOW:])
+    assert last < RAW_RATIO * first, ("raw latent", first, last)
     # Not by collapse: the guarded embedding keeps a batch spread at the end.
-    std = sum(r["emb_std/L1"] for r in rows[-WINDOW:]) / WINDOW
+    std = _mean(r["emb_std/L1"] for r in rows[-WINDOW:])
     assert std > 0.1, std

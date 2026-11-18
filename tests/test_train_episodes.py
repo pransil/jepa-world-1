@@ -83,3 +83,16 @@ def test_unbuilt_split_fails_check_config_with_the_build_command():
 def test_unknown_source_is_refused():
     with pytest.raises(ValueError, match="nonsense"):
         train.check_config(tiny_cfg("data.source=nonsense"))
+
+
+def test_goal_stage_reads_ball_pos_from_the_split():
+    cfg = episodes_cfg(
+        "train.stages=[near, goal]",
+        "train.stage_start={near: 0, goal: 0}",
+        "model.goal_horizons=[1, 5]",
+    )
+    build.build_split(cfg, "dev", simulate=Recorder())
+    batch = next(train.make_batches(cfg, NEAR))
+    C = cfg["model"]["context_frames"]
+    assert batch["frames"].shape == (2, C + 5, 3, 16, 16)
+    assert batch["ball_pos"].shape == (2, C + 5, 2) and batch["ball_pos"].dtype == torch.float32

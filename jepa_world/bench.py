@@ -1,12 +1,14 @@
-"""L1 near-head benchmark (SPEC §9.4, §11: "Benchmark the L1 heads on the Mac early").
+"""Head and train-step benchmark (SPEC §9.4, §11: "Benchmark the L1 heads on the Mac early").
 
   uv run python -m jepa_world.bench --config configs/m3_near_synthetic.yaml \
       [--hidden 16 32 64] [--kernel 3 1] [--iters 20] [--warmup 5] [--set key=value ...]
 
-For each (hidden width, kernel) variant: ms per forward+backward of the five near heads alone,
-ms per full train_step (encoder + target + heads + AdamW + EMA), parameter counts, and MPS driver
-memory. Ops that fell back to CPU are recorded across the whole run. Runs under the GPU lock and
-writes results.json to a new run dir. Frames are always synthetic: timing needs shapes, not data.
+For each L1-head (hidden width, kernel) variant: ms per forward+backward of the L1 (near) heads
+alone, and ms per full train_step with EVERY stage in the config's train.stages active (with
+[near, far] that includes the L2/L3 encoder, the far heads and the far targets, so compare step
+times only between runs with the same stages; each row records them). Also parameter counts and
+MPS driver memory. Ops that fell back to CPU are recorded across the whole run. Runs under the GPU
+lock and writes results.json to a new run dir. Frames are always synthetic: timing needs shapes.
 """
 
 from __future__ import annotations
@@ -73,12 +75,16 @@ def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> 
     with torch.no_grad():
         feat = model.context_encoder(context_stack(frames, model.context_frames), upto="L1")["L1"]
 
+    # The variant under test is the L1 (near) heads; far heads only enter the full step.
+    l1_heads = [model.heads[str(k)] for k in model.horizons if model.head_level[k] == "L1"]
+    far_heads = [model.heads[str(k)] for k in model.far_horizons]
+
     def heads_fwd_bwd():
         model.heads.zero_grad(set_to_none=True)
-        sum(h(feat).square().mean() for h in model.heads.values()).backward()
+        sum(h(feat).square().mean() for h in l1_heads).backward()
 
     def full_step():
-        train_step(model, opt, frames, cfg)
+        train_step(model, opt, frames, cfg)  # step=None: every built stage active
 
     ms_heads = _time_ms(heads_fwd_bwd, device, iters, warmup)
     ms_step = _time_ms(full_step, device, iters, warmup)
@@ -89,7 +95,9 @@ def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> 
         "device": str(device),
         "ms_heads_fwd_bwd": ms_heads,
         "ms_train_step": ms_step,
-        "head_params": sum(p.numel() for p in model.heads.parameters()),
+        "head_params": sum(p.numel() for h in l1_heads for p in h.parameters()),
+        "far_head_params": sum(p.numel() for h in far_heads for p in h.parameters()),
+        "stages": list(cfg["train"]["stages"]),
         "total_trainable_params": sum(p.numel() for p in model.trainable_parameters()),
         # The cache is emptied between variants, and the caching allocator keeps this variant's
         # freed blocks, so driver memory here approximates this variant's peak.
@@ -107,7 +115,7 @@ def bench_heads(
     warmup: int = 5,
 ) -> dict:
     """{"rows": one dict per (hidden, kernel) variant, "fallbacks": ops that fell back to CPU}."""
-    model_horizons(cfg)  # fail early on configs M3 can't build
+    model_horizons(cfg)  # fail early on configs the model cannot build yet
     rows = []
     with record_mps_fallbacks() as fallbacks:
         for hidden, kernel in variants:
@@ -138,14 +146,16 @@ def main(argv: list[str] | None = None) -> int:
         result = bench_heads(cfg, device, variants, iters=args.iters, warmup=args.warmup)
     (run_dir / "results.json").write_text(json.dumps(result, indent=2))
     print(f"run dir: {run_dir}")
+    print(f"stages: {cfg['train']['stages']} (the step time includes every one of them)")
     print(
-        f"{'hidden':>6} {'kernel':>6} {'heads ms':>9} {'step ms':>8} {'head params':>11} {'MB':>7}"
+        f"{'hidden':>6} {'kernel':>6} {'L1 heads ms':>11} {'step ms':>8} "
+        f"{'L1 head params':>14} {'far head params':>15} {'MB':>7}"
     )
     for r in result["rows"]:
         mb = f"{r['mps_driver_mb']:.0f}" if r["mps_driver_mb"] is not None else "-"
         print(
-            f"{r['hidden']:>6} {r['kernel']:>6} {r['ms_heads_fwd_bwd']:>9.1f} "
-            f"{r['ms_train_step']:>8.1f} {r['head_params']:>11} {mb:>7}"
+            f"{r['hidden']:>6} {r['kernel']:>6} {r['ms_heads_fwd_bwd']:>11.1f} "
+            f"{r['ms_train_step']:>8.1f} {r['head_params']:>14} {r['far_head_params']:>15} {mb:>7}"
         )
     print(f"CPU fallbacks: {result['fallbacks'] or 'none'}")
     return 0

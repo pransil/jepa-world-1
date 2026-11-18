@@ -2,23 +2,37 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
-from tiny import NEAR, random_frames, tiny_cfg
+from tiny import ALL, FAR, LEVEL, NEAR, TINY_SHAPE, random_frames, tiny_cfg, tiny_far_cfg
 
 from jepa_world.models.jepa import (
     JEPA,
     compute_losses,
     context_stack,
+    gaussian_nll,
     latent_loss,
+    normalize_target,
+    relative_error,
     target_stack,
     variance_guard,
 )
+
+# The guard's configured weight and reduction (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
+W_VAR = tiny_cfg()["loss"]["w_var"]
+VAR_REDUCE = tiny_cfg()["loss"]["var_reduce"]
 
 
 def _model(cfg=None) -> JEPA:
     torch.manual_seed(0)
     return JEPA(cfg or tiny_cfg(), NEAR)
+
+
+def _far_model() -> JEPA:
+    torch.manual_seed(0)
+    return JEPA(tiny_far_cfg(), ALL)
 
 
 # ---------------------------------------------------------------- stacking
@@ -31,33 +45,87 @@ def test_context_stack_is_frames_before_and_at_t_in_time_order():
     assert ctx[0, :, 0, 0].tolist() == [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3]
 
 
-@pytest.mark.parametrize("k", NEAR)
+@pytest.mark.parametrize("k", ALL)
 def test_target_stack_ends_at_t_plus_k(k):
-    frames = torch.arange(9).float().view(1, 9, 1, 1, 1).expand(1, 9, 3, 2, 2)
+    frames = torch.arange(24).float().view(1, 24, 1, 1, 1).expand(1, 24, 3, 2, 2)
     tgt = target_stack(frames, 4, k)
     t = 3  # index of time t when C = 4
     assert tgt[0, ::3, 0, 0].tolist() == [t + k - 3, t + k - 2, t + k - 1, t + k]
 
 
 def test_too_few_frames_raises():
-    model = _model()
     with pytest.raises(ValueError, match="frames"):
-        model(random_frames(tiny_cfg())[:, :8])  # needs C + 5 = 9
+        _model()(random_frames(tiny_cfg())[:, :8])  # needs C + 5 = 9
+    with pytest.raises(ValueError, match="frames"):
+        _far_model()(random_frames(tiny_far_cfg())[:, :23])  # needs C + 20 = 24
 
 
-# ---------------------------------------------------------------- shapes
+# ---------------------------------------------------------------- shapes (SPEC §8 M3, M4)
 
 
-def test_predictions_match_targets_for_every_horizon():
+def test_near_predictions_match_targets():
     out = _model()(random_frames(tiny_cfg()))
     assert sorted(out["pred"]) == NEAR == sorted(out["target"])
     for k in NEAR:
         assert out["pred"][k].shape == out["target"][k].shape == (2, 8, 16, 16)
+    assert out["logvar"] == {}  # near heads are deterministic
 
 
-def test_far_horizons_are_not_built_in_m3():
-    with pytest.raises(NotImplementedError, match="M4"):
-        JEPA(tiny_cfg(), [1, 10])
+def test_head_outputs_match_targets_at_every_level_and_horizon():
+    # SPEC §8 M4: "head output shapes match targets"
+    out = _far_model()(random_frames(tiny_far_cfg()))
+    assert sorted(out["pred"]) == ALL == sorted(out["target"])
+    assert sorted(out["logvar"]) == FAR
+    for k in ALL:
+        expected = (2, *TINY_SHAPE[LEVEL[k]])
+        assert out["pred"][k].shape == out["target"][k].shape == expected, k
+        assert out["target"][k].shape[1:] == out["context"][LEVEL[k]].shape[1:]
+    for k in FAR:
+        assert out["logvar"][k].shape == out["pred"][k].shape
+
+
+def test_far_head_variance_is_positive():
+    # SPEC §8 M4: "far-head variance is positive"
+    out = _far_model()(random_frames(tiny_far_cfg()))
+    for k in FAR:
+        var = out["logvar"][k].exp()
+        assert (var > 0).all() and torch.isfinite(var).all(), k
+
+
+def test_far_heads_read_only_their_own_level():
+    # docs/decisions/2026-11-17-far-heads-read-their-level.md
+    model = _far_model()
+    for k in ALL:
+        assert model.head_level[k] == LEVEL[k]
+    feat = torch.rand(2, *TINY_SHAPE["L3"])
+    mean, logvar = model.heads["20"](feat)
+    assert mean.shape == feat.shape
+
+
+def test_targets_are_encoded_once_per_level_group():
+    # Near stacks stop at L1; only the k=10 and k=20 stacks pay for L2, only k=20 for L3.
+    model = _far_model()
+    seen = {0: 0, 1: 0, 2: 0}
+    hooks = [
+        stage.register_forward_hook(
+            lambda m, i, o, s=s: seen.__setitem__(s, seen[s] + i[0].shape[0])
+        )
+        for s, stage in enumerate(model.target_encoder.stages)
+    ]
+    model(random_frames(tiny_far_cfg()))
+    for h in hooks:
+        h.remove()
+    assert seen == {0: 2 * 7, 1: 2 * 2, 2: 2 * 1}
+
+
+def test_grouped_targets_equal_one_stack_at_a_time():
+    model = _far_model()
+    frames = random_frames(tiny_far_cfg())
+    targets = model(frames)["target"]
+    for k in ALL:
+        with torch.no_grad():
+            alone = model.target_encoder(target_stack(frames, 4, k), upto=LEVEL[k])[LEVEL[k]]
+        torch.testing.assert_close(targets[k], alone, rtol=1e-5, atol=1e-6)
 
 
 # ---------------------------------------------------------------- stop-grad (SPEC §8 M3)
@@ -76,13 +144,27 @@ def test_no_gradient_reaches_the_target_encoder():
         assert not p.requires_grad
         assert p.grad is None
     # ...while the loss reaches every head and the encoder stage the heads read (L1 = stage 0).
-    # M3 heads read only L1, so the forward stops there and stages 1-2 (L2, L3) get no gradient
-    # until M4's far heads read them.
+    # Near heads read only L1, so the forward stops there and stages 1-2 (L2, L3) get no
+    # gradient unless far heads read them.
     for name, p in model.named_parameters():
         if name.startswith(("heads.", "context_encoder.stages.0.")):
             assert p.grad is not None, name
         elif name.startswith("context_encoder."):
             assert p.grad is None, name
+
+
+def test_no_gradient_reaches_the_target_encoder_with_far_heads():
+    model = _far_model()
+    cfg = tiny_far_cfg()
+    out = model(random_frames(cfg))
+    for k in ALL:
+        assert not out["target"][k].requires_grad
+    compute_losses(model, random_frames(cfg), cfg["loss"])["loss/total"].backward()
+    for p in model.target_encoder.parameters():
+        assert not p.requires_grad and p.grad is None
+    for name, p in model.named_parameters():  # every trainable parameter is on a loss path now
+        if not name.startswith("target_encoder."):
+            assert p.grad is not None, name
 
 
 def test_trainable_parameters_exclude_the_target_encoder():
@@ -155,24 +237,26 @@ def test_ema_momentum_out_of_range_raises():
 
 
 def test_context_ignores_future_frames():
-    model = _model()
-    frames = random_frames(tiny_cfg())
+    model = _far_model()
+    frames = random_frames(tiny_far_cfg())
     later = frames.clone()
-    later[:, 4:] = torch.rand_like(later[:, 4:])  # every frame after t
-    a, b = model(frames)["context"], model(later)["context"]
-    for level in a:
-        assert torch.equal(a[level], b[level])
-    for k in NEAR:  # ...so no prediction can see them either
-        assert torch.equal(model(frames)["pred"][k], model(later)["pred"][k])
+    later[:, 4:] = torch.rand_like(later[:, 4:])  # every frame after t, up to t+20
+    a, b = model(frames), model(later)
+    for level in a["context"]:
+        assert torch.equal(a["context"][level], b["context"][level])
+    for k in ALL:  # ...so no prediction, near or far, can see them either
+        assert torch.equal(a["pred"][k], b["pred"][k])
+    for k in FAR:
+        assert torch.equal(a["logvar"][k], b["logvar"][k])
     at_t = frames.clone()
     at_t[:, 3] = torch.rand_like(at_t[:, 3])  # frame t itself IS context
-    assert not torch.equal(model(at_t)["context"]["L1"], a["L1"])
+    assert not torch.equal(model(at_t)["context"]["L1"], a["context"]["L1"])
 
 
-@pytest.mark.parametrize("k", NEAR)
+@pytest.mark.parametrize("k", ALL)
 def test_target_k_ignores_frames_after_t_plus_k(k):
-    model = _model()
-    frames = random_frames(tiny_cfg())
+    model = _far_model()
+    frames = random_frames(tiny_far_cfg())
     base = model(frames)["target"]
     t_plus_k = 3 + k
     after = frames.clone()
@@ -231,18 +315,22 @@ def test_variance_guard_single_sample_is_finite():
 def test_every_loss_term_is_present_and_finite():
     model = _model()
     losses = compute_losses(model, random_frames(tiny_cfg()), tiny_cfg()["loss"])
-    expected = {f"loss/k{k}" for k in NEAR} | {"loss/var", "loss/total", "emb_std/L1"}
+    expected = (
+        {f"loss/k{k}" for k in NEAR}
+        | {f"relerr/k{k}" for k in NEAR}
+        | {"loss/var", "var/L1", "loss/total", "emb_std/L1"}
+    )
     assert set(losses) == expected
     for name, v in losses.items():
         assert v.ndim == 0 and torch.isfinite(v), name
-    manual = sum(losses[f"loss/k{k}"] for k in NEAR) + losses["loss/var"]
+    manual = sum(losses[f"loss/k{k}"] for k in NEAR) + W_VAR * losses["loss/var"]
     torch.testing.assert_close(losses["loss/total"], manual)
 
 
 def test_collapse_guard_off_drops_the_term():
     cfg = tiny_cfg("loss.collapse_guard=false")
     losses = compute_losses(_model(cfg), random_frames(cfg), cfg["loss"])
-    assert "loss/var" not in losses
+    assert "loss/var" not in losses and "var/L1" not in losses
     assert "emb_std/L1" in losses  # collapse stays visible either way
     manual = sum(losses[f"loss/k{k}"] for k in NEAR)
     torch.testing.assert_close(losses["loss/total"], manual)
@@ -259,3 +347,248 @@ def test_unknown_latent_distance_raises():
     cfg = tiny_cfg("loss.latent_distance=cosine")
     with pytest.raises(ValueError, match="latent_distance"):
         compute_losses(_model(cfg), random_frames(cfg), cfg["loss"])
+
+
+# ---------------------------------------------------------------- Gaussian NLL (SPEC §5.1, M4)
+
+
+def test_gaussian_nll_matches_hand_value():
+    mean = torch.zeros(1, 2, 1, 1)
+    target = torch.tensor([1.0, 2.0]).view(1, 2, 1, 1)
+    logvar = torch.tensor([0.0, math.log(4.0)]).view(1, 2, 1, 1)
+    # channel 0: 0.5*(1/1 + 0 + log2pi); channel 1: 0.5*(4/4 + log4 + log2pi); summed over channels
+    expected = 0.5 * (1 + math.log(2 * math.pi)) + 0.5 * (1 + math.log(4) + math.log(2 * math.pi))
+    assert gaussian_nll(mean, logvar, target).item() == pytest.approx(expected)
+
+
+def test_gaussian_nll_with_unit_variance_is_half_the_near_loss_plus_a_constant():
+    mean, target = torch.rand(2, 4, 3, 3), torch.rand(2, 4, 3, 3)
+    nll = gaussian_nll(mean, torch.zeros_like(mean), target)
+    expected = 0.5 * latent_loss(mean, target) + 0.5 * 4 * math.log(2 * math.pi)
+    torch.testing.assert_close(nll, expected)
+
+
+def test_gaussian_nll_detaches_its_target_and_trains_mean_and_logvar():
+    mean = torch.rand(2, 4, 3, 3, requires_grad=True)
+    logvar = torch.zeros(2, 4, 3, 3, requires_grad=True)
+    target = torch.rand(2, 4, 3, 3, requires_grad=True)
+    gaussian_nll(mean, logvar, target).backward()
+    assert target.grad is None
+    assert mean.grad is not None and logvar.grad is not None
+
+
+def test_gaussian_nll_is_minimised_by_the_true_error_variance():
+    # d NLL / d logvar = 0.5 * (1 - err^2 / var): zero where var equals the squared error
+    err = torch.full((1, 1, 1, 1), 0.3)
+    logvar = torch.log(err**2).requires_grad_(True)
+    gaussian_nll(torch.zeros(1, 1, 1, 1), logvar, err).backward()
+    assert abs(logvar.grad.item()) < 1e-6
+
+
+def test_gaussian_nll_is_finite_at_the_logvar_bound():
+    mean, target = torch.zeros(2, 4, 3, 3), torch.full((2, 4, 3, 3), 100.0)
+    for lv in (-10.0, 10.0):
+        assert torch.isfinite(gaussian_nll(mean, torch.full_like(mean, lv), target))
+
+
+def test_gaussian_nll_shape_mismatch_raises():
+    with pytest.raises(ValueError, match="shape"):
+        gaussian_nll(torch.rand(2, 4, 3, 3), torch.rand(2, 4, 3, 3), torch.rand(2, 4, 3, 2))
+
+
+# ---------------------------------------------------------------- losses with far heads
+
+
+def _far_losses(active=None):
+    cfg = tiny_far_cfg()
+    model = _far_model()
+    return model, compute_losses(model, random_frames(cfg), cfg["loss"], active=active)
+
+
+FAR_KEYS = (
+    {f"loss/k{k}" for k in ALL}
+    | {f"relerr/k{k}" for k in ALL}
+    | {f"sqerr/k{k}" for k in FAR}
+    | {f"logvar/k{k}" for k in FAR}
+    | {"loss/var", "var/L1", "var/L2", "var/L3", "loss/total"}
+    | {"emb_std/L1", "emb_std/L2", "emb_std/L3"}
+)
+
+
+def test_every_term_is_logged_with_far_heads():
+    _, losses = _far_losses()
+    assert set(losses) == FAR_KEYS
+    for name, v in losses.items():
+        assert v.ndim == 0 and torch.isfinite(v), name
+    manual = sum(losses[f"loss/k{k}"] for k in ALL) + W_VAR * losses["loss/var"]
+    torch.testing.assert_close(losses["loss/total"], manual)
+    diagnostics = [f"{p}/k{k}" for k in FAR for p in ("sqerr", "logvar")]
+    diagnostics += [f"relerr/k{k}" for k in ALL] + ["var/L1", "var/L2", "var/L3"]
+    for name in diagnostics:  # detached: they never steer training
+        assert not losses[name].requires_grad, name
+
+
+def test_guard_is_summed_over_active_levels_not_averaged():
+    # Averaging would cut the L1 guard's weight 3x the moment far starts.
+    _, losses = _far_losses()
+    levels = losses["var/L1"] + losses["var/L2"] + losses["var/L3"]
+    torch.testing.assert_close(losses["loss/var"], levels)
+    _, near_only = _far_losses(active=NEAR)
+    torch.testing.assert_close(near_only["loss/var"], near_only["var/L1"])
+    torch.testing.assert_close(near_only["var/L1"], losses["var/L1"])
+
+
+def test_far_loss_is_the_gaussian_nll_of_its_head():
+    model, losses = _far_losses()
+    out = model(random_frames(tiny_far_cfg()))
+    for k in FAR:
+        nll = gaussian_nll(out["pred"][k], out["logvar"][k], out["target"][k])
+        torch.testing.assert_close(losses[f"loss/k{k}"], nll)
+        torch.testing.assert_close(
+            losses[f"sqerr/k{k}"], latent_loss(out["pred"][k], out["target"][k])
+        )
+        torch.testing.assert_close(losses[f"logvar/k{k}"], out["logvar"][k].mean())
+
+
+def test_inactive_horizons_are_logged_but_left_out_of_the_total():
+    model, losses = _far_losses(active=NEAR)
+    assert {f"loss/k{k}" for k in FAR} <= set(losses)  # still logged
+    out = model(random_frames(tiny_far_cfg()))
+    guard_l1 = variance_guard(out["context"]["L1"], 1.0, 1e-4, reduce=VAR_REDUCE)
+    torch.testing.assert_close(losses["loss/var"], guard_l1)  # guard covers active levels only
+    manual = sum(losses[f"loss/k{k}"] for k in NEAR) + W_VAR * losses["loss/var"]
+    torch.testing.assert_close(losses["loss/total"], manual)
+
+
+def test_inactive_heads_and_unread_levels_get_no_gradient():
+    model, losses = _far_losses(active=NEAR)
+    losses["loss/total"].backward()
+    for name, p in model.named_parameters():
+        if name.startswith(
+            ("heads.10.", "heads.20.", "context_encoder.stages.1.", "context_encoder.stages.2.")
+        ):
+            assert p.grad is None, name
+        elif name.startswith(("heads.1.", "context_encoder.stages.0.")):
+            assert p.grad is not None, name
+
+
+def test_no_active_horizon_raises():
+    with pytest.raises(ValueError, match="active"):
+        _far_losses(active=[])
+    with pytest.raises(ValueError, match="active"):
+        _far_losses(active=[7])  # not a built horizon
+
+
+def test_inactive_heads_run_without_autograd_but_give_the_same_values():
+    model = _far_model()
+    frames = random_frames(tiny_far_cfg())
+    full = model(frames)
+    part = model(frames, active=NEAR)
+    for k in FAR:
+        assert not part["pred"][k].requires_grad and not part["logvar"][k].requires_grad
+        torch.testing.assert_close(part["pred"][k], full["pred"][k])
+        torch.testing.assert_close(part["logvar"][k], full["logvar"][k])
+    for level in ("L2", "L3"):  # read only by inactive heads
+        assert not part["context"][level].requires_grad
+        torch.testing.assert_close(part["context"][level], full["context"][level])
+    assert part["pred"][1].requires_grad and part["context"]["L1"].requires_grad
+
+
+# ---------------------------------------------------------------- relative error (scale-free)
+
+
+def test_relative_error_is_one_for_the_batch_mean_and_zero_for_the_target():
+    target = torch.rand(4, 3, 2, 2)
+    mean = target.mean(dim=0, keepdim=True).expand_as(target)
+    assert relative_error(mean, target).item() == pytest.approx(1.0)
+    assert relative_error(target.clone(), target).item() == 0.0
+    # scale-free: scaling prediction and target together leaves it unchanged
+    pred = torch.rand(4, 3, 2, 2)
+    torch.testing.assert_close(relative_error(5 * pred, 5 * target), relative_error(pred, target))
+
+
+def test_relative_error_is_undefined_for_a_single_sample():
+    # One sample has no batch variance: NaN, not a 1e11 that passes every isfinite check.
+    t = torch.rand(1, 3, 2, 2)
+    assert torch.isnan(relative_error(torch.rand(1, 3, 2, 2), t))
+
+
+def test_relerr_is_logged_for_every_horizon():
+    model, losses = _far_losses()
+    out = model(random_frames(tiny_far_cfg()))
+    for k in ALL:
+        torch.testing.assert_close(
+            losses[f"relerr/k{k}"], relative_error(out["pred"][k], out["target"][k])
+        )
+
+
+# ---------------------------------------------------------------- collapse switches (M4 comparison)
+
+
+def test_layernorm_targets_have_zero_mean_unit_variance_over_channels():
+    t = torch.rand(2, 8, 3, 3) * 7 + 2
+    n = normalize_target(t, "layernorm")
+    torch.testing.assert_close(n.mean(dim=1), torch.zeros(2, 3, 3), atol=1e-5, rtol=0)
+    torch.testing.assert_close(n.var(dim=1, correction=0), torch.ones(2, 3, 3), atol=1e-3, rtol=0)
+    assert normalize_target(t, "none") is t
+    with pytest.raises(ValueError, match="target_norm"):
+        normalize_target(t, "batchnorm")
+
+
+def test_target_norm_switch_normalizes_the_targets_the_model_returns():
+    # forward()["target"] is exactly what the heads are scored against, so any consumer (an M6
+    # eval, a probe) compares prediction and target in the same space.
+    cfg = tiny_far_cfg("loss.target_norm=layernorm")
+    torch.manual_seed(0)
+    model = JEPA(cfg, ALL)
+    frames = random_frames(cfg)
+    losses = compute_losses(model, frames, cfg["loss"])
+    out = model(frames)
+    raw = JEPA(tiny_far_cfg(), ALL)
+    raw.load_state_dict(model.state_dict())
+    raw_targets = raw(frames)["target"]
+    for k in ALL:
+        torch.testing.assert_close(out["target"][k], normalize_target(raw_targets[k], "layernorm"))
+    for k in NEAR:
+        torch.testing.assert_close(
+            losses[f"loss/k{k}"], latent_loss(out["pred"][k], out["target"][k])
+        )
+    for k in FAR:
+        nll = gaussian_nll(out["pred"][k], out["logvar"][k], out["target"][k])
+        torch.testing.assert_close(losses[f"loss/k{k}"], nll)
+    for k in ALL:
+        torch.testing.assert_close(
+            losses[f"relerr/k{k}"], relative_error(out["pred"][k], out["target"][k])
+        )
+
+
+def test_loss_config_must_match_the_models_target_norm():
+    model = _far_model()  # built with target_norm: none
+    cfg = tiny_far_cfg("loss.target_norm=layernorm")
+    with pytest.raises(ValueError, match="target_norm"):
+        compute_losses(model, random_frames(cfg), cfg["loss"])
+
+
+def test_unknown_target_norm_fails_at_build_time():
+    with pytest.raises(ValueError, match="target_norm"):
+        JEPA(tiny_far_cfg("loss.target_norm=batchnorm"), ALL)
+
+
+def test_var_reduce_sum_sums_over_channels_and_averages_over_positions():
+    z = torch.ones(4, 3, 2, 2)  # collapsed: std 0 everywhere, guard 1 - 0.01 per feature
+    assert variance_guard(z, 1.0, 1e-4, reduce="mean").item() == pytest.approx(0.99)
+    assert variance_guard(z, 1.0, 1e-4, reduce="sum").item() == pytest.approx(3 * 0.99)
+    with pytest.raises(ValueError, match="var_reduce"):
+        variance_guard(z, 1.0, 1e-4, reduce="max")
+
+
+@pytest.mark.parametrize("reduce", ["mean", "sum"])  # both, so neither can be hard-coded
+def test_var_reduce_switch_reaches_the_loss(reduce):
+    cfg = tiny_far_cfg(f"loss.var_reduce={reduce}")
+    model = _far_model()
+    frames = random_frames(cfg)
+    losses = compute_losses(model, frames, cfg["loss"])
+    out = model(frames)
+    for lv in ("L1", "L2", "L3"):
+        expected = variance_guard(out["context"][lv], 1.0, 1e-4, reduce=reduce)
+        torch.testing.assert_close(losses[f"var/{lv}"], expected)

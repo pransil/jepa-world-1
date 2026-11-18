@@ -1,0 +1,11 @@
+# M7 §5, the occlusion ablation (docs/milestones/M7-plan.md): SPEC §3.2's track_lagged_obstacles.
+# base.yaml keeps sim.obstacles only as a comment. An absent key means off, so the base datasets keep
+# their hash (docs/decisions/2026-11-17-obstacles-dataset-keying.md). This file adds the block, and
+# so builds its own datasets. Values tuned with sim.preview (sim/DESIGN.md, "Obstacles and occlusion").
+base: base.yaml
+
+sim:
+  obstacles:
+    count: [3, 6]             # posts per terrain, uniform integer
+    width: [0.8, 1.6]         # metres along x; above 2 x the largest ball radius, so a ball can hide fully
+    gap: 1.0                  # metres: min clear space between posts, and from the wall zones

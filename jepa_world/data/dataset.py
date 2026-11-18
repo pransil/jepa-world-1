@@ -3,6 +3,10 @@
 Batch layout (the M3 handshake): frames (B, C + k_max, 3, S, S) float32 in [0, 1], where index
 C-1 is time t. The context is frames[:, :C] (t-C+1 .. t), and target stack k is frames[:, k:k+C],
 which ends at t+k. A window never crosses an episode boundary, and never reaches outside [0, T).
+
+With with_gt=True a batch is a dict: "frames" as above, plus the GT_KEYS fields on the SAME time
+axis (index C-1 is t), from the same window: ball_pos, ball_vel, cam_pos (B, C+k_max, 2) float32,
+world metres; out_of_view, occluded (B, C+k_max) bool.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, overload
 
 import numpy as np
 import torch
@@ -21,6 +26,16 @@ from jepa_world.data.splits import ball_seeds as configured_ball_seeds
 from jepa_world.data.splits import terrain_seeds as configured_terrain_seeds
 from jepa_world.sim.io import load_episode
 
+_GT = {  # M1's Episode field -> (per-frame shape, dtype held in EpisodeSet)
+    "ball_pos": ((2,), np.float64),
+    "ball_vel": ((2,), np.float64),
+    "cam_pos": ((2,), np.float64),
+    "out_of_view": ((), bool),
+    "occluded": ((), bool),
+}
+GT_KEYS = tuple(_GT)
+"""Per-frame ground truth carried into with_gt batches (M1's Episode field names)."""
+
 
 @dataclass(frozen=True, eq=False)
 class EpisodeSet:
@@ -28,7 +43,9 @@ class EpisodeSet:
     frames: torch.Tensor  # (N, T, 3, S, S) uint8, CPU
     ball_pos: np.ndarray  # (N, T, 2) float64, world (x, z)
     ball_vel: np.ndarray  # (N, T, 2) float64
+    cam_pos: np.ndarray  # (N, T, 2) float64, camera centre (x, z)
     out_of_view: np.ndarray  # (N, T) bool
+    occluded: np.ndarray  # (N, T) bool (always False until M7's obstacles)
     terrain_seed: np.ndarray  # (N,) int64
     ball_seed: np.ndarray  # (N,) int64
     terrain_sha: tuple[str, ...]
@@ -67,8 +84,7 @@ def load_dir(path: str | Path) -> EpisodeSet:
     rows = manifest["episodes"]
     if not rows:
         raise ValueError(f"{path}: manifest lists no episodes")
-    frames = pos = vel = oov = None
-    fps = None
+    frames, gt, fps = None, {}, None
     for i, row in enumerate(rows):
         ep = load_episode(path / row["file"])
         seeds = (ep.meta.get("terrain_seed"), ep.meta.get("ball_seed"))
@@ -81,19 +97,24 @@ def load_dir(path: str | Path) -> EpisodeSet:
         if frames is None:
             T, S = ep.frames.shape[:2]
             frames = torch.empty((len(rows), T, 3, S, S), dtype=torch.uint8)
-            pos, vel = np.empty((len(rows), T, 2)), np.empty((len(rows), T, 2))
-            oov = np.empty((len(rows), T), bool)
+            gt = {k: np.empty((len(rows), T, *shape), dtype) for k, (shape, dtype) in _GT.items()}
             fps = float(ep.meta["sim_cfg"]["fps"])
         if ep.frames.shape[:2] != (frames.shape[1], frames.shape[3]):
             raise ValueError(f"{path / row['file']}: frames {ep.frames.shape} differ from the rest")
         frames[i] = torch.from_numpy(ep.frames).permute(0, 3, 1, 2)
-        pos[i], vel[i], oov[i] = ep.ball_pos, ep.ball_vel, ep.out_of_view
+        for k, (_, dtype) in _GT.items():
+            a = getattr(ep, k)
+            kind_ok = a.dtype == bool if dtype is bool else np.issubdtype(a.dtype, np.floating)
+            if a.shape != gt[k].shape[1:] or not kind_ok:
+                raise ValueError(
+                    f"{path / row['file']}: {k} is {a.dtype} {a.shape}, expected "
+                    f"{np.dtype(dtype)} {gt[k].shape[1:]}"
+                )
+            gt[k][i] = a
     return EpisodeSet(
         split=manifest["split"],
         frames=frames,
-        ball_pos=pos,
-        ball_vel=vel,
-        out_of_view=oov,
+        **gt,
         terrain_seed=np.array([r["terrain_seed"] for r in rows], dtype=np.int64),
         ball_seed=np.array([r["ball_seed"] for r in rows], dtype=np.int64),
         terrain_sha=tuple(r["terrain_sha"] for r in rows),
@@ -154,7 +175,7 @@ def load_split(cfg: dict, split: str) -> EpisodeSet:
 
 
 def window_frames(
-    frames: torch.Tensor,
+    es: EpisodeSet,
     ep_idx: np.ndarray,
     t: np.ndarray,
     context_frames: int,
@@ -163,29 +184,84 @@ def window_frames(
     """frames[ep, t-C+1 .. t+k_max] for each (ep, t), as (B, C+k_max, 3, S, S) float32 in [0, 1].
     Refuses any window that reaches outside the episode: a negative index would otherwise wrap
     silently to the episode's end and put future frames into the context."""
-    t = torch.as_tensor(np.asarray(t), dtype=torch.long)
-    ep = torch.as_tensor(np.asarray(ep_idx), dtype=torch.long)
-    T = frames.shape[1]
+    return _gather_frames(es, *_window_index(es, ep_idx, t, context_frames, k_max))
+
+
+def window_gt(
+    es: EpisodeSet,
+    ep_idx: np.ndarray,
+    t: np.ndarray,
+    context_frames: int,
+    k_max: int,
+) -> dict[str, torch.Tensor]:
+    """The GT_KEYS fields on window_frames' time axis, from the same windows: positions and
+    velocities (B, C+k_max, 2) float32 (world metres), flags (B, C+k_max) bool. float32 because
+    MPS has no float64; at |x| <= 20 m that rounds a position by under 2e-6 m."""
+    return _gather_gt(es, *_window_index(es, ep_idx, t, context_frames, k_max))
+
+
+def _window_index(
+    es: EpisodeSet, ep_idx: np.ndarray, t: np.ndarray, context_frames: int, k_max: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """(ep (B,), frame index (B, C+k_max)) for windows t-C+1 .. t+k_max, after the one bounds
+    check every gather relies on: numpy and torch both wrap a negative index silently, onto
+    another episode or onto the end of this one."""
+    t = np.asarray(t, dtype=np.int64)
+    ep = np.asarray(ep_idx, dtype=np.int64)
+    if ep.shape != t.shape or ep.ndim != 1:
+        raise ValueError(f"ep_idx {ep.shape} and t {t.shape} must be matching 1-D arrays")
+    if ep.size and (ep.min() < 0 or ep.max() > es.n - 1):
+        raise IndexError(f"episode index in [{ep.min()}, {ep.max()}] outside [0, {es.n - 1}]")
     lo, hi = t - (context_frames - 1), t + k_max
-    if t.numel() and (int(lo.min()) < 0 or int(hi.max()) > T - 1):
+    if t.size and (lo.min() < 0 or hi.max() > es.T - 1):
         raise IndexError(
-            f"window [t-{context_frames - 1}, t+{k_max}] leaves the episode (T={T}) for "
-            f"t in [{int(t.min())}, {int(t.max())}]"
+            f"window [t-{context_frames - 1}, t+{k_max}] leaves the episode (T={es.T}) for "
+            f"t in [{t.min()}, {t.max()}]"
         )
-    idx = lo[:, None] + torch.arange(context_frames + k_max)[None, :]  # (B, C+k_max)
-    return frames[ep[:, None], idx].float().div_(255.0)
+    return ep, lo[:, None] + np.arange(context_frames + k_max)[None, :]
 
 
+def _gather_frames(es: EpisodeSet, ep: np.ndarray, idx: np.ndarray) -> torch.Tensor:
+    return es.frames[torch.from_numpy(ep)[:, None], torch.from_numpy(idx)].float().div_(255.0)
+
+
+def _gather_gt(es: EpisodeSet, ep: np.ndarray, idx: np.ndarray) -> dict[str, torch.Tensor]:
+    out = {}
+    for key, (_, dtype) in _GT.items():
+        a = getattr(es, key)[ep[:, None], idx]
+        out[key] = torch.from_numpy(a if dtype is bool else a.astype(np.float32))
+    return out
+
+
+@overload
 def batches(
-    es: EpisodeSet, batch_size: int, context_frames: int, k_max: int, seed: int
-) -> Iterator[torch.Tensor]:
+    es: EpisodeSet,
+    batch_size: int,
+    context_frames: int,
+    k_max: int,
+    seed: int,
+    with_gt: Literal[False] = False,
+) -> Iterator[torch.Tensor]: ...
+@overload
+def batches(
+    es: EpisodeSet,
+    batch_size: int,
+    context_frames: int,
+    k_max: int,
+    seed: int,
+    with_gt: Literal[True],
+) -> Iterator[dict[str, torch.Tensor]]: ...
+def batches(es, batch_size, context_frames, k_max, seed, with_gt=False):
     """Endless batches, uniform over every (episode, valid t) window, with replacement.
-    The same seed gives the same sequence."""
+    The same seed gives the same windows whether or not with_gt is set. with_gt=False yields the
+    frames tensor; with_gt=True yields {"frames": ..., **window_gt(...)}."""
     starts = valid_starts(es.T, context_frames, k_max)
     n_windows = es.n * len(starts)
     rng = np.random.default_rng(seed)
     while True:
         w = rng.integers(0, n_windows, size=batch_size)
-        yield window_frames(
-            es.frames, w // len(starts), starts[w % len(starts)], context_frames, k_max
+        ep, idx = _window_index(
+            es, w // len(starts), starts[w % len(starts)], context_frames, k_max
         )
+        frames = _gather_frames(es, ep, idx)
+        yield {"frames": frames, **_gather_gt(es, ep, idx)} if with_gt else frames

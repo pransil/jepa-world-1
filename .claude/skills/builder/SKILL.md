@@ -153,12 +153,18 @@ or merge a PR with failing tests.
      - `main` has every commit from the branch;
      - the tree holds no uncommitted, untracked or non-cache ignored files;
      - the tree isn't locked;
-     - no live session is inside it.
+     - no process is running inside it (Claude Code's own `caffeinate` doesn't count).
 
      Otherwise it removes nothing and lists why. If it refuses, leave the tree, and give the
      reasons in the output. Fix only causes that are yours, such as an unpulled `main`.
      Raw `git worktree remove` is denied in the user's settings, and this script is the
      allowed path (`tools/DESIGN.md`). Don't work around a refusal.
+
+     Run it exactly as `tools/finish-lane.sh wt-<slug>`. The allow rule matches that literal
+     prefix, so `./tools/...` or `bash tools/...` won't match. If the call itself is
+     **denied** (a declined prompt, or the auto-mode classifier), don't retry it another way.
+     Leave the tree, and give the user the line to run themselves, `! tools/finish-lane.sh wt-<slug>`.
+     Mention that in auto mode they can also approve it under `/permissions` → Recently blocked.
 - Never pass `discard_changes: true` or `--force` without the user's say-so.
 
 ## Output

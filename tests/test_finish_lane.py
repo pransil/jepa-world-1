@@ -264,17 +264,34 @@ def test_refuses_a_branch_without_a_merge_at_its_tip(lanes, case):
     assert lanes.exists(name) == (True, True)
 
 
-def test_refuses_when_running_processes_cant_be_listed(lanes, tmp_path):
-    # No lsof (macOS) and no GNU find (Linux): an empty list must refuse, not pass as "none".
+# Stand-ins for lsof (macOS) and GNU find (Linux), the two process backends. "empty": the tool
+# is missing or prints nothing. "garbled": every pid is listed, but with a cwd that isn't its own,
+# as a parse error would. Either way the list can't be trusted to show what runs in the worktree.
+BLIND_TOOL = {
+    "empty": "#!/bin/sh\nexit 0\n",
+    "garbled": """#!/bin/sh
+for p in $(ps -eo pid=); do
+  case "${0##*/}" in
+    lsof) printf 'p%s\\nn/nowhere\\n' "$p" ;;
+    find) printf '/proc/%s\\t/nowhere\\n' "$p" ;;
+  esac
+done
+""",
+}
+
+
+@pytest.mark.parametrize("listing", ["empty", "garbled"])
+def test_refuses_when_running_processes_cant_be_listed(lanes, tmp_path, listing):
     for tool in ("lsof", "find"):
-        (tmp_path / tool).write_text("#!/bin/sh\nexit 0\n")
+        (tmp_path / tool).write_text(BLIND_TOOL[listing])
         (tmp_path / tool).chmod(0o755)
-    lanes.lane("wt-blind")
-    lanes.merge("wt-blind")
-    r = lanes.finish("wt-blind", PATH=f"{tmp_path}{os.pathsep}{lanes.env['PATH']}")
+    name = f"wt-blind-{listing}"
+    lanes.lane(name)
+    lanes.merge(name)
+    r = lanes.finish(name, PATH=f"{tmp_path}{os.pathsep}{lanes.env['PATH']}")
     assert r.returncode == 1, output(r)
     assert "can't list running processes" in output(r)
-    assert lanes.exists("wt-blind") == (True, True)
+    assert lanes.exists(name) == (True, True)
 
 
 def test_deletes_the_branch_when_the_worktree_is_already_gone(lanes):

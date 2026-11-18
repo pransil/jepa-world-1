@@ -199,7 +199,10 @@ class JEPA(nn.Module):
         """M7 top-down branches (docs/decisions/2026-11-17-top-down-targets.md). Off, nothing is
         built, so the state-dict keys stay as before. A config saved before M7 has no
         model.top_down and reads as off. Built after the heads, so their init is unchanged."""
-        self.top_down = bool(m.get("top_down", False))
+        top_down = m.get("top_down", False)
+        if not isinstance(top_down, bool):  # a quoted "false" must not switch it on
+            raise ValueError(f"model.top_down must be true or false, got {top_down!r}")
+        self.top_down = top_down
         self.td_level: dict[int, str] = {}  # far horizon -> the finer level its branch predicts
         self.td_heads: nn.ModuleDict | None = None
         if not self.top_down:
@@ -213,13 +216,13 @@ class JEPA(nn.Module):
                 "model.top_down needs a far head on a level with a finer level below it, and none "
                 f"is built (far horizons {self.far_horizons}; add the far stage to train.stages)"
             )
-        size = {name: lv["size"] for name, lv in m["levels"].items()}
+        shape = (
+            self.context_encoder.level_shape
+        )  # {level: (channels, size)}, validated by the encoder
         td: dict[str, nn.Module] = {}
         for k, fine in self.td_level.items():
             coarse = self.head_level[k]
-            scale = size[fine] // size[coarse]
-            if scale * size[coarse] != size[fine]:
-                raise ValueError(f"top-down {coarse} -> {fine}: sizes {size} are not a whole ratio")
+            scale = shape[fine][1] // shape[coarse][1]  # the encoder only builds power-of-2 steps
             key = fine.lower()  # the branch's output lives at the finer level: use its head shape
             td[str(k)] = TopDownHead(
                 channels[coarse],
@@ -323,12 +326,15 @@ class JEPA(nn.Module):
                 continue
             stacks = torch.cat([target_stack(frames, self.context_frames, k) for k in ks])
             zs = self.target_encoder(stacks, upto=level)
-            z = normalize_target(zs[level], self.target_norm)
+            z = zs[level]
+            fine = {self.td_level[k]: zs[self.td_level[k]] for k in ks if k in self.td_level}
+            del zs  # free the other intermediate levels now, as before top-down (peak memory)
+            z = normalize_target(z, self.target_norm)
             for i, k in enumerate(ks):
                 targets[k] = z[i * b : (i + 1) * b].detach()
                 if k in self.td_level:
-                    fine = zs[self.td_level[k]][i * b : (i + 1) * b]
-                    td[k] = normalize_target(fine, self.target_norm).detach()
+                    zf = fine[self.td_level[k]][i * b : (i + 1) * b]
+                    td[k] = normalize_target(zf, self.target_norm).detach()
         return targets, td
 
     @torch.no_grad()
@@ -385,6 +391,19 @@ def check_loss_cfg(model: JEPA, loss_cfg: dict) -> None:
         )
 
 
+def _gaussian_terms(
+    losses: dict, tag: str, pred: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One Gaussian head's NLL against its detached target (= gaussian_nll), and its detached
+    diagnostics sqerr/<tag> and logvar/<tag>. The far heads and the top-down branches both go
+    through it, so their terms can't drift apart. Returns (nll, sqerr)."""
+    err2 = _err2(pred, target)  # computed once, shared by the loss and the diagnostics
+    sqerr = _sq_from_err2(err2)  # = latent_loss(pred, target)
+    losses[f"sqerr/{tag}"] = sqerr.detach()
+    losses[f"logvar/{tag}"] = logvar.detach().mean()
+    return _nll_from_err2(err2, logvar), sqerr
+
+
 def losses_from_output(
     model: JEPA, out: dict, loss_cfg: dict, active: Collection[int]
 ) -> dict[str, torch.Tensor]:
@@ -396,26 +415,20 @@ def losses_from_output(
     total = out["context"][model.level_names[0]].new_zeros(())
     for k in model.horizons:
         pred, target = out["pred"][k], out["target"][k]  # target: detached, already normalized
-        err2 = _err2(pred, target)  # computed once, shared by the loss and the diagnostics
-        sqerr = _sq_from_err2(err2)  # = latent_loss(pred, target)
         if k in model.far_horizons:
-            lk = _nll_from_err2(err2, out["logvar"][k])  # = gaussian_nll(pred, logvar, target)
-            losses[f"sqerr/k{k}"] = sqerr.detach()
-            losses[f"logvar/k{k}"] = out["logvar"][k].detach().mean()
+            lk, sqerr = _gaussian_terms(losses, f"k{k}", pred, out["logvar"][k], target)
         else:
+            sqerr = _sq_from_err2(_err2(pred, target))  # = latent_loss(pred, target)
             lk = sqerr
         losses[f"loss/k{k}"] = lk
         losses[f"relerr/k{k}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
             total = total + loss_cfg["w_k"] * lk
     for k in model.td_level:  # empty unless model.top_down
-        err2 = _err2(out["td_pred"][k], out["td_target"][k])
-        sqerr = _sq_from_err2(err2)
-        ltd = _nll_from_err2(err2, out["td_logvar"][k])  # the far heads' NLL and reduction
-        losses[f"loss/td/k{k}"] = ltd
-        losses[f"sqerr/td/k{k}"] = sqerr.detach()
-        losses[f"logvar/td/k{k}"] = out["td_logvar"][k].detach().mean()
-        losses[f"relerr/td/k{k}"] = _relerr_from_sq(sqerr, out["td_target"][k], eps=1e-12)
+        tag, target = f"td/k{k}", out["td_target"][k]
+        ltd, sqerr = _gaussian_terms(losses, tag, out["td_pred"][k], out["td_logvar"][k], target)
+        losses[f"loss/{tag}"] = ltd
+        losses[f"relerr/{tag}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
             total = total + loss_cfg["w_td"] * ltd
     active_levels = {model.head_level[k] for k in active}

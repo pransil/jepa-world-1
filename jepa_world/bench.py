@@ -111,6 +111,10 @@ def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> 
         "ms_train_step": ms_step,
         "head_params": sum(p.numel() for h in l1_heads for p in h.parameters()),
         "far_head_params": sum(p.numel() for h in far_heads for p in h.parameters()),
+        # M7 top-down branches (model.top_down); their cost shows in ms_train_step
+        "td_head_params": (
+            0 if model.td_heads is None else sum(p.numel() for p in model.td_heads.parameters())
+        ),
         "stages": list(cfg["train"]["stages"]),
         "total_trainable_params": sum(p.numel() for p in model.trainable_parameters()),
         # The cache is emptied between variants, and the caching allocator keeps this variant's

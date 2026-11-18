@@ -79,6 +79,13 @@ def test_on_adds_only_td_heads_keys_and_off_checkpoints_load_into_it():
     assert unexpected == [] and set(missing) == extra
 
 
+@pytest.mark.parametrize("value", ['"false"', '"true"', "0", "1"])
+def test_top_down_must_be_a_real_bool(value):
+    # bool("false") is True: a quoted value must not silently turn the reference into the ablation.
+    with pytest.raises(ValueError, match="top_down"):
+        _model(tiny_far_cfg(f"model.top_down={value}"))
+
+
 def test_top_down_without_far_heads_is_a_config_error():
     with pytest.raises(ValueError, match="top_down"):
         _model(tiny_cfg("model.top_down=true"))  # near only: there is no far head to extend
@@ -114,14 +121,26 @@ def test_targets_are_the_target_encoders_finer_level_at_t_plus_k():
 
 
 def test_the_branch_reads_only_its_far_heads_coarse_level():
+    """Option A: the branch's whole input is the far head's context level, the very tensor the
+    far head reads. A cascade (option C) that also fed it a finer level would fail here."""
     cfg = td_cfg()
     model = _model(cfg)
-    out = model(random_frames(cfg))
-    coarse = {20: "L3", 10: "L2"}
-    for k, level in coarse.items():
-        mean, logvar = model.td_heads[str(k)](out["context"][level])
-        torch.testing.assert_close(mean, out["td_pred"][k], rtol=0, atol=0)
-        torch.testing.assert_close(logvar, out["td_logvar"][k], rtol=0, atol=0)
+    seen: dict[int, tuple] = {}
+    hooks = [
+        model.td_heads[str(k)].register_forward_pre_hook(
+            lambda _m, args, k=k: seen.__setitem__(k, args)
+        )
+        for k in FAR
+    ]
+    try:
+        out = model(random_frames(cfg))
+    finally:
+        for h in hooks:
+            h.remove()
+    for k, level in {20: "L3", 10: "L2"}.items():
+        feat = seen[k][0]
+        assert feat is out["context"][level], k  # the same tensor, not a copy or a concat
+        assert all(a is None for a in seen[k][1:])  # the action slot only (None in v1)
 
 
 def test_top_down_head_upsamples_by_its_scale():

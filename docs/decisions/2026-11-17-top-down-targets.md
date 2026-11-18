@@ -54,14 +54,18 @@ The exact specification for the implementing lane:
   records it in `models/DESIGN.md`.
 - **Gradient path:** the new terms backprop into the head and the context encoder up to that head's
   level. The targets are detached, and the target encoder stays under `no_grad`, as for every head.
-- **Logging:** every step, as `loss/td/20`, `loss/td/10`, plus `sqerr/td/<k>` and
-  `logvar/td/<k>`, the same as the far heads (SPEC §5.4).
+- **Logging:** every step, as `loss/td/k20`, `loss/td/k10`, plus `sqerr/td/k<k>`,
+  `logvar/td/k<k>` and `relerr/td/k<k>`, the same as the far heads (SPEC §5.4). These are the
+  implemented names. They follow the repo's `loss/k<k>` convention; the draft of this file said
+  `loss/td/20`.
 - **Schedule:** the terms join `loss/total` when the `far` stage starts
   (`train.stage_start.far`). They are logged from step 0.
 - **Switch:** `model.top_down: false` by default, the names proposed for the implementing lane. With
   it off, no extra parameters are built, so the reference model is unchanged.
 
 ## Consequences
+- **Implemented** in the M7 top-down lane, after M4 and M5. See `models/DESIGN.md`, "Top-down
+  prediction", and `tests/test_top_down.py`. What follows is the plan as written before the code.
 - No code now. Implementation waits until M4 (far heads) and M5 have merged. It comes in a later
   M7 code lane through `/builder`, touching `models/heads.py`, `models/jepa.py`, `train.py`
   (logging) and `configs/base.yaml` (`model.top_down`, `loss.w_td`). These are model and loss keys,

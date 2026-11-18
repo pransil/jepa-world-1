@@ -146,7 +146,9 @@ loss/td/k<k> = gaussian_nll(td_pred, td_logvar, td_target)      loss/total += w_
   - Off: no `td_heads` module exists, so the state-dict keys, the forward output and every loss
     term are exactly as before. Old checkpoints load strictly (test).
   - A config without the key (a run started before M7) reads as off.
-  - On without far horizons built is a config error.
+  - On without far horizons built is a config error, and so is any value that isn't a YAML bool.
+    `bool("false")` is True, so a quoted value would silently turn the reference into the ablation.
+  - `bench.py` reports `td_head_params`. The branches' time shows in `ms_train_step`.
 - **The branch reads the coarse level the far head reads, never a finer context level.**
   - Gradient from the finer target flows through the branch into context L3 (k = 20) and L2
     (k = 10). That is "errors propagate upward".

@@ -66,6 +66,10 @@ The exact specification for the implementing lane:
 ## Consequences
 - **Implemented** in the M7 top-down lane, after M4 and M5. See `models/DESIGN.md`, "Top-down
   prediction", and `tests/test_top_down.py`. What follows is the plan as written before the code.
+- **Measured cost: +50–55 ms per step (about +35%), not the +10–20 ms estimated under A.** The
+  k = 20 branch runs an L2-sized head (128 wide at 32×32), and the estimate missed it. Bench runs
+  and the breakdown are in `models/DESIGN.md`. A narrower k = 20 branch would cut most of it, at the
+  price of a new width key. It hasn't been done, because the ablation is only 2 runs.
 - No code now. Implementation waits until M4 (far heads) and M5 have merged. It comes in a later
   M7 code lane through `/builder`, touching `models/heads.py`, `models/jepa.py`, `train.py`
   (logging) and `configs/base.yaml` (`model.top_down`, `loss.w_td`). These are model and loss keys,

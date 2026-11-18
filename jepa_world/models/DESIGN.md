@@ -149,6 +149,17 @@ loss/td/k<k> = gaussian_nll(td_pred, td_logvar, td_target)      loss/total += w_
   - On without far horizons built is a config error, and so is any value that isn't a YAML bool.
     `bool("false")` is True, so a quoted value would silently turn the reference into the ablation.
   - `bench.py` reports `td_head_params`. The branches' time shows in `ms_train_step`.
+- **Measured cost** (`python -m jepa_world.bench --config configs/m4_far_synthetic.yaml --hidden 32
+  --kernel 3`, MPS, B = 32, sha cbdf82f, clean, off/on interleaved, load average about 84):
+  - the step goes from 151 / 146 ms (off: `…-bench-l1-heads-995ee7`, `…-2b58a0`) to 201 / 201 ms
+    (on: `…-fd99f9`, `…-840622`). That is **+50–55 ms (about +35%)**, with no CPU fallback;
+  - MPS driver memory goes from 3261 to 4270 MB;
+  - the branches add 538k parameters: k = 20 has 485k, k = 10 has 53k.
+
+  The k = 20 branch dominates. It is a 3×3 conv from 256 + 8 to 128 channels at 32×32, the L2 head
+  shape, about 1.4× the k = 20 far head's compute. The decision had estimated +10–20 ms, counting
+  only the 64×64 output. If the cost matters, the lever is a narrower k = 20 branch, which would be
+  a new width key.
 - **The branch reads the coarse level the far head reads, never a finer context level.**
   - Gradient from the finer target flows through the branch into context L3 (k = 20) and L2
     (k = 10). That is "errors propagate upward".

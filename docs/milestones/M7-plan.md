@@ -201,8 +201,9 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
   - the variance on every level stays above the floor.
 - **Secondary:** the L3 and L2 linear-probe ball-position error, and probes for the hidden
   parameters at L3.
-- **Runs:** top-down on × seeds 0, 1 = **2 new runs**. ≈ 1.1–1.4 GPU-h, with the step about 10%
-  slower (the decision estimates +10–20 ms).
+- **Runs:** top-down on × seeds 0, 1 = **2 new runs**. ≈ 1.3–1.6 GPU-h. The step is about 35%
+  slower, measured at 201 ms vs 146–151 ms on M4's synthetic bench (`models/DESIGN.md`, "Top-down
+  prediction"). That is more than the decision's +10–20 ms estimate.
 - **Depends on:** M4, M5, M6. The code has landed.
 - **Config:** `configs/m7_top_down.yaml` (`model.top_down: true`), which the experiment lane writes
   with its run, per `/experiment` Step 2.
@@ -271,9 +272,9 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 | 1 | Pixel weight 0 / 0.05 / 0.5 | `loss.w_pix` | key yes; consumer M5 | m5 | 4 | 2.1–2.5 |
 | 2 | Decoder skips on/off | `model.unet_skips` | **yes** (M5) | — | 4 | 2.1–2.5 |
 | 3 | track_lagged vs track_full | `sim.camera_mode` | **yes** (M1) | — (dataset build) | 2 | 1.1–1.2 |
-| 4 | Top-down (A) | `model.top_down`, `loss.w_td` | **yes** (M7 top-down lane) | — | 2 | 1.1–1.4 |
+| 4 | Top-down (A) | `model.top_down`, `loss.w_td` | **yes** (M7 top-down lane) | — | 2 | 1.3–1.6 |
 | 5 | Obstacles | `sim.obstacles` | **yes** (PR #17) | — (dataset build) | 2 | 1.1–1.2 |
-| | **Total** | | | | **16** | **≈ 8.5–10** (training only) |
+| | **Total** | | | | **16** | **≈ 8.7–10.2** (training only) |
 
 **Order:** §1, then §2 (it shares §1's runs), then §3, then §4, then §5. §1 and §3 need no new code
 once M5 and M6 land. Run them back to back, keeping one queued job per lane.

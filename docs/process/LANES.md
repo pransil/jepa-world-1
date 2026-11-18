@@ -70,9 +70,12 @@ A lane that has merged its PR removes its own worktree, following the order in `
 3. `tools/finish-lane.sh wt-<slug>`.
 
 The script removes the worktree and its local branch only when the PR merged at the branch's tip,
-nothing is uncommitted or unpulled, and no live session is inside it. Otherwise it removes nothing
-and says why. It is the only allowed way to delete a worktree. The user's settings deny a raw
-`git worktree remove` (`tools/DESIGN.md`).
+nothing is uncommitted or unpulled, and no process is running inside it. Claude Code's own
+`caffeinate` doesn't count. Otherwise it removes nothing and says why. It is the only allowed way
+to delete a worktree. The user's settings deny a raw `git worktree remove` (`tools/DESIGN.md`).
+
+If the call is denied (a declined prompt, or the auto-mode classifier), the lane leaves the tree
+and gives the user `! tools/finish-lane.sh wt-<slug>` to run. It doesn't retry another way.
 
 Run `tools/lane-owners.sh` to see the rest. Merged, clean trees show as `merged: candidate`, and
 `finish-lane.sh` makes the final call. A worktree with no live session might be paused, not

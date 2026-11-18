@@ -1,7 +1,8 @@
 """tools/finish-lane.sh: removes a merged lane, and nothing that might still hold work.
 
 One throwaway main clone per module, with one lane per scenario under .claude/worktrees/. A fake
-`gh` reports which branch heads have a merged PR. A "running process" is a real `sleep` child.
+`gh` reports which branch heads have a merged PR. A "running process" is a real `sleep` child, and
+a "Claude session" is a pid with a real unix socket in CC_SOCKS_DIR.
 This repo's own worktrees are never touched. Design: tools/DESIGN.md.
 
 The script gathers every problem from its fast checks, then refuses through one gate. So a single
@@ -12,7 +13,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import socket
 import subprocess
+import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -45,8 +50,8 @@ __pycache__/
 class Lanes:
     """A main clone at <tmp>/main whose lanes live in .claude/worktrees/wt-*."""
 
-    def __init__(self, tmp: Path):
-        self.main = tmp / "main"
+    def __init__(self, tmp: Path, socks: Path):
+        self.main, self.socks = tmp / "main", socks
         self.merged, self.gh_log = tmp / "gh-merged", tmp / "gh-log"
         self.merged.write_text("")
         (tmp / "bin").mkdir()
@@ -57,6 +62,7 @@ class Lanes:
             "PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}",
             "FAKE_GH_MERGED": str(self.merged),
             "FAKE_GH_LOG": str(self.gh_log),
+            "CC_SOCKS_DIR": str(socks),
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_AUTHOR_NAME": "t",
@@ -118,9 +124,9 @@ class Lanes:
 
 
 @contextmanager
-def process_in(cwd: Path):
+def process_in(cwd: Path, argv: list[str] | None = None, executable: str | None = None):
     """A process of this user whose working directory is `cwd`, as a session or a job would be."""
-    proc = subprocess.Popen(["sleep", "30"], cwd=cwd)
+    proc = subprocess.Popen(argv or ["sleep", "30"], cwd=cwd, executable=executable)
     try:
         yield proc
     finally:
@@ -130,7 +136,38 @@ def process_in(cwd: Path):
 
 @pytest.fixture(scope="module")
 def lanes(tmp_path_factory):
-    return Lanes(tmp_path_factory.mktemp("lanes").resolve())
+    # Unix socket paths are limited to ~104 bytes, and macOS tmp paths are longer than that.
+    socks = Path(tempfile.mkdtemp(prefix="ccs", dir="/tmp"))
+    yield Lanes(tmp_path_factory.mktemp("lanes").resolve(), socks)
+    shutil.rmtree(socks, ignore_errors=True)
+
+
+@contextmanager
+def session(lanes: Lanes, pid: int):
+    """Register `pid` as a live Claude Code session, the way /tmp/cc-socks does."""
+    sock = socket.socket(socket.AF_UNIX)
+    path = lanes.socks / f"{pid}.sock"
+    try:
+        sock.bind(str(path))
+        yield
+    finally:
+        sock.close()
+        path.unlink(missing_ok=True)
+
+
+def caffeinate_in(cwd: Path):
+    """A process named caffeinate, child of this test process. Claude Code starts
+    `caffeinate -i -t 300` in the session's cwd to keep the Mac awake. macOS has the real one, and
+    SIGKILLs copies of Apple binaries. Linux has none, so there it is a script named caffeinate
+    whose shebang is this Python's absolute path. The kernel names a script's process after the
+    script, and it starts no child. (A renamed or symlinked `sleep` is unreliable: multicall
+    coreutils can pick the applet from the executable's path and exit at once.)"""
+    if real := shutil.which("caffeinate"):
+        return process_in(cwd, [real, "-i", "-t", "30"])
+    fake = Path(tempfile.mkdtemp(prefix="caff", dir="/tmp")) / "caffeinate"
+    fake.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+    fake.chmod(0o755)
+    return process_in(cwd, [str(fake)])
 
 
 def output(r: subprocess.CompletedProcess) -> str:
@@ -173,13 +210,20 @@ def test_removes_a_merged_lane_once_no_process_runs_inside(lanes):
     (wt / "pkg" / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"")
     (wt / ".claude").mkdir()
     (wt / ".claude" / "settings.local.json").write_text("{}")
-    with process_in(lanes.main):  # a session in the main clone is not inside the lane
+    # A process in the main clone is not inside the lane. A caffeinate inside blocks it like any
+    # process, unless its parent is a live Claude session.
+    with process_in(lanes.main), caffeinate_in(wt) as caff:
         with process_in(wt / "pkg") as job:
             r = lanes.finish("wt-done")
+            assert caff.poll() is None, f"the caffeinate stand-in exited ({caff.returncode})"
             assert r.returncode == 1, output(r)
             assert f"process {job.pid} " in output(r)
+            assert f"process {caff.pid} " in output(r)  # no session registered yet
             assert lanes.exists("wt-done") == (True, True)
-        r = lanes.finish("wt-done")
+        assert caff.poll() is None
+        with session(lanes, os.getpid()):  # this test process is caffeinate's parent
+            r = lanes.finish("wt-done")
+        assert caff.poll() is None, "caffeinate must have been running inside during that run"
     assert r.returncode == 0, output(r)
     assert lanes.exists("wt-done") == (False, False)
     assert not wt.exists()
@@ -221,6 +265,36 @@ def test_refuses_a_branch_without_a_merge_at_its_tip(lanes, case):
         lanes.git("switch", "-q", "main")
     assert r.returncode == 1, output(r)
     assert why in output(r)
+    assert lanes.exists(name) == (True, True)
+
+
+# Stand-ins for lsof (macOS) and GNU find (Linux), the two process backends. "empty": the tool
+# is missing or prints nothing. "garbled": every pid is listed, but with a cwd that isn't its own,
+# as a parse error would. Either way the list can't be trusted to show what runs in the worktree.
+BLIND_TOOL = {
+    "empty": "#!/bin/sh\nexit 0\n",
+    "garbled": """#!/bin/sh
+for p in $(ps -eo pid=); do
+  case "${0##*/}" in
+    lsof) printf 'p%s\\nn/nowhere\\n' "$p" ;;
+    find) printf '/proc/%s\\t/nowhere\\n' "$p" ;;
+  esac
+done
+""",
+}
+
+
+@pytest.mark.parametrize("listing", ["empty", "garbled"])
+def test_refuses_when_running_processes_cant_be_listed(lanes, tmp_path, listing):
+    for tool in ("lsof", "find"):
+        (tmp_path / tool).write_text(BLIND_TOOL[listing])
+        (tmp_path / tool).chmod(0o755)
+    name = f"wt-blind-{listing}"
+    lanes.lane(name)
+    lanes.merge(name)
+    r = lanes.finish(name, PATH=f"{tmp_path}{os.pathsep}{lanes.env['PATH']}")
+    assert r.returncode == 1, output(r)
+    assert "can't list running processes" in output(r)
     assert lanes.exists(name) == (True, True)
 
 

@@ -1,0 +1,9 @@
+# M4 far-collapse comparison, baseline: the guard as it was before the M4 decision (mean over
+# features, w_var 1). Pinned explicitly, so it reproduces whatever base.yaml defaults to.
+# Synthetic only. experiments/2026-11-17-m4-far-collapse.md
+base: m4_far_synthetic.yaml
+
+loss:
+  target_norm: none
+  var_reduce: mean
+  w_var: 1.0

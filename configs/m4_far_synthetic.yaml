@@ -1,0 +1,11 @@
+# M4: near + far heads on the synthetic moving-disc source. For smoke runs and timing only. Not
+# evidence about the real task (that needs data.source: episodes, from M2).
+base: base.yaml
+
+data:
+  source: synthetic
+
+train:
+  stages: [near, far]
+  stage_start: {near: 0, far: 100}
+  steps: 300

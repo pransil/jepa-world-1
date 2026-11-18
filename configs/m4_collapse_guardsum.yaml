@@ -1,0 +1,9 @@
+# M4 far-collapse comparison, variant (b): variance guard summed over channels (the latent losses'
+# scale) at VICReg's variance weight; raw targets. All three loss switches pinned. This is what
+# M4 shipped as the default. Synthetic only. experiments/2026-11-17-m4-far-collapse.md
+base: m4_far_synthetic.yaml
+
+loss:
+  target_norm: none
+  var_reduce: sum
+  w_var: 25.0

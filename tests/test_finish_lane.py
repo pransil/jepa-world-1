@@ -16,6 +16,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -157,14 +158,16 @@ def session(lanes: Lanes, pid: int):
 def caffeinate_in(cwd: Path):
     """A process named caffeinate, child of this test process. Claude Code starts
     `caffeinate -i -t 300` in the session's cwd to keep the Mac awake. macOS has the real one, and
-    SIGKILLs copies of Apple binaries. Linux has none, so there it is sleep exec'd through a
-    symlink named caffeinate: the kernel names the process after the path, and argv[0] stays
-    "sleep" for multicall coreutils."""
+    SIGKILLs copies of Apple binaries. Linux has none, so there it is a script named caffeinate
+    whose shebang is this Python's absolute path. The kernel names a script's process after the
+    script, and it starts no child. (A renamed or symlinked `sleep` is unreliable: multicall
+    coreutils can pick the applet from the executable's path and exit at once.)"""
     if real := shutil.which("caffeinate"):
         return process_in(cwd, [real, "-i", "-t", "30"])
-    link = Path(tempfile.mkdtemp(prefix="caff", dir="/tmp")) / "caffeinate"
-    link.symlink_to(shutil.which("sleep"))
-    return process_in(cwd, ["sleep", "30"], executable=str(link))
+    fake = Path(tempfile.mkdtemp(prefix="caff", dir="/tmp")) / "caffeinate"
+    fake.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+    fake.chmod(0o755)
+    return process_in(cwd, [str(fake)])
 
 
 def output(r: subprocess.CompletedProcess) -> str:
@@ -212,6 +215,7 @@ def test_removes_a_merged_lane_once_no_process_runs_inside(lanes):
     with process_in(lanes.main), caffeinate_in(wt) as caff:
         with process_in(wt / "pkg") as job:
             r = lanes.finish("wt-done")
+            assert caff.poll() is None, f"the caffeinate stand-in exited ({caff.returncode})"
             assert r.returncode == 1, output(r)
             assert f"process {job.pid} " in output(r)
             assert f"process {caff.pid} " in output(r)  # no session registered yet

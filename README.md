@@ -1,10 +1,12 @@
 # jepa-world-1
 
 A small, controllable testbed for a **JEPA-style world model with multi-horizon prediction**. A
-ball rolls and bounces over procedurally generated 1-D terrain, simulated in MuJoCo and rendered
-side-on at 64×64. The model learns to predict *embeddings* of future frames at horizons of 1 to 20
-frames. Fine U-Net levels predict near futures, and coarse levels predict far futures with explicit
-uncertainty.
+ball rolls and bounces over procedurally generated terrain, simulated in MuJoCo and rendered
+side-on at 64×64. The world has the usual x, y, z axes with z up. In this simple first version the
+terrain is constant along y, so its surface is z = h(x) and the ball stays in the x–z plane. Later
+versions will use full terrain, z = h(x, y). The model learns to predict *embeddings* of future
+frames at horizons of 1 to 20 frames. Fine U-Net levels predict near futures, and coarse levels
+predict far futures with explicit uncertainty.
 
 Ground truth is exact (simulator state, not labels), and the hidden physical parameters (radius,
 friction, restitution) are known. That lets the embedding hierarchy, uncertainty calibration and
@@ -16,7 +18,7 @@ generalisation to unseen terrain all be tested directly.
 
 ```mermaid
 flowchart LR
-  CFG["configs/*.yaml<br/>generator config + seeds"] --> SIM["sim/ — MuJoCo<br/>heightfield h(x), ball in the x–z plane,<br/>tracking side camera, 64×64 @ 15 fps"]
+  CFG["configs/*.yaml<br/>generator config + seeds"] --> SIM["sim/ — MuJoCo<br/>terrain z = h(x), constant in y,<br/>ball in the x–z plane,<br/>tracking side camera, 64×64 @ 15 fps"]
   SIM --> DS["$JEPA_ARTIFACTS/datasets/&lt;hash&gt;/<br/>60-frame episodes + per-frame ground truth<br/>position, velocity, camera, event flags"]
   DS --> SPLIT["data/ — split by TERRAIN SEED<br/>dev 10 · train 500 · test 50 (held out)"]
   SPLIT --> TRAIN["train.py<br/>JEPA + auxiliary heads<br/>MPS, under the GPU lock"]

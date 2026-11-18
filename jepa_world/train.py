@@ -31,25 +31,49 @@ from jepa_world.utils.locks import gpu_lock
 from jepa_world.utils.paths import new_run_dir
 from jepa_world.utils.repro import run_metadata, seed_everything
 
-LATER_STAGES = {"far": "M4", "goal": "M5", "pixel": "M5"}
+BUILT_STAGES = ("near", "far")
+LATER_STAGES = {"goal": "M5", "pixel": "M5"}
+
+
+def _stage_of(cfg: dict, k: int) -> str:
+    return "far" if k in cfg["model"]["far_horizons"] else "near"
 
 
 def model_horizons(cfg: dict) -> list[int]:
-    """The horizons that get heads under train.stages. M3 builds the near stage only."""
-    later = [s for s in cfg["train"]["stages"] if s != "near"]
+    """The horizons that get heads under train.stages: near ones for 'near', far ones for 'far'."""
+    stages = cfg["train"]["stages"]
+    later = [s for s in stages if s not in BUILT_STAGES]
     if later:
         built_in = ", ".join(f"{s} in {LATER_STAGES.get(s, '?')}" for s in later)
         raise NotImplementedError(
-            f"train.stages {later} are not built yet ({built_in}); use [near]"
+            f"train.stages {later} are not built yet ({built_in}); use a subset of {list(BUILT_STAGES)}"
         )
-    far = set(cfg["model"]["far_horizons"])
-    horizons = [k for k in cfg["model"]["horizons"] if k not in far]
+    horizons = [k for k in cfg["model"]["horizons"] if _stage_of(cfg, k) in stages]
     if not horizons:
         raise ValueError(
-            f"model.horizons {cfg['model']['horizons']} has no near horizon "
-            f"(far_horizons {sorted(far)}); the near stage needs at least one"
+            f"model.horizons {cfg['model']['horizons']} has no {' or '.join(stages)} horizon "
+            f"for train.stages {stages} (far_horizons {cfg['model']['far_horizons']})"
         )
     return horizons
+
+
+def _check_stage_start(cfg: dict) -> None:
+    """Every stage needs a start step >= 0, and one must start at 0 (or nothing would train)."""
+    stages, start = cfg["train"]["stages"], cfg["train"]["stage_start"]
+    for s in stages:
+        if not isinstance(start.get(s), int) or start[s] < 0:
+            raise ValueError(f"train.stage_start.{s} must be an int >= 0, got {start.get(s)!r}")
+    if min(start[s] for s in stages) != 0:
+        raise ValueError(f"train.stage_start {start}: some stage in {stages} must start at step 0")
+
+
+def active_horizons(cfg: dict, horizons: list[int], step: int | None) -> list[int]:
+    """The horizons whose stage has started by `step` (SPEC §5.5,
+    docs/decisions/2026-11-17-stage-schedule-within-run.md). step=None: all of them."""
+    if step is None:
+        return list(horizons)
+    start = cfg["train"]["stage_start"]
+    return [k for k in horizons if step >= start[_stage_of(cfg, k)]]
 
 
 def _require_built_source(cfg: dict) -> None:
@@ -97,6 +121,7 @@ def check_config(cfg: dict) -> list[int]:
             f"train.precision={cfg['train']['precision']!r}: only fp32 is implemented. A "
             "lower-precision path must be built and tested explicitly first (SPEC §6)"
         )
+    _check_stage_start(cfg)
     return horizons
 
 
@@ -112,12 +137,18 @@ def build_optimizer(model: JEPA, cfg: dict) -> torch.optim.Optimizer:
 
 
 def train_step(
-    model: JEPA, opt: torch.optim.Optimizer, frames: torch.Tensor, cfg: dict
+    model: JEPA,
+    opt: torch.optim.Optimizer,
+    frames: torch.Tensor,
+    cfg: dict,
+    step: int | None = None,
 ) -> dict[str, torch.Tensor]:
     """One step: losses -> backward -> optimizer step -> EMA update (in that order).
+    `step` selects the active stages (train.stage_start); None means every built stage.
     Returns every term detached, still on the device (no host sync here)."""
     model.train()
-    losses = compute_losses(model, frames, cfg["loss"])
+    active = active_horizons(cfg, model.horizons, step)
+    losses = compute_losses(model, frames, cfg["loss"], active=active)
     opt.zero_grad(set_to_none=True)
     losses["loss/total"].backward()
     opt.step()
@@ -184,7 +215,7 @@ def run(
         with open(run_dir / "metrics.jsonl", "a") as f:
             try:
                 for step in range(1, steps + 1):
-                    losses = train_step(model, opt, next(batches).to(device), cfg)
+                    losses = train_step(model, opt, next(batches).to(device), cfg, step=step)
                     keys = keys or list(losses)
                     last = torch.stack([losses[k] for k in keys])
                     rows.append((step, last))

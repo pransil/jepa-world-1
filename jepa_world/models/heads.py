@@ -1,6 +1,7 @@
-"""Predictor heads, one per horizon k (SPEC §4.5). M3: deterministic-mean heads on L1.
+"""Predictor heads, one per horizon k (SPEC §4.5).
 
-M4 adds the far heads (mean + log-variance on L2 / L3).
+HorizonHead: near heads (k = 1..5, on L1), a deterministic mean.
+GaussianHead: far heads (k = 10 on L2, k = 20 on L3), a mean and a bounded log-variance.
 """
 
 from __future__ import annotations
@@ -55,3 +56,25 @@ class HorizonHead(nn.Module):
         elif action is not None:
             raise ValueError("an action was given, but model.action_dim is 0")
         return self.body(torch.cat(parts, dim=1))
+
+
+class GaussianHead(HorizonHead):
+    """Far head: the same body, with a 2 * out_ch output conv split into (mean, raw logvar).
+
+    logvar = b * tanh(raw / b), with b = logvar_bound: always in (-b, b), so the variance is
+    positive and finite. It is the identity near 0 and keeps a gradient everywhere, unlike a hard
+    clamp (models/DESIGN.md). Returns (mean, logvar), each (B, out_ch, H, W).
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, *, logvar_bound: float, **kw):
+        if logvar_bound <= 0:
+            raise ValueError(f"logvar_bound must be > 0, got {logvar_bound}")
+        super().__init__(in_ch, 2 * out_ch, **kw)
+        self.logvar_bound = float(logvar_bound)
+
+    def forward(  # type: ignore[override]
+        self, feat: torch.Tensor, action: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mean, raw = super().forward(feat, action).chunk(2, dim=1)
+        b = self.logvar_bound
+        return mean, b * torch.tanh(raw / b)

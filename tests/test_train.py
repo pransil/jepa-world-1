@@ -121,7 +121,7 @@ def test_episode_source_needs_its_split_built():
         train.check_config(tiny_cfg("data.source=episodes"))
 
 
-@pytest.mark.parametrize("stage, milestone", [("far", "M4"), ("goal", "M5"), ("pixel", "M5")])
+@pytest.mark.parametrize("stage, milestone", [("goal", "M5"), ("pixel", "M5")])
 def test_later_stages_say_which_milestone_builds_them(stage, milestone):
     with pytest.raises(NotImplementedError, match=milestone):
         train.check_config(tiny_cfg(f"train.stages=[near, {stage}]"))

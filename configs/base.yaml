@@ -67,10 +67,15 @@ model:                        # SPEC §4
   norm_groups: 8              # GroupNorm groups in encoder and heads: no batch statistics, no buffers
   horizons: [1, 2, 3, 4, 5, 10, 20]
   head_level: {1: L1, 2: L1, 3: L1, 4: L1, 5: L1, 10: L2, 20: L3}
-  far_horizons: [10, 20]      # Gaussian mean + log-variance heads
+  far_horizons: [10, 20]      # Gaussian mean + log-variance heads; each reads only its own level (docs/decisions/2026-11-17-far-heads-read-their-level.md)
+  far_logvar_bound: 10.0      # far-head log-variance = b * tanh(raw / b), in (-b, b): smooth, never inf
   horizon_embed_dim: 8        # learned per-horizon vector, broadcast over positions (SPEC §4.5)
   l1_head_hidden: 32          # benchmarked on MPS (docs/decisions/2026-11-17-l1-head-width.md)
   l1_head_kernel: 3           # 3x3, not 1x1: keeps a 9x9 px receptive field at L1 (same decision)
+  l2_head_hidden: 128         # k = 10 head: hidden = L2 channels (cheap at 32x32; see models/DESIGN.md)
+  l2_head_kernel: 3
+  l3_head_hidden: 256         # k = 20 head: hidden = L3 channels (8x8)
+  l3_head_kernel: 3
   ema_momentum: 0.996         # [OPEN] maybe toward 0.999 later
   action_dim: 0               # slot exists, zeros in v1
 
@@ -92,6 +97,7 @@ train:                        # SPEC §6
   weight_decay: 0.01          # torch 2.15 AdamW default
   precision: fp32             # do not assume bf16 works on MPS
   stages: [near, far, goal, pixel]   # SPEC §5.5
+  stage_start: {near: 0, far: 2000}  # step a stage's terms join loss/total; logged from step 0 (docs/decisions/2026-11-17-stage-schedule-within-run.md). far: placeholder
   steps: 10000                # placeholder, set per experiment
   log_every: 50               # flush interval for metrics.jsonl; every step is still logged
   ckpt_every: 2000            # plus one checkpoint at the end

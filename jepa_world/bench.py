@@ -73,12 +73,16 @@ def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> 
     with torch.no_grad():
         feat = model.context_encoder(context_stack(frames, model.context_frames), upto="L1")["L1"]
 
+    # The variant under test is the L1 (near) heads; far heads only enter the full step.
+    l1_heads = [model.heads[str(k)] for k in model.horizons if model.head_level[k] == "L1"]
+    far_heads = [model.heads[str(k)] for k in model.far_horizons]
+
     def heads_fwd_bwd():
         model.heads.zero_grad(set_to_none=True)
-        sum(h(feat).square().mean() for h in model.heads.values()).backward()
+        sum(h(feat).square().mean() for h in l1_heads).backward()
 
     def full_step():
-        train_step(model, opt, frames, cfg)
+        train_step(model, opt, frames, cfg)  # step=None: every built stage active
 
     ms_heads = _time_ms(heads_fwd_bwd, device, iters, warmup)
     ms_step = _time_ms(full_step, device, iters, warmup)
@@ -89,7 +93,9 @@ def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> 
         "device": str(device),
         "ms_heads_fwd_bwd": ms_heads,
         "ms_train_step": ms_step,
-        "head_params": sum(p.numel() for p in model.heads.parameters()),
+        "head_params": sum(p.numel() for h in l1_heads for p in h.parameters()),
+        "far_head_params": sum(p.numel() for h in far_heads for p in h.parameters()),
+        "stages": list(cfg["train"]["stages"]),
         "total_trainable_params": sum(p.numel() for p in model.trainable_parameters()),
         # The cache is emptied between variants, and the caching allocator keeps this variant's
         # freed blocks, so driver memory here approximates this variant's peak.

@@ -127,8 +127,11 @@ or merge a PR with failing tests.
 
 ## Step I: PR into main, self-merge on green
 
-1. `git fetch origin && git rebase origin/main` if `main` moved, re-run `./test`, then
-   `git push --force-with-lease` (your own branch only).
+1. If `main` moved, **merge** it into your branch. Don't rebase. Run `git fetch origin && git merge origin/main`,
+   re-run `./test`, then a plain `git push`. The branch was pushed at claim time, so a rebase
+   would need a force-push, and auto mode denies those. `main` uses merge commits anyway, so nothing
+   is lost. The server-side alternative is `gh pr update-branch <n>`, which merges by default
+   (don't pass `--rebase`), then `git pull` locally. Force-pushing a lane branch is never needed.
 2. `gh pr create --base main` with a body that **is the build record**:
    - one paragraph on what was built and where;
    - a link to DESIGN.md and any decision files;

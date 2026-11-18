@@ -164,7 +164,7 @@ def test_loader_rejects_a_train_ball_seed_on_disk_in_test():
     manifest = json.loads((path / "manifest.json").read_text())
     manifest["episodes"][0]["ball_seed"] = 0  # a train ball seed
     (path / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(LeakageError, match="ball_seed"):
+    with pytest.raises(LeakageError, match=r"ball_seeds \[0\] that the .test. split doesn.t own"):
         load_split(cfg, "test")
 
 

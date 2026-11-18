@@ -119,3 +119,14 @@ train:                        # SPEC §6
   steps: 10000                # placeholder, set per experiment
   log_every: 50               # flush interval for metrics.jsonl; every step is still logged
   ckpt_every: 2000            # plus one checkpoint at the end
+
+eval:                         # SPEC §7, M6: python -m jepa_world.eval --run <run dir>. Design: jepa_world/DESIGN.md
+  device: auto                # auto | mps | cpu (MPS takes the GPU lock)
+  batch_size: 64              # windows per forward pass
+  coverage_levels: [0.5, 0.9] # SPEC §7.2 calibration intervals
+  event_window: 5             # frames before / after an out-of-view or occlusion onset (metrics.event_response)
+  sim_params: ["true", "mean"]  # simulator baselines beside the model, quoted ("true" isn't a bool): PROPOSED, docs/decisions/2026-11-17-simulator-baseline-params.md
+  probes:
+    enabled: true             # linear probes on the frozen context levels (SPEC §7.2)
+    train_windows: 4000       # random windows of the run's training split the probes are fit on (placeholder)
+    seed: 0

@@ -1,0 +1,323 @@
+"""The model eval command, `python -m jepa_world.eval --run` (SPEC §7.2, §7.3, §8 M6).
+
+Tiny CPU models on tiny fake datasets: the numbers are meaningless, the wiring and the guarantees
+are what is tested (same windows as the baselines, frames-only input, no leakage across configs,
+test as the headline and dev kept separate)."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+
+import numpy as np
+import pytest
+import torch
+from fake_episodes import SHORT, SMALL_SPLITS, Recorder
+from tiny import AUX, BASE, TINY
+
+from jepa_world import eval as eval_cli
+from jepa_world import train
+from jepa_world.data import build
+from jepa_world.data.dataset import load_split, valid_starts
+from jepa_world.data.splits import LeakageError
+from jepa_world.utils import paths
+from jepa_world.utils.config import load_config
+
+EPISODES = ["data.source=episodes", *SHORT, "sim.frame_size=16"]  # T=30; 16 px for TINY's L1
+GOAL_KS = [1, 3, 5]  # AUX's model.goal_horizons
+EVAL_SETS = [
+    *SMALL_SPLITS,
+    "eval.device=cpu",
+    "eval.batch_size=8",
+    "eval.sim_params=[]",
+    "eval.probes.train_windows=16",
+]
+
+
+def run_cfg(*extra: str) -> dict:
+    return load_config(BASE, [*TINY, *AUX, *EPISODES, *extra])
+
+
+def eval_cfg(*extra: str) -> dict:
+    return load_config(BASE, [*EVAL_SETS, *extra])
+
+
+@pytest.fixture(scope="module")
+def root(tmp_path_factory):
+    """One artifact root with dev, train and test built (fake episodes), shared by this module."""
+    root = tmp_path_factory.mktemp("artifacts")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("JEPA_ARTIFACTS", str(root))
+        cfg = run_cfg()
+        for split in ("dev", "train", "test"):
+            build.build_split(cfg, split, simulate=Recorder())
+    return root
+
+
+@pytest.fixture
+def artifacts(root, monkeypatch):
+    monkeypatch.setenv("JEPA_ARTIFACTS", str(root))
+    return root
+
+
+def make_run(cfg: dict, steps=(3,), name="tiny-eval"):
+    torch.manual_seed(0)
+    model = train.build_model(cfg)
+    opt = train.build_optimizer(model, cfg)
+    run = train.start_run(cfg, name, torch.device("cpu"))
+    for s in steps:
+        train.save_checkpoint(run / "checkpoints" / f"step_{s:07d}.pt", model, opt, s, cfg)
+    return run, model
+
+
+# --- pure pieces ------------------------------------------------------------------------------
+
+
+def test_goal_positions_are_ball_pos_at_t_plus_the_mean_displacement():
+    rng = np.random.default_rng(0)
+    pos = rng.normal(size=(2, 12, 2))
+    ep, t = np.array([0, 1, 1]), np.array([2, 2, 4])
+    mean = rng.normal(size=(3, 2, 2))
+    logvar = rng.normal(size=(3, 2, 2))
+    g = eval_cli.goal_positions(pos, ep, t, mean, logvar, [1, 5])
+    for j, k in enumerate([1, 5]):
+        np.testing.assert_array_equal(g["persistence"][k], pos[ep, t])
+        np.testing.assert_array_equal(g["truth"][k], pos[ep, t + k])
+        np.testing.assert_allclose(g["pred"][k], pos[ep, t] + mean[:, j])
+        np.testing.assert_allclose(g["var"][k], np.exp(logvar[:, j]))
+    with pytest.raises(ValueError, match="horizons"):
+        eval_cli.goal_positions(pos, ep, t, mean, logvar, [1, 3, 5])
+
+
+def test_eval_split_check_refuses_leakage_across_configs():
+    cfg = run_cfg()  # trained on train
+    eval_cli.check_eval_split(cfg, eval_cfg(), "test")
+    eval_cli.check_eval_split(cfg, eval_cfg(), "dev")
+    with pytest.raises(LeakageError, match="trained on"):
+        eval_cli.check_eval_split(cfg, eval_cfg(), "train")
+    with pytest.raises(LeakageError, match="trained on"):
+        eval_cli.check_eval_split(run_cfg("data.split=dev"), eval_cfg(), "dev")
+    # An eval config whose test terrains are the run's training terrains.
+    overlap = "data.splits.test={terrain_seeds: [1000, 2], ball_seeds: [1000, 2]}"
+    with pytest.raises(LeakageError, match="terrain"):
+        eval_cli.check_eval_split(cfg, eval_cfg(overlap), "test")
+    # Disjoint, but not the test set the run's config defines: not comparable.
+    other = "data.splits.test={terrain_seeds: [200000, 2], ball_seeds: [1000, 2]}"
+    with pytest.raises(ValueError, match="differ"):
+        eval_cli.check_eval_split(cfg, eval_cfg(other), "test")
+
+
+# --- loading a run ------------------------------------------------------------------------------
+
+
+def test_load_run_takes_the_latest_checkpoint_strictly(artifacts):
+    cfg = run_cfg()
+    run, model = make_run(cfg, steps=(2, 10))
+    loaded = eval_cli.load_run(run, device=torch.device("cpu"))
+    assert loaded.step == 10 and loaded.checkpoint.name == "step_0000010.pt"
+    for (n, a), (_, b) in zip(
+        model.state_dict().items(), loaded.model.state_dict().items(), strict=True
+    ):
+        assert torch.equal(a, b), n
+    assert not loaded.model.training
+    bad = torch.load(run / "checkpoints" / "step_0000010.pt", weights_only=True)
+    bad["model"]["stray.weight"] = torch.zeros(1)
+    torch.save(bad, run / "checkpoints" / "step_0000011.pt")
+    with pytest.raises(RuntimeError, match="stray"):
+        eval_cli.load_run(run, device=torch.device("cpu"))
+    empty = paths.new_run_dir("no-ckpt")
+    with pytest.raises(FileNotFoundError, match="checkpoint"):
+        eval_cli.load_run(empty, device=torch.device("cpu"))
+
+
+def _windows(es, n=6):
+    ep, t = np.arange(n) % es.n, 3 + np.arange(n)
+    return ep, t
+
+
+def test_context_path_matches_forward(artifacts):
+    # model_outputs runs only the context encoder and the goal head. It must give what
+    # WorldModel.forward gives on the full window, so a change to forward can't drift silently.
+    cfg = run_cfg()
+    _, model = make_run(cfg)
+    model.eval()
+    es = load_split(cfg, "test")
+    ep, t = _windows(es)
+    ours = eval_cli.model_outputs(model, es, ep, t, batch_size=6, device=torch.device("cpu"))
+    frames = eval_cli.window_frames(es, ep, t, model.context_frames, max(model.horizons))
+    with torch.no_grad():
+        out = model(frames)
+    np.testing.assert_allclose(ours["goal_mean"], out["goal"][0].double().numpy(), atol=1e-6)
+    np.testing.assert_allclose(ours["goal_logvar"], out["goal"][1].double().numpy(), atol=1e-6)
+    for lv, f in out["context"].items():
+        np.testing.assert_allclose(ours["features"][lv], f.mean(dim=(2, 3)).numpy(), atol=1e-5)
+
+
+@pytest.mark.mps
+def test_model_outputs_on_mps_match_cpu(artifacts):
+    # MPS has no float64: the goal outputs must reach the CPU before they are widened.
+    cfg = run_cfg()
+    _, model = make_run(cfg)
+    model.eval()
+    es = load_split(cfg, "test")
+    ep, t = _windows(es)
+    cpu = eval_cli.model_outputs(model, es, ep, t, 6, torch.device("cpu"))
+    mps = eval_cli.model_outputs(model.to("mps"), es, ep, t, 6, torch.device("mps"))
+    assert mps["goal_mean"].dtype == np.float64
+    np.testing.assert_allclose(mps["goal_mean"], cpu["goal_mean"], atol=1e-4)
+    np.testing.assert_allclose(mps["features"]["L3"], cpu["features"]["L3"], atol=1e-4)
+
+
+def test_eval_outputs_ignore_frames_after_t(artifacts):
+    cfg = run_cfg()
+    _, model = make_run(cfg)
+    model.eval()
+    es = load_split(cfg, "test")
+    t0 = 5
+    ep, t = np.arange(es.n), np.full(es.n, t0)
+    a = eval_cli.model_outputs(model, es, ep, t, batch_size=3, device=torch.device("cpu"))
+    frames = es.frames.clone()
+    frames[:, t0 + 1 :] = torch.randint(0, 256, frames[:, t0 + 1 :].shape, dtype=torch.uint8)
+    b = eval_cli.model_outputs(
+        model, dataclasses.replace(es, frames=frames), ep, t, batch_size=3,
+        device=torch.device("cpu"),
+    )  # fmt: skip
+    assert a["goal_mean"].shape == (es.n, len(GOAL_KS), 2)
+    np.testing.assert_array_equal(a["goal_mean"], b["goal_mean"])
+    np.testing.assert_array_equal(a["goal_logvar"], b["goal_logvar"])
+    assert set(a["features"]) == {"L1", "L2", "L3"}
+    for lv in a["features"]:
+        assert a["features"][lv].shape == (es.n, cfg["model"]["levels"][lv]["channels"])
+        np.testing.assert_array_equal(a["features"][lv], b["features"][lv])
+
+
+# --- the command, end to end ----------------------------------------------------------------------
+
+
+def test_eval_run_reports_test_as_headline_and_dev_separately(artifacts, monkeypatch):
+    cfg = run_cfg()
+    run, _ = make_run(cfg)
+    locks = []
+    real_lock = eval_cli.gpu_lock
+
+    def spy_lock(label, *, timeout=None, enabled=True):
+        locks.append(enabled)
+        return real_lock(label, timeout=timeout, enabled=False)
+
+    fits = []
+    real_fit = eval_cli.probes.fit_probes
+    monkeypatch.setattr(eval_cli, "gpu_lock", spy_lock)
+    monkeypatch.setattr(
+        eval_cli.probes, "fit_probes", lambda d: fits.append(d.split) or real_fit(d)
+    )
+    args = ["--run", str(run), "--split", "test", "--split", "dev"]
+    for s in EVAL_SETS:
+        args += ["--set", s]
+    # The config asks for the simulator; an empty --sim-params overrides it.
+    args += ["--set", 'eval.sim_params=["mean"]', "--sim-params"]
+    assert eval_cli.main(args) == 0
+    assert locks == [False]  # CPU: no GPU lock
+    assert fits == ["train"]  # fit once, scored on both splits
+    (path,) = (run / "eval").glob("*.json")
+    assert not list((run / "eval").glob(".*"))  # no temp file left behind
+    out = json.loads(path.read_text())
+    assert out["meta"]["step"] == 3 and out["meta"]["checkpoint"].endswith("step_0000003.pt")
+    assert out["report"]["headline"]["split"] == "test"
+    assert set(out["report"]["development"]) == {"dev"}
+    es = load_split(cfg, "test")
+    starts = valid_starts(es.T, 4, 20)  # max of model.horizons and goal_horizons
+    for metrics in (out["report"]["headline"]["metrics"], out["report"]["development"]["dev"]):
+        assert set(metrics) == {"goal_head", "visibility", "events", "probes", "baselines"}
+        goal, base = metrics["goal_head"], metrics["baselines"]
+        assert goal["horizons"] == GOAL_KS and base["horizons"] == GOAL_KS
+        assert goal["windows"] == base["windows"]
+        assert base["starts"] == [int(starts[0]), int(starts[-1])]
+        assert set(goal["calibration"]["1"]) == {"0.5", "0.9"}
+        assert goal["ratio_to_baseline"]["persistence"] == goal["ratio_to_persistence"]
+        assert set(goal["ratio_to_baseline"]) == set(base["error_m"])
+        assert set(metrics["visibility"]) == {"1", "3", "5"}
+        assert set(metrics["visibility"]["1"]) == {"out_of_view", "occluded", "hidden"}
+        assert set(metrics["events"]["5"]) == {"out_of_view", "occluded"}
+        probes = metrics["probes"]
+        assert probes["train_split"] == "train" and probes["n_train"] == 16
+        assert set(probes["by_level"]) == {"L1", "L2", "L3", "pooled"}
+        assert set(probes["by_level"]["L3"]) == {
+            "pos", "pos_cam", "friction", "restitution", "radius"
+        }  # fmt: skip
+        assert "simulator" not in base and "simulator_mean" not in base["error_m"]
+
+
+def test_eval_run_without_a_goal_head_reports_probes_and_baselines(artifacts):
+    cfg = load_config(BASE, [*TINY, *EPISODES])  # near only: a pre-M5 run
+    run, _ = make_run(cfg, name="near-only")
+    report, path = eval_cli.evaluate_run(run, eval_cfg(), ["test"])
+    metrics = report["report"]["headline"]["metrics"]
+    assert set(metrics) == {"probes", "baselines"}
+    assert "goal" in report["meta"]["note"]
+    assert path.parent == run / "eval"
+
+
+def test_nothing_to_run_the_model_for_skips_it_and_a_failed_write_leaves_no_file(
+    artifacts, monkeypatch
+):
+    cfg = load_config(BASE, [*TINY, *EPISODES])  # no goal head, and probes off below
+    run, _ = make_run(cfg, name="nothing-to-run")
+    monkeypatch.setattr(eval_cli, "model_outputs", lambda *a, **k: pytest.fail("ran the model"))
+    doc, _ = eval_cli.evaluate_run(run, eval_cfg("eval.probes.enabled=false"), ["test"])
+    assert set(doc["report"]["headline"]["metrics"]) == {"baselines"}
+    real_report = eval_cli.metrics.report
+    monkeypatch.setattr(eval_cli.metrics, "report", lambda r: {**real_report(r), "bad": object()})
+    before = set((run / "eval").iterdir())
+    with pytest.raises(TypeError):
+        eval_cli.evaluate_run(run, eval_cfg("eval.probes.enabled=false"), ["test"])
+    assert set((run / "eval").iterdir()) == before
+
+
+def test_a_checkpoint_must_belong_to_the_run(artifacts):
+    cfg = run_cfg()
+    a, _ = make_run(cfg, name="run-a")
+    b, _ = make_run(cfg, name="run-b")
+    with pytest.raises(ValueError, match="isn't in"):
+        eval_cli.load_run(a, b / "checkpoints" / "step_0000003.pt")
+    with pytest.raises(SystemExit):
+        eval_cli.main(["--baselines", "--config", str(BASE), "--checkpoint", "x.pt"])
+    assert eval_cli.load_run(a, "step_0000003.pt").step == 3  # a bare name: the run's own
+
+
+def test_latest_checkpoint_is_the_highest_step_by_number(tmp_path):
+    (tmp_path / "checkpoints").mkdir()
+    for name in ("step_9999999.pt", "step_10000000.pt", "step_notes.pt"):
+        (tmp_path / "checkpoints" / name).touch()
+    assert eval_cli.latest_checkpoint(tmp_path).name == "step_10000000.pt"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["eval.sim_params=[true]", "eval.sim_params=[ture]", "eval.coverage_levels=[1.0]",
+     "eval.event_window=0", "eval.probes.train_windows=1"],
+)  # fmt: skip
+def test_a_bad_eval_block_fails_before_the_model_is_loaded(artifacts, monkeypatch, bad):
+    monkeypatch.setattr(eval_cli, "load_run", lambda *a, **k: pytest.fail("loaded the model"))
+    with pytest.raises(ValueError):
+        eval_cli.evaluate_run("unused", eval_cfg(bad), ["test"])
+
+
+def test_goal_table_follows_the_configured_coverage_levels():
+    cal = {"0.68": {"joint": 0.7}, "0.95": {"joint": 0.94}}
+    goal = {
+        "horizons": [1], "error_m": {"1": {"mean": 0.1}}, "calibration": {"1": cal},
+        "ratio_to_baseline": {"persistence": {"1": 0.5}},
+    }  # fmt: skip
+    head, row = eval_cli.format_goal_table({"goal_head": goal}).splitlines()
+    assert "cov0.68" in head and "cov0.95" in head and "0.940" in row
+
+
+def test_eval_refuses_a_run_trained_on_synthetic_frames(artifacts):
+    run, _ = make_run(run_cfg("data.source=synthetic"), name="synthetic")
+    with pytest.raises(ValueError, match="episodes"):
+        eval_cli.evaluate_run(run, eval_cfg(), ["test"])
+
+
+def test_baselines_mode_takes_one_split():
+    with pytest.raises(SystemExit):
+        eval_cli.main(["--baselines", "--config", str(BASE), "--split", "test", "--split", "dev"])

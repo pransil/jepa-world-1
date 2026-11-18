@@ -165,8 +165,9 @@ flowchart LR
 - **`/verify`** is the definition of done, including an ML-correctness checklist (stop-grad, EMA,
   leakage, determinism, numerics).
 - Guards: the `lane_guard` hook blocks commits in the main clone and warns when two lanes touch the
-  same file. `tools/lane-owners.sh` shows who is working where, and `tools/gpu-status.sh` shows who
-  has the GPU.
+  same file. `tools/lane-owners.sh` shows who is working where, `tools/gpu-status.sh` shows who
+  has the GPU, and `tools/finish-lane.sh` removes a merged lane only after checking that nothing
+  in it could still be work.
 
 The rules are in [`CLAUDE.md`](CLAUDE.md) and [`docs/process/LANES.md`](docs/process/LANES.md).
 
@@ -196,7 +197,7 @@ configs/           base.yaml (SPEC defaults) + one yaml per experiment
 tests/             fast tier by default; slow / render / mps markers
 experiments/       one note per experiment     docs/decisions/   one file per SPEC §9 decision
 docs/milestones/   M1–M7 summaries             docs/process/     parallel-work rules
-tools/             lane-owners.sh, gpu-status.sh
+tools/             lane-owners.sh, finish-lane.sh, gpu-status.sh
 ```
 
 The code lives under one package, `jepa_world/`, rather than SPEC §10's top-level `sim/ data/

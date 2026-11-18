@@ -222,6 +222,8 @@ def test_visible_width_is_the_uncovered_part_in_pixels(sim_cfg):
     uv = camera.project(xz, cam, sim_cfg)
     w = obstacles.visible_width_px(uv, 0.2, cam, posts((-0.5, 0.1)), sim_cfg)
     np.testing.assert_allclose(w, [0.1 * k])
+    gap = obstacles.visible_width_px(uv, 0.2, cam, posts((-0.5, -0.02), (0.02, 0.5)), sim_cfg)
+    np.testing.assert_allclose(gap, [0.04 * k])  # only the slit between two posts shows
     np.testing.assert_allclose(obstacles.visible_width_px(uv, 0.2, cam, None, sim_cfg), [0.4 * k])
 
 
@@ -231,10 +233,11 @@ def test_no_obstacles_means_never_occluded(sim_cfg):
     assert got.shape == (5,) and got.dtype == bool and not got.any()
 
 
-def test_a_view_past_the_posts_z_span_raises(sim_cfg):
-    # The 1-D rule assumes each post covers the full image height. If not, fail loudly.
+@pytest.mark.parametrize("z", [(-1.0, 100.0), (-100.0, 1.0)], ids=["below", "above"])
+def test_a_view_past_the_posts_z_span_raises(sim_cfg, z):
+    # The 1-D rule assumes each post covers the full image height (view 3.6 m). If not, fail loudly.
     with pytest.raises(ValueError, match="z-span"):
-        occluded_at(sim_cfg, [0.0, 0.0], 0.2, posts((-0.5, 0.5), z=(-1.0, 1.0)))
+        occluded_at(sim_cfg, [0.0, 0.0], 0.2, posts((-0.5, 0.5), z=z))
 
 
 # ------------------------------------------------- in real episodes

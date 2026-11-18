@@ -7,12 +7,12 @@ import json
 import numpy as np
 import pytest
 from fake_episodes import SHORT, G, Recorder
-from jepa_world.data.dataset import valid_starts
 from tiny import BASE
 
 from jepa_world import baselines
 from jepa_world import eval as eval_cli
 from jepa_world.data import build
+from jepa_world.data.dataset import valid_starts
 from jepa_world.utils import paths
 from jepa_world.utils.config import load_config
 
@@ -91,7 +91,7 @@ def test_baselines_see_nothing_after_t():
 def test_evaluate_reports_every_baseline_and_horizon():
     pos, vel = motion("ballistic", n=4)
     starts = valid_starts(T, C, max(HORIZONS))
-    out = baselines.evaluate(pos, vel, DT, starts, HORIZONS)
+    out = baselines.evaluate(pos, vel, DT, starts, HORIZONS, C)
     assert out["windows"] == 4 * len(starts)
     assert out["horizons"] == HORIZONS
     for name in baselines.BASELINES:
@@ -111,8 +111,41 @@ def test_evaluate_reports_every_baseline_and_horizon():
 
 def test_evaluate_ratio_is_none_when_persistence_is_exact():
     pos = np.zeros((2, T, 2))
-    out = baselines.evaluate(pos, pos.copy(), DT, valid_starts(T, C, 5), [1, 5])
+    out = baselines.evaluate(pos, pos.copy(), DT, valid_starts(T, C, 5), [1, 5], C)
     assert out["ratio_to_persistence"]["const_velocity"] == {"1": None, "5": None}
+
+
+def test_one_context_frame_drops_only_the_finite_difference_baseline():
+    """With C = 1, x(t-1) is outside the context, so const_velocity_fd would see more than the
+    model does. It is left out, and the others are still scored from t = 0."""
+    pos, vel = motion("uniform")
+    out = baselines.evaluate(pos, vel, DT, valid_starts(T, 1, 5), [1, 5], context_frames=1)
+    assert out["starts"][0] == 0
+    assert set(out["error_m"]) == {"persistence", "const_velocity"}
+    with pytest.raises(ValueError, match="C=4"):
+        baselines.evaluate(pos, vel, DT, valid_starts(T, 1, 5), [1, 5], context_frames=4)
+
+
+def test_errors_split_by_whether_the_ball_is_out_of_view_at_t_plus_k():
+    pos, vel = motion("ballistic", n=2)
+    oov = np.zeros((2, T), bool)
+    oov[1, 25:] = True  # episode 1 leaves the frame at frame 25 for good
+    starts = valid_starts(T, C, 10)
+    out = baselines.evaluate(pos, vel, DT, starts, [1, 10], C, out_of_view=oov)
+    view = out["mean_error_m_by_view_at_t_plus_k"]
+    for name in out["error_m"]:
+        for k in (1, 10):
+            v = view[name][str(k)]
+            assert v["n_out_of_view"] == int(oov[1, starts + k].sum())
+            ep, t = np.meshgrid([0, 1], starts, indexing="ij")
+            e = np.linalg.norm(
+                baselines.predict(name, pos, vel, ep.ravel(), t.ravel(), k, DT)
+                - pos[ep.ravel(), t.ravel() + k],
+                axis=-1,
+            )
+            gone = oov[ep.ravel(), t.ravel() + k]
+            assert v["out_of_view"] == pytest.approx(e[gone].mean())
+            assert v["in_view"] == pytest.approx(e[~gone].mean())
 
 
 def test_eval_baselines_cli_writes_a_run_dir():
@@ -129,6 +162,7 @@ def test_eval_baselines_cli_writes_a_run_dir():
     assert out["split"] == "test" and out["episodes"] == 4
     assert set(out["error_m"]) == set(baselines.BASELINES)
     assert set(out["error_m"]["persistence"]) == {"1", "2", "3", "4", "5", "10", "20"}
+    assert set(out["mean_error_m_by_view_at_t_plus_k"]) == set(baselines.BASELINES)
     meta = json.loads((run / "meta.json").read_text())
     assert "git" in meta and meta["dataset"].endswith(
         paths.dataset_dir(build.split_key(cfg, "test"), "episodes-test").name

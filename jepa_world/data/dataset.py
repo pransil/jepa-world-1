@@ -17,6 +17,7 @@ import torch
 
 from jepa_world.data.build import dataset_name, split_dir, terrain_sha
 from jepa_world.data.splits import SPLITS, LeakageError, check_disjoint, check_split_config
+from jepa_world.data.splits import ball_seeds as configured_ball_seeds
 from jepa_world.data.splits import terrain_seeds as configured_terrain_seeds
 from jepa_world.sim.io import load_episode
 
@@ -114,24 +115,33 @@ def require_split(cfg: dict, split: str) -> Path:
 
 
 def check_built_splits(cfg: dict) -> list[str]:
-    """The on-disk leakage check: across every split built for this config, no terrain seed and
-    no terrain profile (by hash) appears twice, and each split holds only its own seeds. Returns
-    the splits it checked."""
+    """The on-disk leakage check, over every split built for THIS config: each split holds only
+    its own terrain and ball seeds; no terrain seed or terrain profile (by hash) is in two splits;
+    train and test share no ball seed. Returns the splits it checked.
+
+    Not covered: a model trained under a different config's splits. M6's eval has to compare the
+    run's config.yaml splits against the eval config (data/DESIGN.md)."""
     built = {s: split_dir(cfg, s) for s in SPLITS}
-    manifests = {s: read_manifest(p) for s, p in built.items() if p.exists()}
-    for s, m in manifests.items():
-        stray = {r["terrain_seed"] for r in m["episodes"]} - set(
-            configured_terrain_seeds(cfg["data"], s)
-        )
-        if stray:
-            raise LeakageError(
-                f"{dataset_name(s)} holds terrain seeds {sorted(stray)[:10]} that the {s!r} split "
-                "doesn't own"
-            )
-    rows = {s: m["episodes"] for s, m in manifests.items()}
-    check_disjoint({s: [r["terrain_seed"] for r in r_] for s, r_ in rows.items()}, "terrain seed")
-    check_disjoint({s: [r["terrain_sha"] for r in r_] for s, r_ in rows.items()}, "terrain")
-    return sorted(manifests)
+    rows = {s: read_manifest(p)["episodes"] for s, p in built.items() if p.exists()}
+    for s, r_ in rows.items():
+        for key, own in (
+            ("terrain_seed", configured_terrain_seeds(cfg["data"], s)),
+            ("ball_seed", configured_ball_seeds(cfg["data"], s)),
+        ):
+            stray = {r[key] for r in r_} - set(own)
+            if stray:
+                raise LeakageError(
+                    f"{dataset_name(s)} holds {key}s {sorted(stray)[:10]} that the {s!r} split "
+                    "doesn't own"
+                )
+
+    def column(key: str, splits=SPLITS) -> dict[str, list]:
+        return {s: [r[key] for r in rows[s]] for s in splits if s in rows}
+
+    check_disjoint(column("terrain_seed"), "terrain seed")
+    check_disjoint(column("terrain_sha"), "terrain")
+    check_disjoint(column("ball_seed", ("train", "test")), "ball seed")
+    return sorted(rows)
 
 
 def load_split(cfg: dict, split: str) -> EpisodeSet:

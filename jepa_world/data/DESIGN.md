@@ -49,11 +49,23 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
 - **Leakage is checked at three levels:**
   - the config: `check_split_config` refuses overlapping terrain seeds, or ball seeds shared by
     train and test;
-  - the disk: `load_split` checks every file's stored seeds against its manifest and its split.
-    It also checks terrain seeds and terrain hashes across every built split's manifest, so the
-    same terrain under two seeds would still be caught;
+  - the disk: `load_split` checks every file's stored seeds against its manifest, and each
+    manifest's terrain and ball seeds against its split. It also checks terrain seeds, terrain
+    hashes, and train/test ball seeds across every built split's manifest, so the same terrain
+    under two seeds would still be caught;
   - the batch: `window_frames` refuses any index outside [0, T). A negative index would otherwise
     wrap silently to the end of the episode, putting future frames in the context.
+- **Training never reads test.** `train.check_config` refuses `data.split: test` with
+  `LeakageError`, and only `dev` and `train` are trainable (`splits.TRAINABLE`).
+- **Not checked here: leakage across configs.** The on-disk check sees only the splits of the
+  config it is given. A model trained under another config's splits (other terrain seeds, say)
+  could overlap this config's test split unseen. M6's model eval must compare the run's
+  `config.yaml` splits against the eval config before reporting anything.
+- **One window set for every horizon.** Baselines are scored on
+  t ∈ [C−1, T−1−max(model.horizons)] (T=60, C=4: t = 3..39), the same windows at every k. That
+  keeps error-versus-k curves and persistence ratios comparable across k. **M6 must score the
+  model on these same windows**, even for a near-only model, whose training windows run to
+  t = 54.
 - **One dataset per split**, keyed on (sim cfg, the split's seed list, `format_version`). The
   alternative was one dataset holding all three splits. That lost because changing train's size
   would then rebuild test, and a dev-only build would cost the whole set.

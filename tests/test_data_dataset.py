@@ -10,6 +10,9 @@ import numpy as np
 import pytest
 import torch
 from fake_episodes import SHORT, Recorder, decode
+from tiny import BASE
+
+from jepa_world.data import build
 from jepa_world.data.dataset import (
     EpisodeSet,
     batches,
@@ -19,9 +22,6 @@ from jepa_world.data.dataset import (
     window_frames,
 )
 from jepa_world.data.splits import SPLITS, LeakageError
-from tiny import BASE
-
-from jepa_world.data import build
 from jepa_world.models.jepa import context_stack, target_stack
 from jepa_world.utils.config import load_config
 
@@ -156,6 +156,16 @@ def test_loader_rejects_an_episode_from_another_split():
     _smuggle_dev_episode_into_train(cfg)
     with pytest.raises(LeakageError, match="train"):
         load_split(cfg, "train")
+
+
+def test_loader_rejects_a_train_ball_seed_on_disk_in_test():
+    cfg = short_cfg()
+    path = build.build_split(cfg, "test", simulate=Recorder())
+    manifest = json.loads((path / "manifest.json").read_text())
+    manifest["episodes"][0]["ball_seed"] = 0  # a train ball seed
+    (path / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(LeakageError, match="ball_seed"):
+        load_split(cfg, "test")
 
 
 def test_loader_rejects_a_file_that_disagrees_with_its_manifest():

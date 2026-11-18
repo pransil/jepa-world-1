@@ -10,6 +10,7 @@ import itertools
 from collections.abc import Iterable, Mapping
 
 SPLITS = ("dev", "train", "test")
+TRAINABLE = ("dev", "train")  # never test: its terrains are held out (SPEC §3.5, §7.3)
 
 
 class LeakageError(ValueError):

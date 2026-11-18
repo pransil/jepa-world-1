@@ -24,12 +24,19 @@ from jepa_world.utils.repro import run_metadata
 
 
 def run_baselines(cfg: dict, split: str) -> tuple[Path, dict]:
-    """Score every position baseline on `split`, over the windows the model is scored on
-    (C = model.context_frames, k_max = max(model.horizons)). Writes a fresh run dir."""
+    """Score every position baseline on `split`, at every model.horizons k, over one shared window
+    set t in [C-1, T-1-max(model.horizons)]. M6 must score the model on the same windows for its
+    ratios to persistence to be like-for-like (data/DESIGN.md). Writes a fresh run dir.
+
+    Loads the frames too, which go unused here. Eval reads only dev or test (at most 200
+    episodes, about 150 MB), and a positions-only reader would duplicate sim/io's format."""
     es = load_split(cfg, split)
     horizons = list(cfg["model"]["horizons"])
-    starts = valid_starts(es.T, cfg["model"]["context_frames"], max(horizons))
-    scores = baselines.evaluate(es.ball_pos, es.ball_vel, 1 / es.fps, starts, horizons)
+    c = cfg["model"]["context_frames"]
+    starts = valid_starts(es.T, c, max(horizons))
+    scores = baselines.evaluate(
+        es.ball_pos, es.ball_vel, 1 / es.fps, starts, horizons, c, es.out_of_view
+    )
     result = {"split": split, **scores}
     run = new_run_dir(f"baselines-{split}")
     (run / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
@@ -40,7 +47,7 @@ def run_baselines(cfg: dict, split: str) -> tuple[Path, dict]:
 
 
 def format_table(result: dict) -> str:
-    names = baselines.BASELINES
+    names = list(result["error_m"])
     head = (
         f"{'k':>4} "
         + " ".join(f"{n:>20}" for n in names)

@@ -143,11 +143,18 @@ or merge a PR with failing tests.
 - **Milestone finished?** `docs/milestones/M<n>.md` (template in that dir's README) goes in
   the PR **before** merging: what was built, which tests prove it, measured numbers (e.g. the L1
   head benchmark), and open issues.
-- After the merge, fast-forward the main clone first, with `git -C <main clone> pull --ff-only`.
-  ExitWorktree refuses to remove a tree whose commits aren't on the main clone's `main` yet.
-- Then `ExitWorktree` with `action: "remove"`. If it still lists uncommitted files or unmerged
-  commits, stop and tell the user. Never pass `discard_changes: true` without their say-so.
-- Finally run `git -C <main clone> fetch --prune`.
+- After the merge, clean up in this order (measured on PR #1). A worktree session can't run git
+  against the main clone, and `ExitWorktree remove` refuses while the main clone's `main` lacks
+  your commits.
+  1. `ExitWorktree` with `action: "keep"`. The session is back in the main clone.
+  2. `git pull --ff-only`, so the main clone's `main` now contains the merge.
+  3. Check that `git -C .claude/worktrees/wt-<slug> status --porcelain` is empty and
+     `git rev-list --count main..worktree-wt-<slug>` is `0`.
+  4. Run `git worktree remove .claude/worktrees/wt-<slug>` (never `--force`) and
+     `git branch -d worktree-wt-<slug>` (`-d`, not `-D`, so git itself refuses an unmerged
+     branch). These deletions may ask the user for permission, and that's expected. If they are
+     declined, leave the tree and say so in the output.
+- Never pass `discard_changes: true` or `--force` without the user's say-so.
 
 ## Output
 

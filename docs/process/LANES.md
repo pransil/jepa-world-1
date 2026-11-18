@@ -64,9 +64,17 @@ and only M3's *loss decreases on the dev set* test waits for M2. Inside a milest
 
 ## Cleaning up
 
-A lane that has merged its PR removes its own worktree (`ExitWorktree`, remove). Run
-`tools/lane-owners.sh` to see the rest. A worktree with no live session might be paused, not
-abandoned, so ask the user before removing anyone else's.
+A lane that has merged its PR removes its own worktree, following the order in `/builder` Step J:
+`ExitWorktree keep`, `git pull --ff-only` in the main clone, then `git worktree remove` (never
+`--force`) and `git branch -d`. Run `tools/lane-owners.sh` to see the rest. Merged, clean trees
+show as `merged: removable`. A worktree with no live session might be paused, not abandoned, so
+ask the user before removing anyone else's.
+
+**About branch protection.** `main` requires a PR and a green `fast-tests` check, with no
+approvals, and admins are included. GitHub rejects a direct push of any commit that hasn't passed
+`fast-tests`. One exception: pushing the head of a PR whose checks already passed is accepted,
+and GitHub records it as merging that PR. That is equivalent to `gh pr merge`, but use
+`gh pr merge --merge --delete-branch` so the PR record is clean.
 
 ## Handshakes
 

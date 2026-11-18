@@ -72,7 +72,7 @@ after opt.step():  θ_target ← m·θ_target + (1−m)·θ_context
 | `jepa.JEPA`, `latent_loss`, `variance_guard`, `compute_losses`, `context_stack`, `target_stack` | yes | — | `tests/test_jepa.py` |
 | `data/synthetic.moving_disc_batch` | yes (explicit `torch.Generator`) | — | `tests/test_synthetic.py` |
 | `train.train_step` | mutates model + optimizer | device | `tests/test_train.py` |
-| `train.run` / `train.main` | no | run dir (`paths.new_run_dir`), GPU lock on MPS | `tests/test_train.py` (CPU, tmp artifact root) |
+| `train.run` / `train.main` | no | run dir (`train.start_run` → `paths.new_run_dir`), GPU lock (always taken by `main`) | `tests/test_train.py` (CPU, tmp artifact root) |
 | `bench.bench_heads` / `bench.main` | no | MPS timing, GPU lock, run dir | `tests/test_bench.py`; `@mps` test in `tests/test_train.py` |
 
 ## Files

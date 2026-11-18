@@ -35,21 +35,25 @@ Every check runs first, and any failure exits 1 with nothing removed. Only then 
 | no commits on the branch missing from `main` | the main clone must have pulled the merge |
 | `git branch -d` will accept the branch | it judges against the branch's upstream if that ref exists, else HEAD. The worktree is removed first, so this is checked up front |
 | a **merged** PR whose head is exactly the branch tip | a freshly cut branch is also "0 commits ahead", so refs alone can't tell "merged" from "just started" (`lane-owners.sh` says the same). A reused lane name with an old merged PR doesn't match. `gh` failing counts as not merged |
-| no process of this user has its cwd inside the worktree, except `caffeinate` | a Claude session or a background job (training, a `run_in_background` shell) still running there. On macOS this is the slow check (one `lsof`, ~0.3 s), so it runs only when everything else passed. Files held open from a cwd elsewhere aren't seen. `caffeinate` is exempt: Claude Code starts `caffeinate -i -t 300` in the session's cwd to keep the Mac awake, so one is usually still inside a worktree right after `ExitWorktree`, and it touches no files |
+| no process of this user has its cwd inside the worktree, except Claude Code's own `caffeinate` | a Claude session or a background job (training, a `run_in_background` shell) still running there. **Fail closed:** the process list must include the script's own pid with its real cwd, or it refuses, because an empty list from a missing `lsof` or GNU `find` would otherwise read as "nothing running". Exempt: a `caffeinate` whose parent is a live Claude session. A session starts `caffeinate -i -t 300` in its cwd to keep the Mac awake, so one is usually still inside a worktree right after `ExitWorktree`, and it touches no files. A `caffeinate` you started yourself still blocks. On macOS this is the slow check (one `lsof`, ~0.3 s), so it runs only when everything else passed. Files held open from a cwd elsewhere aren't seen |
 
 If the worktree directory is already gone but the branch remains, it deletes the branch after the
 same branch checks. If neither exists, it exits 1, so a typo is loud.
 
 ## Seams
 
-- `lane-lib.sh` is sourced by both scripts. It finds the main clone. It lists every process's cwd
-  and command name for `finish-lane.sh`: from `/proc` plus `ps` where `/proc` exists (Linux, so CI
-  covers that path), and from `lsof` on macOS. It lists live Claude sessions
+- `lane-lib.sh` is sourced by both scripts, which share one process backend, `lane_process_cwds`:
+  this user's processes and their cwds. On Linux it reads the `/proc/*/cwd` links with GNU
+  `find -printf`, so CI covers that path, with no `ls` parsing. On macOS it is one `lsof` call. Live
+  Claude sessions are the pids in `$CC_SOCKS_DIR` (default `/tmp/cc-socks`), joined to that list
+  for `lane-owners.sh`. It lists live Claude sessions
   from `$CC_SOCKS_DIR` (default `/tmp/cc-socks`), for `lane-owners.sh`.
 - `tests/test_finish_lane.py` builds one throwaway main clone, with a lane per scenario, under
   `tmp_path` (no origin). It puts a fake `gh` first on `PATH`, and a "running process" is a real
-  `sleep` child. The exempt one is the real `caffeinate` on macOS (a copied Apple binary is
-  SIGKILLed on launch), or a copy of `sleep` named `caffeinate` on Linux. It never touches this repo's worktrees. The script reports every problem from the
+  `sleep` child. A "session" is a pid with a real unix socket in a temp `CC_SOCKS_DIR`. The
+  `caffeinate` is the real one on macOS (a copied Apple binary is SIGKILLed on launch). On Linux it
+  is `sleep` exec'd through a symlink named `caffeinate`, so argv[0] still works for multicall
+  coreutils. Stub `lsof` and `find` on `PATH` simulate a host that can't list processes. It never touches this repo's worktrees. The script reports every problem from the
   fast checks through one gate, so one run on a lane with several faults checks each detector by
   its message. That keeps the file at about 3 s in the fast tier.
 
@@ -57,7 +61,7 @@ same branch checks. If neither exists, it exits 1, so a typo is loud.
 
 | file | responsibility |
 |---|---|
-| `lane-lib.sh` | shared helpers: main clone path, process cwds, live Claude sessions |
+| `lane-lib.sh` | shared helpers: main clone path, process cwds (one backend), live Claude sessions |
 | `lane-owners.sh` | lane report and collision check (read-only). `merged: candidate` is a hint, and `finish-lane.sh` decides |
 | `finish-lane.sh` | remove one merged, clean, unowned lane |
 | `gpu-status.sh` | MPS lock holder and running jobs |

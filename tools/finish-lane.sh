@@ -106,16 +106,35 @@ git pull --ff-only in the main clone first"
   fi
 fi
 
-# Last, because it is the slow check (~0.3 s): any process of this user whose cwd is inside the
-# worktree, a Claude session or a background job alike. Skipped when already refusing.
-# caffeinate is exempt. Claude Code starts `caffeinate -i -t 300` in the session's cwd to keep the
-# Mac awake, so one is usually still inside a worktree just after ExitWorktree. It only holds a
-# power assertion and touches no files, and it exits within 5 minutes anyway.
+# Last, because it is the slow check (~0.3 s on macOS): any process of this user whose cwd is
+# inside the worktree, a Claude session or a background job alike. Skipped when already refusing.
 if [ -z "$PROBLEMS" ] && [ -d "$WT" ]; then
-  while IFS=$'\t' read -r pid cmd cwd; do
-    [ "$cmd" = caffeinate ] && continue
-    case "$cwd/" in "$WT"/*) problem "process $pid ($cmd) is running inside $NAME ($cwd)" ;; esac
+  here=$(pwd -P) seen_self=no inside=""
+  while IFS=$'\t' read -r pid cwd; do
+    [ "$pid" = "$$" ] && [ "$cwd" = "$here" ] && seen_self=yes
+    case "$cwd/" in "$WT"/*) inside="$inside$pid"$'\t'"$cwd"$'\n' ;; esac
   done < <(lane_process_cwds)
+  # Fail closed: a list without this very script in it is broken, not empty.
+  [ $seen_self = yes ] ||
+    problem "can't list running processes (the list lacks this script, pid $$), so one inside $NAME can't be ruled out"
+
+  # Exempt: Claude Code's own caffeinate. A session starts `caffeinate -i -t 300` in its cwd to
+  # keep the Mac awake, so one is usually still inside a worktree just after ExitWorktree. It holds
+  # only a power assertion, touches no files, and exits within 5 minutes. Only a caffeinate whose
+  # parent is a live Claude session counts; one the user started still blocks.
+  sessions=""
+  [ -n "$inside" ] && sessions=" $(lane_session_pids | tr '\n' ' ') "
+  while IFS=$'\t' read -r pid cwd; do
+    [ -n "$pid" ] || continue
+    kill -0 "$pid" 2>/dev/null || continue # gone since the scan
+    ppid="" cmd=""
+    read -r ppid cmd < <(ps -o ppid=,comm= -p "$pid" 2>/dev/null)
+    cmd=${cmd##*/}
+    if [ "$cmd" = caffeinate ]; then
+      case "$sessions" in *" $ppid "*) continue ;; esac
+    fi
+    problem "process $pid (${cmd:-?}) is running inside $NAME ($cwd)"
+  done <<<"$inside"
 fi
 
 if [ -n "$PROBLEMS" ]; then

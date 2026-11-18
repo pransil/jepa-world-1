@@ -8,39 +8,39 @@ lane_main_clone() {
   printf '%s\n' "${common%/*}"
 }
 
-# A process's working directory, from lsof (macOS) or /proc (Linux). Empty if neither can tell.
-lane_cwd_of() {
-  local cwd
-  cwd=$(lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
-  if [ -z "$cwd" ] && [ -e "/proc/$1/cwd" ]; then cwd=$(readlink "/proc/$1/cwd" 2>/dev/null); fi
-  printf '%s\n' "$cwd"
-}
-
-# Every process this user can see, one "pid<TAB>command<TAB>cwd" line each. Linux reads /proc
-# (another user's cwd is unreadable, so it is left out), with names from ps. macOS has no /proc
-# and uses one lsof call, which takes about 0.3 s, so callers run this last.
+# Every process of this user, one "pid<TAB>cwd" line each: the one process backend both tools
+# use. Linux reads the /proc cwd links with GNU find, so CI covers this path. Elsewhere it is one
+# lsof call, about 0.3 s on macOS, so callers run it last. A cwd containing a newline is not
+# supported. An empty or broken list is possible (no GNU find, no lsof, a locked-down /proc), so a
+# caller that must not fail open checks that its own pid ($$) is listed with its real cwd.
 lane_process_cwds() {
-  if [ -d /proc/self ]; then
-    awk -F'\t' 'NR == FNR { name[$1] = $2; next } $2 != "" { print $1 "\t" (($1 in name) ? name[$1] : "?") "\t" $2 }' \
-      <(ps -eo pid=,comm= | awk '{ pid = $1; sub(/^ *[0-9]+ +/, ""); print pid "\t" $0 }') \
-      <(ls -l /proc/[0-9]*/cwd 2>/dev/null | awk -F' -> ' '{ n = split($1, a, "/"); print a[n - 1] "\t" $2 }')
+  if [ -e /proc/self/cwd ]; then
+    find /proc/[0-9]*/cwd -maxdepth 0 -user "$(id -u)" -printf '%h\t%l\n' 2>/dev/null |
+      sed 's|^/proc/||'
   else
-    lsof -a -u "$(id -u)" -d cwd -Fpcn 2>/dev/null |
-      awk '/^p/ { p = substr($0, 2) } /^c/ { c = substr($0, 2) } /^n/ { print p "\t" c "\t" substr($0, 2) }'
+    lsof -a -u "$(id -u)" -d cwd -Fpn 2>/dev/null |
+      awk '/^p/ { p = substr($0, 2) } /^n/ { print p "\t" substr($0, 2) }'
   fi
 }
 
-# Live Claude Code sessions, one "pid<TAB>cwd" line each. $CC_SOCKS_DIR/<pid>.sock (default
-# /tmp/cc-socks) names each session's pid. Liveness is `kill -0`, not a timestamp, because a
-# sleeping laptop suspends sessions rather than killing them.
-lane_live_sessions() {
+# Live Claude Code session pids, one per line. $CC_SOCKS_DIR/<pid>.sock (default /tmp/cc-socks)
+# names each session's pid. Liveness is `kill -0`, not a timestamp, because a sleeping laptop
+# suspends sessions rather than killing them.
+lane_session_pids() {
   local sock pid
   for sock in "${CC_SOCKS_DIR:-/tmp/cc-socks}"/*.sock; do
     [ -S "$sock" ] || continue
     pid=${sock##*/}
     pid=${pid%.sock}
     case "$pid" in '' | *[!0-9]*) continue ;; esac
-    kill -0 "$pid" 2>/dev/null || continue
-    printf '%s\t%s\n' "$pid" "$(lane_cwd_of "$pid")"
+    kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
   done
+}
+
+# Live Claude Code sessions with their cwds, one "pid<TAB>cwd" line each.
+lane_live_sessions() {
+  local pids
+  pids=$(lane_session_pids | tr '\n' ' ')
+  [ -n "$pids" ] || return 0
+  lane_process_cwds | awk -F'\t' -v pids=" $pids" 'index(pids, " " $1 " ")'
 }

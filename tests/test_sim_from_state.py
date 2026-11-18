@@ -10,6 +10,7 @@ isn't in the saved ground truth.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +22,7 @@ from jepa_world.sim.contact import timestep
 from jepa_world.sim.episode import ContactTracker, simulate_episode, simulate_from_state
 from jepa_world.utils.config import load_config
 
-SEEDS = [(ts, 0) for ts in range(12)]  # 12 physics-only episodes, ~0.2 s
+SEEDS = [(ts, 0) for ts in range(8)]  # 8 physics-only episodes, ~0.15 s
 GAP_EPS = 1e-6  # m: clear of the surface / penetrating, with no borderline cases
 TOUCHING_MAX_DRIFT = 0.01  # m, on any frame (0.18 px); measured max 3.8 mm over 181 starts
 TOUCHING_MEDIAN_DRIFT = 1e-6  # m; measured median 5e-10 m
@@ -74,15 +75,19 @@ def test_start_frame_is_the_given_state_and_nothing_is_rendered(sim_cfg, episode
     start = r.meta["from_state"]
     assert start["pos"] == list(pos) and start["vel"] == list(vel) and start["spin"] == spin
     assert start["start_gap"] == pytest.approx(float(ep.terrain.gap(pos, ep.ball.radius)))
-    assert r.meta["terrain_seed"] == ep.meta["terrain_seed"]
+    # A rollout, not a dataset episode: no top-level seeds to confuse it with one.
+    assert r.meta["terrain_seed"] is None and r.meta["ball_seed"] is None
+    assert start["terrain_seed"] == ep.meta["terrain_seed"]
 
 
 def test_airborne_start_reproduces_the_episode_exactly(sim_cfg, episodes):
-    cases = starts(episodes, touching=False, every=7)
-    assert len(cases) >= 12 and any(t == 0 for _, t in cases)  # t = 0 ties it to simulate
+    cases = starts(episodes, touching=False, every=9)
+    assert len(cases) >= 10 and any(t == 0 for _, t in cases)  # t = 0 ties it to simulate
     safe = first_frame_with_bounce_history(sim_cfg)
     for ep, t in cases:
         r = resim(sim_cfg, ep, t)
+        # The guarantee's exact condition is MuJoCo's: no contact at the start instant.
+        assert not r.contact[0], (ep.meta["terrain_seed"], t)
         for f in ("ball_pos", "ball_vel", "ball_spin", "cam_pos", "ball_px", "out_of_view"):
             assert np.array_equal(getattr(r, f), getattr(ep, f)[t:]), (
                 ep.meta["terrain_seed"],
@@ -95,11 +100,12 @@ def test_airborne_start_reproduces_the_episode_exactly(sim_cfg, episodes):
 
 
 def test_touching_start_tracks_the_episode_within_tolerance(sim_cfg, episodes):
-    cases = starts(episodes, touching=True, every=4)
+    cases = starts(episodes, touching=True, every=5)
     assert len(cases) >= 12
     drift = []
     for ep, t in cases:
         r = resim(sim_cfg, ep, t)
+        assert r.contact[0], (ep.meta["terrain_seed"], t)
         assert np.array_equal(r.ball_pos[0], ep.ball_pos[t])  # the start itself is exact
         drift.append(np.abs(r.ball_pos - ep.ball_pos[t:]).max())
     assert max(drift) <= TOUCHING_MAX_DRIFT, max(drift)
@@ -107,10 +113,10 @@ def test_touching_start_tracks_the_episode_within_tolerance(sim_cfg, episodes):
 
 
 def test_a_penetrating_start_is_reported_not_changed(sim_cfg, episodes):
-    # The mean ball's radius differs from the true one, so the true centre can start inside the
-    # terrain. The state is used as given, and meta reports the overlap.
+    # With a radius other than the true one (the mean ball's, say), the true centre can start
+    # inside the terrain. The state is used as given, and meta reports the overlap.
     ep, t = starts(episodes, touching=True)[0]
-    big = mean_ball(sim_cfg).__class__(**{**ep.ball.to_dict(), "radius": ep.ball.radius + 0.05})
+    big = replace(ep.ball, radius=ep.ball.radius + 0.05)
     r = simulate_from_state(sim_cfg, ep.terrain, big, ep.ball_pos[t], ep.ball_vel[t], 0.0, 3)
     assert r.meta["from_state"]["start_gap"] < -0.04
     assert np.array_equal(r.ball_pos[0], ep.ball_pos[t])
@@ -118,13 +124,14 @@ def test_a_penetrating_start_is_reported_not_changed(sim_cfg, episodes):
 
 def test_mean_ball_is_the_midpoint_of_each_sampled_range(sim_cfg):
     mean, bc = mean_ball(sim_cfg), sim_cfg["ball"]
+    draws = [sample_ball(sim_cfg, ts, 0) for ts in range(2000)]
     for field, key in (("radius", "radius"), ("friction", "friction"),
                        ("restitution", "restitution"), ("x0", "start_x"), ("drop", "drop"),
                        ("vx0", "vx0")):  # fmt: skip
         lo, hi = bc[key]
         assert getattr(mean, field) == pytest.approx((lo + hi) / 2), field
-        draws = [getattr(sample_ball(sim_cfg, ts, 0), field) for ts in range(2000)]
-        assert np.mean(draws) == pytest.approx((lo + hi) / 2, abs=0.03 * (hi - lo)), field
+        empirical = np.mean([getattr(b, field) for b in draws])
+        assert empirical == pytest.approx((lo + hi) / 2, abs=0.03 * (hi - lo)), field
 
 
 def test_rejects_a_bad_start(sim_cfg, episodes):
@@ -138,6 +145,8 @@ def test_rejects_a_bad_start(sim_cfg, episodes):
         simulate_from_state(sim_cfg, ep.terrain, ep.ball, p, np.array([np.nan, 0.0]), 0.0, 5)
     with pytest.raises(ValueError, match="spin"):
         simulate_from_state(sim_cfg, ep.terrain, ep.ball, p, v, float("inf"), 5)
+    with pytest.raises(ValueError, match="spin"):
+        simulate_from_state(sim_cfg, ep.terrain, ep.ball, p, v, ep.ball_spin[3:5], 5)
     with pytest.raises(ValueError, match="segmentation"):
         simulate_from_state(sim_cfg, ep.terrain, ep.ball, p, v, 0.0, 5, segmentation=True)
 

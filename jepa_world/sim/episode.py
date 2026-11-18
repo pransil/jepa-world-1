@@ -172,14 +172,17 @@ def simulate_from_state(
     `vel` (vx, vz) and `spin` (rad/s about +y), as in an Episode's ground truth at frame t.
 
     Returns `frames` frames. Frame 0 is the given state, and `t` counts from it. `ball` supplies the
-    hidden parameters, the true ones or `ball.mean_ball(sim_cfg)`; its x0, drop and vx0 are unused.
+    hidden parameters: the true ones, or `jepa_world.sim.ball.mean_ball(sim_cfg)`. Its x0, drop and
+    vx0 are unused.
     `cam_pos` continues an episode's camera (its `cam_pos[t]`); by default the camera is centred on
     the ball. The state is used as given, and `meta["from_state"]["start_gap"]` reports whether it
     starts inside the terrain (negative). Renders nothing unless asked.
 
     Started from frame t of an episode with its true ball and `cam_pos[t]`, it reproduces the rest of
-    that episode bitwise if the ball isn't touching at t, and to solver tolerance if it is
-    (sim/DESIGN.md, "Re-simulating from a state")."""
+    that episode's ground truth bitwise if MuJoCo has no contact at the start (the result's
+    `contact[0]` is False), and to solver tolerance if it does (sim/DESIGN.md, "Re-simulating from a
+    state"). It is a rollout, not a dataset episode: `meta["terrain_seed"]` and `["ball_seed"]` are
+    None, and the terrain's seed is in `meta["from_state"]`."""
     if int(frames) != frames or frames < 1:
         raise ValueError(f"frames must be a positive integer, got {frames!r}")
     named = {"pos": pos, "vel": vel} | ({} if cam_pos is None else {"cam_pos": cam_pos})
@@ -187,8 +190,10 @@ def simulate_from_state(
     for k, v in vecs.items():
         if v.shape != (2,) or not np.isfinite(v).all():
             raise ValueError(f"{k} must be a finite (2,) array, got {named[k]!r}")
-    if not np.isfinite(spin):
-        raise ValueError(f"spin must be finite, got {spin!r}")
+    spin_arr = np.asarray(spin, dtype=np.float64)
+    if spin_arr.shape != () or not np.isfinite(spin_arr):
+        raise ValueError(f"spin must be a finite scalar, got {spin!r}")
+    spin = float(spin_arr)
     x, z = (float(c) for c in vecs["pos"])
     vx, vz = (float(c) for c in vecs["vel"])
     cam0 = vecs["cam_pos"] if cam_pos is not None else camera.initial(vecs["pos"], 0.0, sim_cfg)
@@ -198,11 +203,11 @@ def simulate_from_state(
         "spin": float(spin),
         "cam_pos": [float(c) for c in cam0],
         "start_gap": float(terrain.gap(vecs["pos"], ball.radius)),
+        "terrain_seed": (terrain.params or {}).get("seed"),
     }
-    seeds = (terrain.params.get("seed") if terrain.params else None, None)
     return _run(
-        sim_cfg, terrain, ball, [x, z, 0.0], [vx, vz, float(spin)], cam0, int(frames),
-        render, segmentation, seeds, {"from_state": start},
+        sim_cfg, terrain, ball, [x, z, 0.0], [vx, vz, spin], cam0, int(frames),
+        render, segmentation, (None, None), {"from_state": start},
     )  # fmt: skip
 
 

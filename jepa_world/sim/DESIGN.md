@@ -56,7 +56,9 @@ cam_pos=None, render=False)` returns an `Episode` of `frames` frames. Frame 0 is
   `build_model(terrain, ball, sim_cfg)`. So whatever later reads `sim_cfg.get("obstacles")` there
   applies to both, and a missing key means off
   ([decision](../../docs/decisions/2026-11-17-obstacles-dataset-keying.md)). Seeded placement can
-  use `terrain.params["seed"]`. `simulate` itself is unchanged: its ground truth is bitwise equal
+  use `terrain.params["seed"]`. A from-state Episode is a rollout, not a dataset episode: its
+  top-level `terrain_seed` and `ball_seed` are None, and the terrain's seed is in
+  `meta["from_state"]`, so no seed-keyed lookup can mistake one for the other. `simulate` itself is unchanged: its ground truth is bitwise equal
   to before the refactor (80 episodes, checked in this lane's PR).
 - **Ball parameters are an argument**, the true `Episode.ball` or `mean_ball(sim_cfg)`, which is
   the midpoint of each sampled range (sampling is uniform). Only radius, friction and restitution
@@ -66,13 +68,14 @@ cam_pos=None, render=False)` returns an `Episode` of `frames` frames. Frame 0 is
   penetration is the baseline's policy, not the simulator's.
 - **How exactly it reproduces an episode.** Started from frame t of an episode, with the true ball
   and the episode's `cam_pos[t]`:
-  - **If the ball isn't touching at t** (`Terrain.gap > 0`), every later frame's ground truth is
-    bitwise identical. Rendered frames are too, except within 1.5 px of the ball. The ball's
+  - **If MuJoCo has no contact at the start** (the result's `contact[0]` is False, which is clearly
+    the case wherever `Terrain.gap` is well above 0), every later frame's ground truth is bitwise
+    identical. Rendered frames are too, except within 1.5 px of the ball. The ball's
     rotation angle (`qpos[2]`) isn't in the ground truth, only its spin rate, so a restart begins
     at angle 0, and MuJoCo's tessellated sphere shades and outlines differently as it turns. From
     frame 0 the original's angle is also 0, and the frames are bitwise identical. Storing the angle
     would change the episode format, which is M2's. Baselines use ground truth, so it lost.
-  - **If it is touching**, MuJoCo's constraint solver starts from a warm start (`qacc_warmstart`,
+  - **If it has a contact**, MuJoCo's constraint solver starts from a warm start (`qacc_warmstart`,
     the previous substep's accelerations), which the saved ground truth doesn't contain. The new
     solve converges to the same contact forces only within solver tolerance, and later contacts
     can amplify the difference. Scratch measurement over 181 touching starts (80 episodes × 7 t):
@@ -86,8 +89,10 @@ cam_pos=None, render=False)` returns an `Episode` of `frames` frames. Frame 0 is
   original. From frame 1 (contact) and frame 3 (bounce, at 40 substeps per frame), the flags match
   the original wherever the trajectory does. `test_airborne_start_reproduces_the_episode_exactly`
   pins this.
-- **Fast by default:** `render=False` skips GL. 60 frames take about 15 ms (the M1 physics-only
-  rate).
+- **Fast by default:** `render=False` skips GL. Each call builds its own model (`build_model`,
+  2.3 ms), then simulates (about 9 / 28 / 38 ms for 5 / 20 / 60 frames, measured on the M4 at
+  load average ~55). Reusing a built model across restarts would save about 8% at a 20-frame
+  horizon. That isn't worth widening the API yet.
 
 ## Key decisions
 

@@ -130,6 +130,44 @@ def test_load_run_takes_the_latest_checkpoint_strictly(artifacts):
         eval_cli.load_run(empty, device=torch.device("cpu"))
 
 
+def _windows(es, n=6):
+    ep, t = np.arange(n) % es.n, 3 + np.arange(n)
+    return ep, t
+
+
+def test_context_path_matches_forward(artifacts):
+    # model_outputs runs only the context encoder and the goal head. It must give what
+    # WorldModel.forward gives on the full window, so a change to forward can't drift silently.
+    cfg = run_cfg()
+    _, model = make_run(cfg)
+    model.eval()
+    es = load_split(cfg, "test")
+    ep, t = _windows(es)
+    ours = eval_cli.model_outputs(model, es, ep, t, batch_size=6, device=torch.device("cpu"))
+    frames = eval_cli.window_frames(es, ep, t, model.context_frames, max(model.horizons))
+    with torch.no_grad():
+        out = model(frames)
+    np.testing.assert_allclose(ours["goal_mean"], out["goal"][0].double().numpy(), atol=1e-6)
+    np.testing.assert_allclose(ours["goal_logvar"], out["goal"][1].double().numpy(), atol=1e-6)
+    for lv, f in out["context"].items():
+        np.testing.assert_allclose(ours["features"][lv], f.mean(dim=(2, 3)).numpy(), atol=1e-5)
+
+
+@pytest.mark.mps
+def test_model_outputs_on_mps_match_cpu(artifacts):
+    # MPS has no float64: the goal outputs must reach the CPU before they are widened.
+    cfg = run_cfg()
+    _, model = make_run(cfg)
+    model.eval()
+    es = load_split(cfg, "test")
+    ep, t = _windows(es)
+    cpu = eval_cli.model_outputs(model, es, ep, t, 6, torch.device("cpu"))
+    mps = eval_cli.model_outputs(model.to("mps"), es, ep, t, 6, torch.device("mps"))
+    assert mps["goal_mean"].dtype == np.float64
+    np.testing.assert_allclose(mps["goal_mean"], cpu["goal_mean"], atol=1e-4)
+    np.testing.assert_allclose(mps["features"]["L3"], cpu["features"]["L3"], atol=1e-4)
+
+
 def test_eval_outputs_ignore_frames_after_t(artifacts):
     cfg = run_cfg()
     _, model = make_run(cfg)
@@ -166,13 +204,22 @@ def test_eval_run_reports_test_as_headline_and_dev_separately(artifacts, monkeyp
         locks.append(enabled)
         return real_lock(label, timeout=timeout, enabled=False)
 
+    fits = []
+    real_fit = eval_cli.probes.fit_probes
     monkeypatch.setattr(eval_cli, "gpu_lock", spy_lock)
+    monkeypatch.setattr(
+        eval_cli.probes, "fit_probes", lambda d: fits.append(d.split) or real_fit(d)
+    )
     args = ["--run", str(run), "--split", "test", "--split", "dev"]
     for s in EVAL_SETS:
         args += ["--set", s]
+    # The config asks for the simulator; an empty --sim-params overrides it.
+    args += ["--set", 'eval.sim_params=["mean"]', "--sim-params"]
     assert eval_cli.main(args) == 0
     assert locks == [False]  # CPU: no GPU lock
+    assert fits == ["train"]  # fit once, scored on both splits
     (path,) = (run / "eval").glob("*.json")
+    assert not list((run / "eval").glob(".*"))  # no temp file left behind
     out = json.loads(path.read_text())
     assert out["meta"]["step"] == 3 and out["meta"]["checkpoint"].endswith("step_0000003.pt")
     assert out["report"]["headline"]["split"] == "test"
@@ -194,7 +241,10 @@ def test_eval_run_reports_test_as_headline_and_dev_separately(artifacts, monkeyp
         probes = metrics["probes"]
         assert probes["train_split"] == "train" and probes["n_train"] == 16
         assert set(probes["by_level"]) == {"L1", "L2", "L3", "pooled"}
-        assert set(probes["by_level"]["L3"]) == {"pos", "friction", "restitution", "radius"}
+        assert set(probes["by_level"]["L3"]) == {
+            "pos", "pos_cam", "friction", "restitution", "radius"
+        }  # fmt: skip
+        assert "simulator" not in base and "simulator_mean" not in base["error_m"]
 
 
 def test_eval_run_without_a_goal_head_reports_probes_and_baselines(artifacts):
@@ -205,6 +255,32 @@ def test_eval_run_without_a_goal_head_reports_probes_and_baselines(artifacts):
     assert set(metrics) == {"probes", "baselines"}
     assert "goal" in report["meta"]["note"]
     assert path.parent == run / "eval"
+
+
+def test_nothing_to_run_the_model_for_skips_it_and_a_failed_write_leaves_no_file(
+    artifacts, monkeypatch
+):
+    cfg = load_config(BASE, [*TINY, *EPISODES])  # no goal head, and probes off below
+    run, _ = make_run(cfg, name="nothing-to-run")
+    monkeypatch.setattr(eval_cli, "model_outputs", lambda *a, **k: pytest.fail("ran the model"))
+    doc, _ = eval_cli.evaluate_run(run, eval_cfg("eval.probes.enabled=false"), ["test"])
+    assert set(doc["report"]["headline"]["metrics"]) == {"baselines"}
+    real_report = eval_cli.metrics.report
+    monkeypatch.setattr(eval_cli.metrics, "report", lambda r: {**real_report(r), "bad": object()})
+    before = set((run / "eval").iterdir())
+    with pytest.raises(TypeError):
+        eval_cli.evaluate_run(run, eval_cfg("eval.probes.enabled=false"), ["test"])
+    assert set((run / "eval").iterdir()) == before
+
+
+def test_a_checkpoint_must_belong_to_the_run(artifacts):
+    cfg = run_cfg()
+    a, _ = make_run(cfg, name="run-a")
+    b, _ = make_run(cfg, name="run-b")
+    with pytest.raises(ValueError, match="isn't in"):
+        eval_cli.load_run(a, b / "checkpoints" / "step_0000003.pt")
+    with pytest.raises(SystemExit):
+        eval_cli.main(["--baselines", "--config", str(BASE), "--checkpoint", "x.pt"])
 
 
 def test_eval_refuses_a_run_trained_on_synthetic_frames(artifacts):

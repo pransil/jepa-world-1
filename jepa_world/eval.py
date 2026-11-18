@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import secrets
 import sys
 import time
@@ -34,6 +35,7 @@ from jepa_world.data.dataset import (
     window_frames,
 )
 from jepa_world.data.splits import LeakageError, ball_seeds, check_split_config, terrain_seeds
+from jepa_world.models.jepa import context_stack
 from jepa_world.sim.ball import sample_ball
 from jepa_world.sim.episode import simulate_from_state
 from jepa_world.sim.io import load_episode
@@ -225,9 +227,15 @@ class LoadedRun:
 def load_run(
     run_dir: str | Path, checkpoint: str | Path | None = None, device: torch.device | None = None
 ) -> LoadedRun:
-    """A run's model from its latest checkpoint (or `checkpoint`), built from the config saved in
-    that checkpoint and loaded strictly, in eval mode on `device`."""
-    path = Path(checkpoint) if checkpoint else latest_checkpoint(Path(run_dir))
+    """A run's model from its latest checkpoint (or `checkpoint`, which must be one of the run's
+    own), built from the config saved in that checkpoint and loaded strictly, in eval mode on
+    `device`."""
+    run_dir = Path(run_dir)
+    path = Path(checkpoint) if checkpoint else latest_checkpoint(run_dir)
+    if path.resolve().parent != (run_dir / "checkpoints").resolve():
+        raise ValueError(
+            f"checkpoint {path} isn't in {run_dir / 'checkpoints'}: eval of one run's model is filed under that run"
+        )
     ckpt = torch.load(path, map_location="cpu", weights_only=True)
     cfg = ckpt["config"]
     model = train.build_model(cfg)
@@ -237,8 +245,9 @@ def load_run(
 
 
 def check_eval_split(run_cfg: dict, eval_cfg: dict, split: str) -> None:
-    """Refuse to score `split` if it could hold anything the run trained on (data/DESIGN.md, "Not
-    checked here: leakage across configs"), or if it isn't the eval config's `split`."""
+    """Refuse to score `split` if it is the split the run trained on, shares a terrain seed with it
+    (data/DESIGN.md, "Not checked here: leakage across configs"), or has other seeds in the run's
+    config than in the eval config (a different test set isn't comparable)."""
     check_split_config(run_cfg["data"])
     trained = run_cfg["data"]["split"]
     if split == trained:
@@ -280,22 +289,38 @@ def goal_positions(pos, ep, t, mean, logvar, horizons: Sequence[int]) -> dict:
 
 
 def model_outputs(
-    model, es: EpisodeSet, ep: np.ndarray, t: np.ndarray, batch_size: int, device: torch.device
+    model,
+    es: EpisodeSet,
+    ep: np.ndarray,
+    t: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+    *,
+    goal: bool = True,
+    features: bool = True,
 ) -> dict:
-    """Run the model on windows (ep, t): frames only, never ground truth. Returns
-    {"goal_mean", "goal_logvar"}: (M, K, 2) float64 or None without a goal head, and
-    {"features": {level: (M, channels)}}: the context levels, spatially pooled."""
-    c, k_frames = model.context_frames, max(model.horizons)
+    """The goal head's output and the pooled context levels for windows (ep, t).
+
+    Only the context frames t−C+1 … t go to the device, never ground truth or a later frame. The
+    goal head and the probes read nothing else, so the targets and horizon heads that
+    `WorldModel.forward` would also compute are skipped. This is the same path as forward's goal
+    (`test_context_path_matches_forward`). Returns {"goal_mean", "goal_logvar"}: (M, K, 2)
+    float64, or None without a goal head (or goal=False), and {"features": {level: (M,
+    channels)}}, every encoder level spatially pooled, empty with features=False."""
+    c = model.context_frames
+    goal = goal and getattr(model, "goal", None) is not None
     means, logvars, feats = [], [], {}
     with torch.no_grad():
         for i in range(0, len(ep), batch_size):
-            frames = window_frames(es, ep[i : i + batch_size], t[i : i + batch_size], c, k_frames)
-            out = model(frames.to(device))
-            if "goal" in out:
-                means.append(out["goal"][0].double().cpu().numpy())
-                logvars.append(out["goal"][1].double().cpu().numpy())
-            for level, f in out["context"].items():
-                feats.setdefault(level, []).append(probes.pool(f.cpu().numpy()))
+            frames = window_frames(es, ep[i : i + batch_size], t[i : i + batch_size], c, 0)
+            ctx = model.context_encoder(context_stack(frames.to(device), c))  # every level
+            if goal:
+                mean, logvar = model.goal(*(ctx[lv] for lv in model.goal_levels))
+                means.append(mean.cpu().double().numpy())  # MPS has no float64: CPU first
+                logvars.append(logvar.cpu().double().numpy())
+            if features:
+                for level, f in ctx.items():
+                    feats.setdefault(level, []).append(probes.pool(f.cpu().numpy()))
     return {
         "goal_mean": np.concatenate(means) if means else None,
         "goal_logvar": np.concatenate(logvars) if logvars else None,
@@ -304,24 +329,43 @@ def model_outputs(
 
 
 def _probe_data(split: str, es: EpisodeSet, ep, t, features: dict, sim_cfg: dict):
-    """Rows for the probes: pooled features, and targets ball_pos at t plus the episode's hidden
-    parameters, drawn from its seeds (`sample_ball` is exact by M1's determinism)."""
+    """Rows for the probes: pooled features, and as targets the ball's world position at t, its
+    position relative to the camera (what a tracking camera's frame shows), and the episode's
+    hidden parameters, drawn from its seeds (`sample_ball`, exact by M1's determinism)."""
     balls = [
         sample_ball(sim_cfg, int(a), int(b))
         for a, b in zip(es.terrain_seed, es.ball_seed, strict=True)
     ]
     hidden = {name: np.array([getattr(b, name) for b in balls]) for name in HIDDEN}
-    targets = {"pos": es.ball_pos[ep, t], **{name: v[ep] for name, v in hidden.items()}}
+    targets = {
+        "pos": es.ball_pos[ep, t],
+        "pos_cam": es.ball_pos[ep, t] - es.cam_pos[ep, t],
+        **{name: v[ep] for name, v in hidden.items()},
+    }
     return probes.ProbeData(split, features, targets, es.terrain_seed[ep])
 
 
+SEED_CHECKS = 8  # stored episodes per split checked against their seeds' ball draw
+
+
 def _check_seed_balls(cfg: dict, split: str, es: EpisodeSet) -> None:
-    """The probes take ball parameters from seeds. Check that against the first stored episode."""
+    """The probes take ball parameters from seeds. Check that against stored episodes: the first,
+    the last and a seeded sample (reading all of train's 2000 files would cost about 1.5 GB)."""
     path = split_dir(cfg, split)
-    stored = load_episode(path / read_manifest(path)["episodes"][0]["file"]).ball
-    drawn = sample_ball(cfg["sim"], int(es.terrain_seed[0]), int(es.ball_seed[0]))
-    if stored != drawn:
-        raise ValueError(f"{path}: stored ball {stored} differs from its seeds' draw {drawn}")
+    rows = read_manifest(path)["episodes"]
+    rng = np.random.default_rng(0)
+    pick = {
+        0,
+        len(rows) - 1,
+        *rng.choice(len(rows), size=min(SEED_CHECKS, len(rows)), replace=False).tolist(),
+    }
+    for i in sorted(pick):
+        stored = load_episode(path / rows[i]["file"]).ball
+        drawn = sample_ball(cfg["sim"], int(es.terrain_seed[i]), int(es.ball_seed[i]))
+        if stored != drawn:
+            raise ValueError(
+                f"{path / rows[i]['file']}: stored ball {stored} differs from its seeds' draw {drawn}"
+            )
 
 
 def _ratio_to(goal_err: dict, base_err: dict) -> dict:
@@ -342,11 +386,11 @@ def score_split(
     ep: np.ndarray,
     t: np.ndarray,
     outputs: dict,
-    probe_train=None,
+    fitted_probes=None,
     simulate: Callable = simulate_from_state,
 ) -> dict:
     """Every SPEC §7.2 family for one split, as {family: metrics} (goal_head, visibility, events
-    only with a goal head; probes only with `probe_train`)."""
+    only with a goal head; probes only with `fitted_probes`, which are scored, never refit)."""
     ev = eval_cfg["eval"]
     levels, c = list(ev["coverage_levels"]), cfg["model"]["context_frames"]
     starts = np.unique(t)
@@ -387,9 +431,9 @@ def score_split(
             )  # fmt: skip
             for k in horizons
         }
-    if probe_train is not None:
+    if fitted_probes is not None:
         held = _probe_data(split, es, ep, t, outputs["features"], cfg["sim"])
-        families["probes"] = probes.run_probes(probe_train, held).metrics["probes"]
+        families["probes"] = probes.score_probes(fitted_probes, held).metrics["probes"]
     return families
 
 
@@ -402,13 +446,16 @@ def evaluate_run(
 ) -> tuple[dict, Path]:
     """Score a run on held-out `splits` (SPEC §7) and write <run>/eval/<time>-<splits>.json:
     {"meta": ..., "report": metrics.report(...)}, with test as the headline and dev kept separate.
-    Forward passes run under the GPU lock on MPS. Returns the document and its path."""
+
+    Everything that needs no GPU happens outside the GPU lock: loading data, the seed checks,
+    fitting probes, the simulator and the metrics. Only the forward passes run under it, and only
+    on MPS. Returns the document and its path."""
     run_dir, ev = Path(run_dir), eval_cfg["eval"]
     splits = list(dict.fromkeys(splits))
     if not splits or not set(splits) <= set(HELD_OUT):
         raise ValueError(f"splits {splits}: --run scores {list(HELD_OUT)} only")
     device = pick_device(ev["device"])
-    run = load_run(run_dir, checkpoint, device)
+    run = load_run(run_dir, checkpoint, torch.device("cpu"))  # moved to the device under the lock
     cfg = run.cfg
     if cfg["data"]["source"] != "episodes":
         raise ValueError(
@@ -418,40 +465,51 @@ def evaluate_run(
     for split in splits:
         check_eval_split(cfg, eval_cfg, split)
     has_goal = getattr(run.model, "goal", None) is not None
+    use_probes = bool(ev["probes"]["enabled"])
     c = cfg["model"]["context_frames"]
     goal_ks = list(cfg["model"]["goal_horizons"]) if has_goal else []
-    k_eval = max([*cfg["model"]["horizons"], *goal_ks])  # the windows `eval --baselines` uses
+    # The baselines are recomputed below on exactly these windows. They match `eval --baselines`'s
+    # whenever max(goal_horizons) <= max(model.horizons), as in base.yaml (t = 3..39).
+    k_eval = max([*cfg["model"]["horizons"], *goal_ks])
     data = {s: load_split(cfg, s) for s in splits}
     windows = {
         s: baselines.window_index(es.n, valid_starts(es.T, c, k_eval)) for s, es in data.items()
     }
-    probe_train = None
-    with gpu_lock(f"eval {run_dir.name}", enabled=device.type == "mps"):
-        outputs = {
-            s: model_outputs(run.model, data[s], *windows[s], ev["batch_size"], device)
-            for s in splits
-        }
-        if ev["probes"]["enabled"]:
-            trained = cfg["data"]["split"]
-            tr = load_split(cfg, trained)
-            ep_all, t_all = baselines.window_index(tr.n, valid_starts(tr.T, c, k_eval))
-            rng = np.random.default_rng(ev["probes"]["seed"])
-            n = min(int(ev["probes"]["train_windows"]), len(ep_all))
-            pick = np.sort(rng.choice(len(ep_all), size=n, replace=False))
-            tr_out = model_outputs(
-                run.model, tr, ep_all[pick], t_all[pick], ev["batch_size"], device
-            )
-            _check_seed_balls(cfg, trained, tr)
-            probe_train = _probe_data(
-                trained, tr, ep_all[pick], t_all[pick], tr_out["features"], cfg["sim"]
-            )
+    tr = tr_ep = tr_t = None
+    if use_probes:
+        trained = cfg["data"]["split"]
+        tr = load_split(cfg, trained)
+        ep_all, t_all = baselines.window_index(tr.n, valid_starts(tr.T, c, k_eval))
+        rng = np.random.default_rng(ev["probes"]["seed"])
+        n = min(int(ev["probes"]["train_windows"]), len(ep_all))
+        pick = np.sort(rng.choice(len(ep_all), size=n, replace=False))
+        tr_ep, tr_t = ep_all[pick], t_all[pick]
+        for s, es in [(trained, tr), *data.items()]:
+            _check_seed_balls(cfg, s, es)
+    empty = {"goal_mean": None, "goal_logvar": None, "features": {}}
+    outputs, tr_out = dict.fromkeys(splits, empty), None
+    if has_goal or use_probes:
+        with gpu_lock(f"eval {run_dir.name}", enabled=device.type == "mps"):
+            run.model.to(device)
+            outputs = {
+                s: model_outputs(
+                    run.model, data[s], *windows[s], ev["batch_size"], device, features=use_probes
+                )
+                for s in splits
+            }
+            if use_probes:
+                tr_out = model_outputs(
+                    run.model, tr, tr_ep, tr_t, ev["batch_size"], device, goal=False
+                )
+            run.model.to("cpu")
+    fitted = None
+    if use_probes:
+        fitted = probes.fit_probes(
+            _probe_data(cfg["data"]["split"], tr, tr_ep, tr_t, tr_out["features"], cfg["sim"])
+        )
     results = []
     for s in splits:
-        if probe_train is not None:
-            _check_seed_balls(cfg, s, data[s])
-        families = score_split(
-            cfg, eval_cfg, s, data[s], *windows[s], outputs[s], probe_train, simulate
-        )
+        families = score_split(cfg, eval_cfg, s, data[s], *windows[s], outputs[s], fitted, simulate)
         results.append(metrics.SplitResult(s, families))
     meta = {
         **run_metadata(),
@@ -470,12 +528,17 @@ def evaluate_run(
             "are not reported"
         )
     doc = {"meta": meta, "report": metrics.report(results)}
+    text = json.dumps(doc, indent=2)  # fails here, before any file exists, if not JSON-safe
     out_dir = run_dir / "eval"
     out_dir.mkdir(exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    path = out_dir / f"{stamp}-{'-'.join(splits)}-{secrets.token_hex(3)}.json"
-    with open(path, "x") as f:  # never overwrite an earlier eval
-        json.dump(doc, f, indent=2)
+    name = f"{stamp}-{'-'.join(splits)}-{secrets.token_hex(3)}.json"
+    path, tmp = out_dir / name, out_dir / f".{name}.tmp"
+    tmp.write_text(text)
+    try:
+        os.link(tmp, path)  # all or nothing, and never over an earlier eval (EEXIST)
+    finally:
+        tmp.unlink()
     return doc, path
 
 
@@ -524,10 +587,11 @@ def main(argv: list[str] | None = None) -> int:
         "--sim-params",
         nargs="*",
         choices=baselines.SIM_PARAMS,
-        default=[],
+        default=None,
         help=(
-            "also run the simulator-aware baseline with these ball parameters (minutes of CPU "
-            f"each); the proposed set is {' '.join(baselines.PROPOSED_SIM_PARAMS)}"
+            "the simulator-aware baseline's ball parameters, minutes of CPU each (proposed: "
+            f"{' '.join(baselines.PROPOSED_SIM_PARAMS)}). --baselines: none unless given. --run: "
+            "replaces eval.sim_params; give it with no values for none"
         ),
     )
     args = p.parse_args(argv)
@@ -535,6 +599,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.run:
         eval_cfg = load_config(args.config or BASE_CONFIG, args.set)
+        if args.sim_params is not None:
+            eval_cfg["eval"]["sim_params"] = list(args.sim_params)
         doc, path = evaluate_run(args.run, eval_cfg, splits, checkpoint=args.checkpoint)
         meta, report = doc["meta"], doc["report"]
         print(f"eval: {path}\ncheckpoint {meta['checkpoint']} (step {meta['step']})")
@@ -550,12 +616,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if len(splits) > 1:
         p.error("--baselines scores one --split")
+    if args.checkpoint:
+        p.error("--checkpoint is for --run")
     if not args.config:
         p.error("--baselines needs --config")
     cfg = load_config(args.config, args.set)
     # No GPU lock: the simulator runs MuJoCo on the CPU with render=False (no MPS, no GL), and
     # gpu_lock is for MPS jobs. Taking it would hold up GPU training for the whole eval.
-    run, result = run_baselines(cfg, splits[0], sim_params=args.sim_params)
+    run, result = run_baselines(cfg, splits[0], sim_params=args.sim_params or [])
     print(
         f"run dir: {run}\nsplit {splits[0]}: {result['episodes']} episodes, "
         f"{result['windows']} windows (t in {result['starts']})"

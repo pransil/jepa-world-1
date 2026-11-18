@@ -25,21 +25,24 @@ float, int or None values).
 
 ```
 python -m jepa_world.eval --run <run dir> [--split test] [--split dev] [--checkpoint <.pt>]
-                          [--config configs/base.yaml] [--set eval.probes.enabled=false]
+                          [--config configs/base.yaml] [--sim-params [true mean ...]]
+                          [--set eval.probes.enabled=false]
 ```
 
 ```
-run dir ─► latest checkpoints/step_*.pt ─► (its saved config, WorldModel, strict load)
+run dir ─► latest checkpoints/step_*.pt (or --checkpoint, one of the run's own)
+        ─► its saved config ─► train.build_model ─► strict load
 eval config (--config) ─► check_eval_split(run cfg, eval cfg, split)   # leakage across configs
 split ─► EpisodeSet ─► windows (ep, t): t ∈ valid_starts(T, C, max(model.horizons ∪ goal_horizons))
-  ─► window_frames (frames only) ─► model ─► goal (mean, logvar) (M, K, 2) + pooled context levels
-       pred_k = ball_pos[t] + mean_k,  var_k = exp(logvar_k)
-  ─► goal_head  = evaluate_positions(...) + ratio to each baseline       ┐
-     baselines  = baselines.evaluate (+ simulator, eval.sim_params)      │ SplitResult(split,
-     visibility = visibility(pred_k, var_k, truth_k, flags at t), per k  │   {family: ...})
-     events     = event_behaviour(std series, flags), per k              │
-     probes     = fit on the run's training split, scored on this split  ┘
-  ─► metrics.report ─► <run dir>/eval/<UTC time>-<splits>.json   (test = headline, dev separate)
+  ─► window_frames(k_max=0): frames t−C+1..t only ─► context_encoder (every level) ─► goal head
+       goal (mean, logvar) (M, K, 2): pred_k = ball_pos[t] + mean_k,  var_k = exp(logvar_k)
+       pooled context levels {L1, L2, L3}: (M, channels), for the probes
+  ─► goal_head  = evaluate_positions(...) + ratio to each baseline         ┐
+     baselines  = baselines.evaluate (+ simulator, eval.sim_params)        │ SplitResult(split,
+     visibility = visibility(pred_k, var_k, truth_k, flags at t), per k    │   {family: ...})
+     events     = event_behaviour(std series, flags), per k                │
+     probes     = fit once on the run's training split, scored per split   ┘
+  ─► metrics.report ─► <run dir>/eval/<UTC time>-<splits>-<hex>.json   (test = headline, dev separate)
 ```
 
 - **The run's own checkpoint config builds the model and picks the data.** The eval config
@@ -52,21 +55,41 @@ split ─► EpisodeSet ─► windows (ep, t): t ∈ valid_starts(T, C, max(mod
     that would be a different test set.
 - **Same windows as the baselines.** t runs over `valid_starts(T, C, k_max)`, with k_max the
   largest model or goal horizon, which is t = 3..39 for base.yaml. The baselines are recomputed
-  in the same eval on exactly these windows, so every ratio is like-for-like.
-- **The model only ever gets frames.** It gets `window_frames`, i.e. frames t−C+1 … t+max(model
-  horizons), because `forward` also encodes its targets. The goal head and the probes read only
-  the context levels. `test_eval_outputs_ignore_frames_after_t` pins this.
+  in the same eval on exactly these windows, so every ratio is like-for-like. They are also
+  `eval --baselines`'s windows whenever max(goal_horizons) ≤ max(model.horizons).
+- **Only the context frames reach the model.** `model_outputs` sends frames t−C+1 … t to the
+  device and runs the context encoder and the goal head, the same path `WorldModel.forward` takes
+  for the goal (`test_context_path_matches_forward`). The alternative, calling `forward` on the
+  full window, lost:
+  - it moved 24 frames per window to MPS instead of 4;
+  - it ran the target encoder on every horizon, every predictor head and the pixel decoder, none
+    of which eval reads, all while holding the shared GPU lock.
+
+  Goal outputs are moved to the CPU before being widened to float64, because MPS has none
+  (`test_model_outputs_on_mps_match_cpu`).
 - **Flags at t.** Visibility and events use `out_of_view` / `occluded` at the context's last frame
   t, which is what the model sees (the M7 plan's definition). `goal_head`'s in-view/out-of-view
   error split uses t+k, as the baselines do.
-- **Probes.** They are fit on `eval.probes.train_windows` random windows of the run's training
-  split and scored on every eval-split window. Ball parameters come from the episode seeds
-  (`sim.ball.sample_ball`, exact by M1's determinism). Without a goal head (a pre-M5 run), only
-  `probes` and `baselines` are reported, and the report says why.
-- **Device and lock.** Forward passes run on `eval.device` under `gpu_lock` when that is MPS. The
-  simulator and the metrics run after the lock is released.
-- **Output** is never overwritten: one new JSON per invocation, holding the checkpoint, step,
-  git and the eval config with the report.
+- **Probes.** They are fit once, on `eval.probes.train_windows` random windows of the run's
+  training split, and scored on every window of each eval split.
+  - Targets: world position at t, position relative to the camera at t (`pos_cam`), and the
+    hidden parameters. The camera tracks the ball, so world position is barely visible in a
+    frame, while `pos_cam` is what the frame shows.
+  - Ball parameters come from the episode seeds (`sim.ball.sample_ball`, exact by M1's
+    determinism). Each split checks the first, the last and 8 seeded episodes against their
+    stored files.
+  - Without a goal head (a pre-M5 run), only `probes` and `baselines` are reported, and the
+    report says why. With neither a goal head nor probes, the model isn't run at all.
+- **Device and lock.** Data loading, the seed checks, probe fitting, the simulator and the
+  metrics all run outside `gpu_lock`. Only the forward passes run inside it, and only when
+  `eval.device` is MPS. The model is moved to the device inside the lock and back to the CPU
+  before it is released.
+- **Simulator params.** They come from `eval.sim_params`, the proposed `["true", "mean"]`.
+  `--sim-params` replaces them, and with no values it turns the simulator off.
+- **Output** is never overwritten. Each invocation writes one new JSON, holding the checkpoint,
+  step, git and the eval config with the report. It is serialised first, written to a temp
+  file, and hard-linked into place, so a failure leaves no partial file and an existing name
+  is never replaced.
 
 ## Data flow and shapes
 

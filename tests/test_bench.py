@@ -39,6 +39,18 @@ def test_bench_with_far_stage_times_the_l1_heads_and_the_full_step():
     assert rf["head_params"] == rn["head_params"]  # the variant under test: the L1 heads only
     assert rn["far_head_params"] == 0 < rf["far_head_params"]
     assert rf["total_trainable_params"] > rn["total_trainable_params"]
+    assert rn["td_head_params"] == rf["td_head_params"] == 0  # top_down is off by default
+
+
+def test_bench_reports_the_top_down_branches():
+    cfg = tiny_far_cfg("model.top_down=true")
+    (row,) = bench.bench_heads(cfg, torch.device("cpu"), [(4, 3)], iters=1, warmup=0)["rows"]
+    off = bench.bench_heads(tiny_far_cfg(), torch.device("cpu"), [(4, 3)], iters=1, warmup=0)
+    assert row["td_head_params"] > 0
+    assert (
+        row["total_trainable_params"]
+        == off["rows"][0]["total_trainable_params"] + row["td_head_params"]
+    )
 
 
 def test_fallback_recorder_catches_the_mps_fallback_warning():

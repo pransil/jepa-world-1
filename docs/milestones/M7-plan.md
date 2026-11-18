@@ -121,10 +121,9 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 
 - **Question:** when the pixel decoder can't take a shortcut through L1/L2, does L3 come to hold
   more of the scene, and is that good for prediction?
-- **Switch:** `model.unet_skips` (the proposed name, default `true`). It **does not exist yet**. It
-  belongs to the decoder path in `models/unet.py` and `models/pixel.py`. m5 has been asked to
-  expose it; otherwise a later M7 lane adds it through `/builder`. With `false`, the decoder
-  upsamples from L3 alone ([decision](../decisions/2026-11-17-skip-connections-meaning.md)).
+- **Switch:** `model.unet_skips` (default `true`). It **exists**: m5 added it to the decoder path in
+  `models/pixel.py` with M5. With `false`, the decoder upsamples from L3 alone
+  ([decision](../decisions/2026-11-17-skip-connections-meaning.md)).
 - **Settings:** skips on or off, at `w_pix` 0.05 and 0.5. At `w_pix = 0` the switch is a no-op,
   because it only acts through the pixel loss.
 - **Hypothesis:** with the skips off, the pixel loss has to be satisfied through L3, so L3 holds
@@ -183,10 +182,11 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 
 - **Question (SPEC §9.2):** if the far heads must also predict the next-finer future target, do
   the coarse levels become better world models at long horizons?
-- **Switch:** `model.top_down` (default `false`) and `loss.w_td` (0.5), the proposed names. They
-  **do not exist yet**. The code goes in `models/heads.py`, `models/jepa.py` and `train.py`
-  (logging), in a later M7 code lane through `/builder`, after M4 and M5 merge. The targets are
-  set by the [decision](../decisions/2026-11-17-top-down-targets.md):
+- **Switch:** `model.top_down` (default `false`) and `loss.w_td` (0.5). They **exist**, from the
+  M7 top-down lane (`models/heads.py` `TopDownHead`, `models/jepa.py`; `models/DESIGN.md`, "Top-down
+  prediction"). The terms are logged as `loss/td/k10` and `loss/td/k20`, plus `sqerr/td/k<k>`,
+  `logvar/td/k<k>` and `relerr/td/k<k>`. The targets are set by the
+  [decision](../decisions/2026-11-17-top-down-targets.md):
   - k = 20 on L3 also predicts the target **L2(t+20)**, through up×4;
   - k = 10 on L2 also predicts the target **L1(t+10)**, through up×2;
   - both use Gaussian NLL at `w_td = 0.5`, with the gradient flowing into context L3/L2.
@@ -201,18 +201,20 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
   - the variance on every level stays above the floor.
 - **Secondary:** the L3 and L2 linear-probe ball-position error, and probes for the hidden
   parameters at L3.
-- **Runs:** top-down on × seeds 0, 1 = **2 new runs**. ≈ 1.1–1.4 GPU-h, with the step about 10%
-  slower (the decision estimates +10–20 ms).
-- **Depends on:** M4, M5, M6, plus the code lane above.
-- **Config:** `configs/m7_top_down.yaml` (`model.top_down: true`).
+- **Runs:** top-down on × seeds 0, 1 = **2 new runs**. ≈ 1.3–1.6 GPU-h. The step is about 35%
+  slower, measured at 201 ms vs 146–151 ms on M4's synthetic bench (`models/DESIGN.md`, "Top-down
+  prediction"). That is more than the decision's +10–20 ms estimate.
+- **Depends on:** M4, M5, M6. The code has landed.
+- **Config:** `configs/m7_top_down.yaml` (`model.top_down: true`), which the experiment lane writes
+  with its run, per `/experiment` Step 2.
 
 ## 5. Obstacles and occlusion
 
 - **Question:** when the ball is hidden behind a foreground object, while the camera still points
   at it, does the model's uncertainty rise and then fall again, and is it calibrated?
-- **Switch:** `sim.obstacles`, a block of keys **that does not exist yet**. The code goes in
-  `sim/scene.py` (occluder geoms), `sim/render.py`, and `sim/episode.py` (the `occluded` flag),
-  in a later sim lane through `/builder`.
+- **Switch:** `sim.obstacles`, a block of keys. It **exists**, from PR #17: `sim/obstacles.py`,
+  `sim/scene.py`, `sim/episode.py` (`sim/DESIGN.md`, "Obstacles and occlusion"). Its tuned values
+  are in `configs/m7_obstacles.yaml`; that config's datasets aren't built yet.
 - **How the keys arrive (decided: absent means off):**
   - the keys are never added to base.yaml's parsed config, only as a commented block;
   - `sim/` treats a missing `obstacles` as off;
@@ -268,11 +270,11 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 |---|---|---|---|---|---|---|
 | — | Reference | base.yaml | yes, after M5 | — | 2 | 1.1–1.2 |
 | 1 | Pixel weight 0 / 0.05 / 0.5 | `loss.w_pix` | key yes; consumer M5 | m5 | 4 | 2.1–2.5 |
-| 2 | Decoder skips on/off | `model.unet_skips` | no | m5, or a later M7 lane | 4 | 2.1–2.5 |
+| 2 | Decoder skips on/off | `model.unet_skips` | **yes** (M5) | — | 4 | 2.1–2.5 |
 | 3 | track_lagged vs track_full | `sim.camera_mode` | **yes** (M1) | — (dataset build) | 2 | 1.1–1.2 |
-| 4 | Top-down (A) | `model.top_down`, `loss.w_td` | no | a later M7 code lane | 2 | 1.1–1.4 |
-| 5 | Obstacles | `sim.obstacles` | no | a later sim lane | 2 | 1.1–1.2 |
-| | **Total** | | | | **16** | **≈ 8.5–10** (training only) |
+| 4 | Top-down (A) | `model.top_down`, `loss.w_td` | **yes** (M7 top-down lane) | — | 2 | 1.3–1.6 |
+| 5 | Obstacles | `sim.obstacles` | **yes** (PR #17) | — (dataset build) | 2 | 1.1–1.2 |
+| | **Total** | | | | **16** | **≈ 8.7–10.2** (training only) |
 
 **Order:** §1, then §2 (it shares §1's runs), then §3, then §4, then §5. §1 and §3 need no new code
 once M5 and M6 land. Run them back to back, keeping one queued job per lane.

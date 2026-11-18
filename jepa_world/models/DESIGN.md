@@ -1,4 +1,4 @@
-# models/: JEPA core (M3 near heads, M4 far heads)
+# models/: JEPA core (M3 near heads, M4 far heads, M7 top-down)
 
 The goal head, the pixel decoder and `WorldModel` (M5) have their own note:
 [DESIGN-aux.md](DESIGN-aux.md).
@@ -18,9 +18,10 @@ The U-Net decoder path lives in the pixel decoder (`pixel.py`, M5). `train.py` b
 `pixel` stages. This file's units are unchanged by it, apart from two generic hooks:
 `extra_levels` and `grad_levels` (DESIGN-aux.md).
 
-Not here yet:
-- top-down prediction (SPEC §9.2);
-- checkpoint resume.
+- **M7** adds optional **top-down prediction** (SPEC §9.2, off by default):
+  [below](#top-down-prediction-m7-off-by-default).
+
+Not here yet: checkpoint resume.
 
 Batches come from M2's episode loader (`data.source: episodes`, `jepa_world/data/DESIGN.md`).
 The synthetic moving-disc source (`data/synthetic.py`) remains for tests, benchmarks and smoke
@@ -121,11 +122,72 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
 - **Logging without per-step syncs:** `train.py` buffers each step's loss vector on device and
   flushes every `train.log_every` steps (and on a crash). Every step is still logged.
 
+## Top-down prediction (M7, off by default)
+
+Each far head also predicts the **next-finer target at its own horizon**, from coarse features
+only ([decision](../../docs/decisions/2026-11-17-top-down-targets.md), SPEC §9.2). It is the M7
+§4 ablation.
+
+| branch | reads (context) | upsample | predicts (mean, logvar) | target (target encoder, detached, `target_norm`) |
+|---|---|---|---|---|
+| `td_heads["20"]` | L3 (B, 256, 8, 8) | ×4 | (B, 128, 32, 32) | L2 of the stack ending at t+20 |
+| `td_heads["10"]` | L2 (B, 128, 32, 32) | ×2 | (B, 64, 64, 64) | L1 of the stack ending at t+10 |
+
+The rule is generic: every far horizon whose level has a finer level gets a branch. The scale is
+the ratio of the two level sizes in `model.levels`.
+
+```
+context[head_level[k]] ─► bilinear ×s ─► GaussianHead(finer level's hidden/kernel) ─► td_pred[k], td_logvar[k]
+target_encoder(stack t+k, upto=head_level[k]) ─► {finer level: td_target[k], head_level[k]: target[k]}
+loss/td/k<k> = gaussian_nll(td_pred, td_logvar, td_target)      loss/total += w_td · loss/td/k<k>  (k active)
+```
+
+- **Switch:** `model.top_down` (default `false`) and `loss.w_td` (0.5).
+  - Off: no `td_heads` module exists, so the state-dict keys, the forward output and every loss
+    term are exactly as before. Old checkpoints load strictly (test).
+  - A config without the key (a run started before M7) reads as off.
+  - On without far horizons built is a config error, and so is any value that isn't a YAML bool.
+    `bool("false")` is True, so a quoted value would silently turn the reference into the ablation.
+  - `bench.py` reports `td_head_params`. The branches' time shows in `ms_train_step`.
+- **Measured cost** (`python -m jepa_world.bench --config configs/m4_far_synthetic.yaml --hidden 32
+  --kernel 3`, MPS, B = 32, sha cbdf82f, clean, off/on interleaved, load average about 84):
+  - the step goes from 151 / 146 ms (off: `…-bench-l1-heads-995ee7`, `…-2b58a0`) to 201 / 201 ms
+    (on: `…-fd99f9`, `…-840622`). That is **+50–55 ms (about +35%)**, with no CPU fallback;
+  - MPS driver memory goes from 3261 to 4270 MB;
+  - the branches add 538k parameters: k = 20 has 485k, k = 10 has 53k.
+
+  The k = 20 branch dominates. It is a 3×3 conv from 256 + 8 to 128 channels at 32×32, the L2 head
+  shape, about 1.4× the k = 20 far head's compute. The decision had estimated +10–20 ms, counting
+  only the 64×64 output. If the cost matters, the lever is a narrower k = 20 branch, which would be
+  a new width key.
+- **The branch reads the coarse level the far head reads, never a finer context level.**
+  - Gradient from the finer target flows through the branch into context L3 (k = 20) and L2
+    (k = 10). That is "errors propagate upward".
+  - A separate branch, not the far head's trunk, so the far heads stay byte-for-byte as in M4.
+    Sharing the trunk would save one conv stack but would change `GaussianHead`.
+- **Bilinear upsampling, then the finer level's head shape** (`l1_`/`l2_head_hidden`, `_kernel`,
+  so 32 wide at L1 and 128 at L2). The same `GaussianHead` is used, with its k-vector, action slot
+  and tanh-bounded log-variance (`far_logvar_bound`).
+  - Nearest upsampling lost: it leaves s×s blocks that two 3×3 convs at the finer resolution can't
+    smooth.
+  - A transposed conv lost: more parameters and checkerboard artefacts.
+  - Bilinear forward and backward run on MPS without CPU fallback (torch 2.15.0; `@mps` test).
+- **The targets are free.** `encode_targets` already runs the target encoder `upto` each far
+  level, which computes the finer levels on the way. They were discarded before; `_encode` now
+  keeps the ones a branch needs. The public `encode_targets` is unchanged.
+- **The stage schedule follows the far head:** a branch is active, takes autograd and joins
+  `loss/total` exactly when its horizon is active. It is logged every step regardless: `loss/td/k<k>`,
+  `sqerr/td/k<k>`, `logvar/td/k<k>`, `relerr/td/k<k>`.
+- **Same NLL as the far heads** (`gaussian_nll_terms`, summed over channels, averaged over batch and
+  positions), so the two terms are on the same scale.
+- The variance guard is unchanged: the branches read the far heads' levels, which the guard
+  already covers while those heads are active.
+
 ## Seams
 
 | Unit | Pure? | Touches | Tested by |
 |---|---|---|---|
-| `unet.UNetEncoder`, `heads.HorizonHead`, `heads.GaussianHead` | yes | — | `tests/test_unet.py`, `tests/test_heads.py` (CPU, 16×16) |
+| `unet.UNetEncoder`, `heads.HorizonHead`, `heads.GaussianHead`, `heads.TopDownHead` | yes | — | `tests/test_unet.py`, `tests/test_heads.py` (CPU, 16×16), `tests/test_top_down.py` |
 | `jepa.JEPA`, `latent_loss`, `gaussian_nll`, `relative_error`, `normalize_target`, `variance_guard`, `compute_losses`, stack slicing | yes | — | `tests/test_jepa.py` |
 | `data/synthetic.moving_disc_batch` | yes (explicit `torch.Generator`) | — | `tests/test_synthetic.py` |
 | `train.train_step`, `train.active_horizons` | mutates model + optimizer | device | `tests/test_train.py`, `tests/test_train_far.py` |
@@ -137,5 +199,5 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
 | File | Responsibility |
 |---|---|
 | `unet.py` | `ConvBlock` (conv → GroupNorm → SiLU), `UNetEncoder` (levels from config, `upto` early stop, `after` continuation), `encoder_from_cfg` |
-| `heads.py` | `HorizonHead` (features + k-vector + action slot → mean map), `GaussianHead` (→ mean, bounded logvar) |
-| `jepa.py` | `JEPA` (context/target encoders, heads, `ema_update`, `active` forward), stack slicing, `latent_loss`, `gaussian_nll`, `relative_error`, `normalize_target`, `variance_guard`, `compute_losses` |
+| `heads.py` | `HorizonHead` (features + k-vector + action slot → mean map), `GaussianHead` (→ mean, bounded logvar), `TopDownHead` (bilinear upsample → `GaussianHead`) |
+| `jepa.py` | `JEPA` (context/target encoders, heads, optional `td_heads`, `ema_update`, `active` forward), stack slicing, `latent_loss`, `gaussian_nll`, `relative_error`, `normalize_target`, `variance_guard`, `compute_losses` |

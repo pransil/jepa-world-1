@@ -1,9 +1,10 @@
-# jepa_world/ top-level evaluation library: metrics, probes, the simulator baseline (M6)
+# jepa_world/ top-level evaluation: metrics, probes, baselines, the eval command (M6)
 
 ## Purpose / non-goals
 
-This library computes SPEC §7.2's metrics and §7.3's split discipline as **pure library code**:
-arrays go in, and JSON-safe numbers come out (str keys and float, int or None values).
+`metrics.py`, `probes.py` and `baselines.py` compute SPEC §7.2's metrics and §7.3's split
+discipline as **pure library code**: arrays go in, and JSON-safe numbers come out (str keys and
+float, int or None values).
 - `metrics.py` computes:
   - position error by horizon;
   - the ratio to persistence;
@@ -15,15 +16,57 @@ arrays go in, and JSON-safe numbers come out (str keys and float, int or None va
 - `baselines.py` (M2's persistence and constant velocity) also holds SPEC §7.1's
   **simulator-aware physics baseline**. It re-simulates the known terrain from the true state at
   t with `sim.episode.simulate_from_state`. That is MuJoCo on the CPU, with no GL.
+- `eval.py` is the only part that touches a model, the GPU or the disk. It is described
+  [below](#the-eval-command-evalpy).
 
-**Not here:**
-- **The model eval CLI** (`eval.py --run`). It loads a run and the test split, runs the model,
-  and scores it beside the baselines. It is a follow-up after M5's wiring. `eval.py --baselines`
-  already reports every baseline, the simulator included.
-- **Model code, torch, and the artifact root.** None of them is used here.
-- **An `eval:` config block.** `configs/base.yaml` belongs to the M4 lane. The SPEC defaults
-  (levels 0.5/0.9, event window) are module constants and keyword arguments until the CLI wires
-  them to config.
+**Not here:** model code. `eval.py` builds the model with `train.build_model` and only calls it.
+
+## The eval command (`eval.py`)
+
+```
+python -m jepa_world.eval --run <run dir> [--split test] [--split dev] [--checkpoint <.pt>]
+                          [--config configs/base.yaml] [--set eval.probes.enabled=false]
+```
+
+```
+run dir ─► latest checkpoints/step_*.pt ─► (its saved config, WorldModel, strict load)
+eval config (--config) ─► check_eval_split(run cfg, eval cfg, split)   # leakage across configs
+split ─► EpisodeSet ─► windows (ep, t): t ∈ valid_starts(T, C, max(model.horizons ∪ goal_horizons))
+  ─► window_frames (frames only) ─► model ─► goal (mean, logvar) (M, K, 2) + pooled context levels
+       pred_k = ball_pos[t] + mean_k,  var_k = exp(logvar_k)
+  ─► goal_head  = evaluate_positions(...) + ratio to each baseline       ┐
+     baselines  = baselines.evaluate (+ simulator, eval.sim_params)      │ SplitResult(split,
+     visibility = visibility(pred_k, var_k, truth_k, flags at t), per k  │   {family: ...})
+     events     = event_behaviour(std series, flags), per k              │
+     probes     = fit on the run's training split, scored on this split  ┘
+  ─► metrics.report ─► <run dir>/eval/<UTC time>-<splits>.json   (test = headline, dev separate)
+```
+
+- **The run's own checkpoint config builds the model and picks the data.** The eval config
+  (`--config`, default base.yaml) supplies only the `eval:` block and the canonical split seeds.
+  Runs started before this block existed are evaluated with base.yaml's.
+- **Leakage across configs** (data/DESIGN.md asks M6 for this). `check_eval_split` refuses
+  - an eval split that is the split the run trained on;
+  - an eval split that shares any terrain seed with it;
+  - an eval split whose seeds differ between the run's config and the eval config, because
+    that would be a different test set.
+- **Same windows as the baselines.** t runs over `valid_starts(T, C, k_max)`, with k_max the
+  largest model or goal horizon, which is t = 3..39 for base.yaml. The baselines are recomputed
+  in the same eval on exactly these windows, so every ratio is like-for-like.
+- **The model only ever gets frames.** It gets `window_frames`, i.e. frames t−C+1 … t+max(model
+  horizons), because `forward` also encodes its targets. The goal head and the probes read only
+  the context levels. `test_eval_outputs_ignore_frames_after_t` pins this.
+- **Flags at t.** Visibility and events use `out_of_view` / `occluded` at the context's last frame
+  t, which is what the model sees (the M7 plan's definition). `goal_head`'s in-view/out-of-view
+  error split uses t+k, as the baselines do.
+- **Probes.** They are fit on `eval.probes.train_windows` random windows of the run's training
+  split and scored on every eval-split window. Ball parameters come from the episode seeds
+  (`sim.ball.sample_ball`, exact by M1's determinism). Without a goal head (a pre-M5 run), only
+  `probes` and `baselines` are reported, and the report says why.
+- **Device and lock.** Forward passes run on `eval.device` under `gpu_lock` when that is MPS. The
+  simulator and the metrics run after the lock is released.
+- **Output** is never overwritten: one new JSON per invocation, holding the checkpoint, step,
+  git and the eval config with the report.
 
 ## Data flow and shapes
 
@@ -175,6 +218,9 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `baselines.match_clearance`, `sim_ball` | yes | none | `tests/test_baselines.py` (synthetic terrains) |
 | `baselines.simulator_predict` | MuJoCo physics, CPU, no GL. `simulate` is injectable | none | fast: one real short episode, with true params within 1 cm and median ≤ 1e-6 m; stubs for the policy |
 | `eval.run_baselines` | no | disk (dataset, run dir) | fast with a stub rollout; slow with real physics end to end |
+| `eval.goal_positions`, `check_eval_split` | yes | none | `tests/test_eval.py` |
+| `eval.load_run`, `model_outputs` | torch, device | the run dir (read) | fast: tiny CPU model, checkpoint in the tmp artifact root |
+| `eval.evaluate_run` / `--run` | no | GPU lock on MPS, run dir (writes `eval/*.json`) | fast end to end on tiny fake datasets (CPU, simulator off) |
 
 ## Files
 
@@ -183,4 +229,4 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `metrics.py` | errors, ratio, `coverage`, `rollout_drift`, `to_series`, `predictive_std`, `event_response` / `event_behaviour`, `by_visibility` / `visibility`, `evaluate_positions`, `SplitResult`, `report` |
 | `probes.py` | `pool`, `ProbeData`, `fit_probes`, `score_probes`, `run_probes` |
 | `baselines.py` | closed-form baselines (`predict`), `sim_ball`, `match_clearance`, `simulator_predict`, `evaluate` (with `extra` precomputed predictions) |
-| `eval.py` | `--baselines` CLI: loads a split, plus each episode's terrain, ball and spin for the simulator, and writes `baselines.json` to a run dir |
+| `eval.py` | `--baselines`: every baseline on a split, written to a new run dir. `--run`: a trained run's goal head, visibility, events, probes and baselines on held-out splits, written to `<run>/eval/` |

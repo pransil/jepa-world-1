@@ -13,20 +13,33 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import secrets
 import sys
 import time
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+import torch
 import yaml
 
-from jepa_world import baselines
+from jepa_world import baselines, metrics, probes, train
 from jepa_world.data.build import split_dir
-from jepa_world.data.dataset import EpisodeSet, load_split, read_manifest, valid_starts
+from jepa_world.data.dataset import (
+    EpisodeSet,
+    load_split,
+    read_manifest,
+    valid_starts,
+    window_frames,
+)
+from jepa_world.data.splits import LeakageError, ball_seeds, check_split_config, terrain_seeds
+from jepa_world.sim.ball import sample_ball
 from jepa_world.sim.episode import simulate_from_state
 from jepa_world.sim.io import load_episode
 from jepa_world.utils.config import load_config
+from jepa_world.utils.device import pick_device
+from jepa_world.utils.locks import gpu_lock
 from jepa_world.utils.paths import new_run_dir
 from jepa_world.utils.repro import run_metadata
 
@@ -186,13 +199,326 @@ def format_table(result: dict) -> str:
     return "\n".join(lines)
 
 
+# --- the model eval command (--run) -------------------------------------------------------------
+
+BASE_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "base.yaml"
+HELD_OUT = ("dev", "test")  # the splits --run scores; never the one the run trained on
+
+
+def latest_checkpoint(run_dir: Path) -> Path:
+    """The run's last checkpoint (train.py names them step_<7 digits>.pt, so they sort by step)."""
+    ckpts = sorted((Path(run_dir) / "checkpoints").glob("step_*.pt"))
+    if not ckpts:
+        raise FileNotFoundError(f"{run_dir}: no checkpoints/step_*.pt checkpoint to evaluate")
+    return ckpts[-1]
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class LoadedRun:
+    run_dir: Path
+    checkpoint: Path
+    step: int
+    cfg: dict  # the checkpoint's own config: it built the model and names the data
+    model: torch.nn.Module
+
+
+def load_run(
+    run_dir: str | Path, checkpoint: str | Path | None = None, device: torch.device | None = None
+) -> LoadedRun:
+    """A run's model from its latest checkpoint (or `checkpoint`), built from the config saved in
+    that checkpoint and loaded strictly, in eval mode on `device`."""
+    path = Path(checkpoint) if checkpoint else latest_checkpoint(Path(run_dir))
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    cfg = ckpt["config"]
+    model = train.build_model(cfg)
+    model.load_state_dict(ckpt["model"])  # strict: any missing or unexpected key raises
+    model.eval().to(device or torch.device("cpu"))
+    return LoadedRun(Path(run_dir), path, int(ckpt["step"]), cfg, model)
+
+
+def check_eval_split(run_cfg: dict, eval_cfg: dict, split: str) -> None:
+    """Refuse to score `split` if it could hold anything the run trained on (data/DESIGN.md, "Not
+    checked here: leakage across configs"), or if it isn't the eval config's `split`."""
+    check_split_config(run_cfg["data"])
+    trained = run_cfg["data"]["split"]
+    if split == trained:
+        raise LeakageError(f"the run trained on {trained!r}: it can't be scored on it (SPEC §7.3)")
+    seen = set(terrain_seeds(run_cfg["data"], trained))
+    wanted = terrain_seeds(eval_cfg["data"], split)
+    shared = seen & set(wanted)
+    if shared:
+        raise LeakageError(
+            f"eval split {split!r} shares {len(shared)} terrain seed(s), e.g. {sorted(shared)[:5]}, "
+            f"with the {trained!r} split the run trained on"
+        )
+    ours = (terrain_seeds(run_cfg["data"], split), ball_seeds(run_cfg["data"], split))
+    theirs = (wanted, ball_seeds(eval_cfg["data"], split))
+    if ours != theirs:
+        raise ValueError(
+            f"split {split!r} differs between the run's config and the eval config (terrain and "
+            f"ball seeds {ours[0][:1]}.. x{len(ours[0])} vs {theirs[0][:1]}.. x{len(theirs[0])}): "
+            "a different test set isn't comparable"
+        )
+
+
+def goal_positions(pos, ep, t, mean, logvar, horizons: Sequence[int]) -> dict:
+    """The goal head's (M, K, 2) displacement mean and log-variance as {k: (M, 2)} positions:
+    pred = pos[t] + mean_k, var = exp(logvar_k), truth = pos[t+k], persistence = pos[t]."""
+    mean, logvar = np.asarray(mean, dtype=np.float64), np.asarray(logvar, dtype=np.float64)
+    if mean.shape != logvar.shape or mean.ndim != 3 or mean.shape[1] != len(horizons):
+        raise ValueError(
+            f"goal mean {mean.shape} / logvar {logvar.shape} don't match horizons {list(horizons)}"
+        )
+    x = pos[ep, t]
+    out = {"pred": {}, "var": {}, "truth": {}, "persistence": {}}
+    for j, k in enumerate(horizons):
+        out["pred"][k] = x + mean[:, j]
+        out["var"][k] = np.exp(logvar[:, j])
+        out["truth"][k] = pos[ep, t + k]
+        out["persistence"][k] = x.copy()
+    return out
+
+
+def model_outputs(
+    model, es: EpisodeSet, ep: np.ndarray, t: np.ndarray, batch_size: int, device: torch.device
+) -> dict:
+    """Run the model on windows (ep, t): frames only, never ground truth. Returns
+    {"goal_mean", "goal_logvar"}: (M, K, 2) float64 or None without a goal head, and
+    {"features": {level: (M, channels)}}: the context levels, spatially pooled."""
+    c, k_frames = model.context_frames, max(model.horizons)
+    means, logvars, feats = [], [], {}
+    with torch.no_grad():
+        for i in range(0, len(ep), batch_size):
+            frames = window_frames(es, ep[i : i + batch_size], t[i : i + batch_size], c, k_frames)
+            out = model(frames.to(device))
+            if "goal" in out:
+                means.append(out["goal"][0].double().cpu().numpy())
+                logvars.append(out["goal"][1].double().cpu().numpy())
+            for level, f in out["context"].items():
+                feats.setdefault(level, []).append(probes.pool(f.cpu().numpy()))
+    return {
+        "goal_mean": np.concatenate(means) if means else None,
+        "goal_logvar": np.concatenate(logvars) if logvars else None,
+        "features": {level: np.concatenate(v) for level, v in feats.items()},
+    }
+
+
+def _probe_data(split: str, es: EpisodeSet, ep, t, features: dict, sim_cfg: dict):
+    """Rows for the probes: pooled features, and targets ball_pos at t plus the episode's hidden
+    parameters, drawn from its seeds (`sample_ball` is exact by M1's determinism)."""
+    balls = [
+        sample_ball(sim_cfg, int(a), int(b))
+        for a, b in zip(es.terrain_seed, es.ball_seed, strict=True)
+    ]
+    hidden = {name: np.array([getattr(b, name) for b in balls]) for name in HIDDEN}
+    targets = {"pos": es.ball_pos[ep, t], **{name: v[ep] for name, v in hidden.items()}}
+    return probes.ProbeData(split, features, targets, es.terrain_seed[ep])
+
+
+def _check_seed_balls(cfg: dict, split: str, es: EpisodeSet) -> None:
+    """The probes take ball parameters from seeds. Check that against the first stored episode."""
+    path = split_dir(cfg, split)
+    stored = load_episode(path / read_manifest(path)["episodes"][0]["file"]).ball
+    drawn = sample_ball(cfg["sim"], int(es.terrain_seed[0]), int(es.ball_seed[0]))
+    if stored != drawn:
+        raise ValueError(f"{path}: stored ball {stored} differs from its seeds' draw {drawn}")
+
+
+def _ratio_to(goal_err: dict, base_err: dict) -> dict:
+    out = {}
+    for name, per_k in base_err.items():
+        out[name] = {}
+        for k, s in goal_err.items():
+            b = per_k[k]["mean"]
+            out[name][k] = s["mean"] / b if b > 0 else None
+    return out
+
+
+def score_split(
+    cfg: dict,
+    eval_cfg: dict,
+    split: str,
+    es: EpisodeSet,
+    ep: np.ndarray,
+    t: np.ndarray,
+    outputs: dict,
+    probe_train=None,
+    simulate: Callable = simulate_from_state,
+) -> dict:
+    """Every SPEC §7.2 family for one split, as {family: metrics} (goal_head, visibility, events
+    only with a goal head; probes only with `probe_train`)."""
+    ev = eval_cfg["eval"]
+    levels, c = list(ev["coverage_levels"]), cfg["model"]["context_frames"]
+    starts = np.unique(t)
+    has_goal = outputs["goal_mean"] is not None
+    horizons = list(cfg["model"]["goal_horizons"]) if has_goal else list(cfg["model"]["horizons"])
+    extra, sim_info = {}, {}
+    if ev["sim_params"]:
+        extra, sim_info = simulator_baselines(
+            cfg, split, es, starts, horizons, ev["sim_params"], simulate
+        )
+    base = baselines.evaluate(
+        es.ball_pos, es.ball_vel, 1 / es.fps, starts, horizons, c, es.out_of_view, extra=extra
+    )
+    if sim_info:
+        base["simulator"] = sim_info
+    families = {"baselines": base}
+    if has_goal:
+        g = goal_positions(
+            es.ball_pos, ep, t, outputs["goal_mean"], outputs["goal_logvar"], horizons
+        )
+        goal = metrics.evaluate_positions(
+            g["pred"], g["truth"], g["persistence"], var=g["var"],
+            out_of_view={k: es.out_of_view[ep, t + k] for k in horizons}, levels=levels,
+        )  # fmt: skip
+        goal["ratio_to_baseline"] = _ratio_to(goal["error_m"], base["error_m"])
+        flags_t = {"out_of_view": es.out_of_view[ep, t], "occluded": es.occluded[ep, t]}
+        flags_nt = {"out_of_view": es.out_of_view, "occluded": es.occluded}
+        families["goal_head"] = goal
+        families["visibility"] = {
+            str(k): metrics.visibility(g["pred"][k], g["var"][k], g["truth"][k], flags_t, levels)
+            for k in horizons
+        }
+        families["events"] = {
+            str(k): metrics.event_behaviour(
+                metrics.to_series(metrics.predictive_std(g["var"][k]), ep, t, es.n, es.T),
+                flags_nt,
+                ev["event_window"],
+            )  # fmt: skip
+            for k in horizons
+        }
+    if probe_train is not None:
+        held = _probe_data(split, es, ep, t, outputs["features"], cfg["sim"])
+        families["probes"] = probes.run_probes(probe_train, held).metrics["probes"]
+    return families
+
+
+def evaluate_run(
+    run_dir: str | Path,
+    eval_cfg: dict,
+    splits: Sequence[str],
+    checkpoint: str | Path | None = None,
+    simulate: Callable = simulate_from_state,
+) -> tuple[dict, Path]:
+    """Score a run on held-out `splits` (SPEC §7) and write <run>/eval/<time>-<splits>.json:
+    {"meta": ..., "report": metrics.report(...)}, with test as the headline and dev kept separate.
+    Forward passes run under the GPU lock on MPS. Returns the document and its path."""
+    run_dir, ev = Path(run_dir), eval_cfg["eval"]
+    splits = list(dict.fromkeys(splits))
+    if not splits or not set(splits) <= set(HELD_OUT):
+        raise ValueError(f"splits {splits}: --run scores {list(HELD_OUT)} only")
+    device = pick_device(ev["device"])
+    run = load_run(run_dir, checkpoint, device)
+    cfg = run.cfg
+    if cfg["data"]["source"] != "episodes":
+        raise ValueError(
+            f"{run_dir} trained on data.source={cfg['data']['source']!r}: eval needs a run "
+            "trained on data.source=episodes (the real splits)"
+        )
+    for split in splits:
+        check_eval_split(cfg, eval_cfg, split)
+    has_goal = getattr(run.model, "goal", None) is not None
+    c = cfg["model"]["context_frames"]
+    goal_ks = list(cfg["model"]["goal_horizons"]) if has_goal else []
+    k_eval = max([*cfg["model"]["horizons"], *goal_ks])  # the windows `eval --baselines` uses
+    data = {s: load_split(cfg, s) for s in splits}
+    windows = {
+        s: baselines.window_index(es.n, valid_starts(es.T, c, k_eval)) for s, es in data.items()
+    }
+    probe_train = None
+    with gpu_lock(f"eval {run_dir.name}", enabled=device.type == "mps"):
+        outputs = {
+            s: model_outputs(run.model, data[s], *windows[s], ev["batch_size"], device)
+            for s in splits
+        }
+        if ev["probes"]["enabled"]:
+            trained = cfg["data"]["split"]
+            tr = load_split(cfg, trained)
+            ep_all, t_all = baselines.window_index(tr.n, valid_starts(tr.T, c, k_eval))
+            rng = np.random.default_rng(ev["probes"]["seed"])
+            n = min(int(ev["probes"]["train_windows"]), len(ep_all))
+            pick = np.sort(rng.choice(len(ep_all), size=n, replace=False))
+            tr_out = model_outputs(
+                run.model, tr, ep_all[pick], t_all[pick], ev["batch_size"], device
+            )
+            _check_seed_balls(cfg, trained, tr)
+            probe_train = _probe_data(
+                trained, tr, ep_all[pick], t_all[pick], tr_out["features"], cfg["sim"]
+            )
+    results = []
+    for s in splits:
+        if probe_train is not None:
+            _check_seed_balls(cfg, s, data[s])
+        families = score_split(
+            cfg, eval_cfg, s, data[s], *windows[s], outputs[s], probe_train, simulate
+        )
+        results.append(metrics.SplitResult(s, families))
+    meta = {
+        **run_metadata(),
+        "run_dir": str(run_dir),
+        "checkpoint": str(run.checkpoint),
+        "step": run.step,
+        "splits": splits,
+        "windows": {s: int(len(windows[s][0])) for s in splits},
+        "starts": {s: [int(windows[s][1].min()), int(windows[s][1].max())] for s in splits},
+        "device": str(device),
+        "eval": ev,
+    }
+    if not has_goal:
+        meta["note"] = (
+            "no goal head in this run (train.stages lacks goal): goal_head, visibility and events "
+            "are not reported"
+        )
+    doc = {"meta": meta, "report": metrics.report(results)}
+    out_dir = run_dir / "eval"
+    out_dir.mkdir(exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    path = out_dir / f"{stamp}-{'-'.join(splits)}-{secrets.token_hex(3)}.json"
+    with open(path, "x") as f:  # never overwrite an earlier eval
+        json.dump(doc, f, indent=2)
+    return doc, path
+
+
+def format_goal_table(metrics_: dict) -> str:
+    """k, the goal head's mean error, its ratio to each baseline, and 50/90% joint coverage."""
+    goal = metrics_["goal_head"]
+    names = list(goal["ratio_to_baseline"])
+    head = (
+        f"{'k':>4} {'error m':>9} " + " ".join(f"{'/' + n:>22}" for n in names) + "  cov50  cov90"
+    )
+    lines = [head]
+    for k in goal["horizons"]:
+        ks = str(k)
+        cells = [
+            f"{'n/a' if r is None else f'{r:.3f}':>22}"
+            for r in (goal["ratio_to_baseline"][n][ks] for n in names)
+        ]
+        cal = goal["calibration"][ks]
+        lines.append(
+            f"{k:>4} {goal['error_m'][ks]['mean']:9.4f} "
+            + " ".join(cells)
+            + f"  {cal['0.5']['joint']:.3f}  {cal['0.9']['joint']:.3f}"
+        )
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--baselines", action="store_true", help="position baselines (M2)")
     mode.add_argument("--run", help="run directory to evaluate (M6)")
-    p.add_argument("--config", help="config for --baselines")
-    p.add_argument("--split", default="test", choices=["dev", "test"])
+    p.add_argument(
+        "--config",
+        help="--baselines: the config to score. --run: the eval config (its eval: block and "
+        "canonical split seeds), default configs/base.yaml",
+    )
+    p.add_argument(
+        "--split",
+        action="append",
+        choices=["dev", "test"],
+        help="repeatable for --run (default: test). test is the headline, dev is kept separate",
+    )
+    p.add_argument("--checkpoint", help="--run: a checkpoint file (default: the run's latest)")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     p.add_argument(
         "--sim-params",
@@ -205,19 +531,33 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = p.parse_args(argv)
+    splits = args.split or ["test"]
 
     if args.run:
-        raise SystemExit(
-            "evaluating a model run is not implemented yet: metrics land in M6 (SPEC §8)"
-        )
+        eval_cfg = load_config(args.config or BASE_CONFIG, args.set)
+        doc, path = evaluate_run(args.run, eval_cfg, splits, checkpoint=args.checkpoint)
+        meta, report = doc["meta"], doc["report"]
+        print(f"eval: {path}\ncheckpoint {meta['checkpoint']} (step {meta['step']})")
+        blocks = [("headline", report["headline"]["metrics"] if report["headline"] else None)]
+        blocks += [(f"development {s}", m) for s, m in report["development"].items()]
+        for title, m in blocks:
+            if m is None:
+                continue
+            print(
+                f"\n{title}: {m['baselines']['windows']} windows (t in {m['baselines']['starts']})"
+            )
+            print(format_goal_table(m) if "goal_head" in m else meta.get("note", ""))
+        return 0
+    if len(splits) > 1:
+        p.error("--baselines scores one --split")
     if not args.config:
         p.error("--baselines needs --config")
     cfg = load_config(args.config, args.set)
     # No GPU lock: the simulator runs MuJoCo on the CPU with render=False (no MPS, no GL), and
     # gpu_lock is for MPS jobs. Taking it would hold up GPU training for the whole eval.
-    run, result = run_baselines(cfg, args.split, sim_params=args.sim_params)
+    run, result = run_baselines(cfg, splits[0], sim_params=args.sim_params)
     print(
-        f"run dir: {run}\nsplit {args.split}: {result['episodes']} episodes, "
+        f"run dir: {run}\nsplit {splits[0]}: {result['episodes']} episodes, "
         f"{result['windows']} windows (t in {result['starts']})"
     )
     print(format_table(result))

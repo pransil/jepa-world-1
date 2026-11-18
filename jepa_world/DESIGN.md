@@ -1,4 +1,4 @@
-# jepa_world/ top-level evaluation library: metrics, probes (M6a)
+# jepa_world/ top-level evaluation library: metrics, probes, the simulator baseline (M6)
 
 ## Purpose / non-goals
 
@@ -12,13 +12,15 @@ arrays go in, and JSON-safe numbers come out (str keys and float, int or None va
   - uncertainty around out-of-view and occlusion events, both as event-locked curves and as a
     hidden-versus-visible split per window.
 - `probes.py` fits scikit-learn linear probes on frozen embeddings.
+- `baselines.py` (M2's persistence and constant velocity) also holds SPEC §7.1's
+  **simulator-aware physics baseline**. It re-simulates the known terrain from the true state at
+  t with `sim.episode.simulate_from_state`. That is MuJoCo on the CPU, with no GL.
 
 **Not here:**
-- **The eval CLI.** It loads a run and the test split, runs the model and `baselines.py`, and
-  writes a run dir. It is a follow-up after M2 and M5 merge, and it lives in `eval.py`.
+- **The model eval CLI** (`eval.py --run`). It loads a run and the test split, runs the model,
+  and scores it beside the baselines. It is a follow-up after M5's wiring. `eval.py --baselines`
+  already reports every baseline, the simulator included.
 - **Model code, torch, and the artifact root.** None of them is used here.
-- **The simulator-aware baseline.** It needs a `sim/` entry point that starts from a mid-episode
-  state (M2's baseline-scope decision).
 - **An `eval:` config block.** `configs/base.yaml` belongs to the M4 lane. The SPEC defaults
   (levels 0.5/0.9, event window) are module constants and keyword arguments until the CLI wires
   them to config.
@@ -123,12 +125,41 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
   - Two results reporting the same family for one split raise rather than overwrite.
   - The splits come from `data.splits.SPLITS`.
 
+- **The simulator baseline's ball parameters are an argument.** The three choices are `true`
+  (the episode's own, an oracle), `mean` (`sim.ball.mean_ball`, each range's midpoint) and
+  `true_radius` (the visible radius with mean friction and restitution). It reports `true` and
+  `mean` by default. Which one is the headline bar is the user's call, and the
+  [proposed decision](../docs/decisions/2026-11-17-simulator-baseline-params.md) recommends `mean`.
+- **A different radius at the true state** (`match_clearance`). The true centre with a larger
+  radius starts inside the terrain at 56% of contact frames, by up to 8.8 cm. The true ball
+  itself penetrates up to 1.8 cm during impacts, so lifting every penetrating start would break
+  the `true` oracle. The state is instead mapped to the other ball:
+  - the centre moves vertically so that `Terrain.gap` equals the true ball's gap at t (bisection
+    over dz; dz = 0 exactly for the true radius);
+  - spin is scaled by r_true / r, so the surface speed, and with it rolling or slipping, is
+    unchanged;
+  - predictions are the rollout minus dz, so the radius offset isn't counted as error.
+
+  Two alternatives lost:
+  - using the state as given launches a penetrating ball off the surface;
+  - lifting only penetrating starts treats a smaller radius (dropped onto the surface)
+    differently from a larger one (lifted).
+
+  If no vertical shift matches the gap within 8·|Δr|, which can happen against a near-vertical
+  ledge face, dz falls back to Δr and the window is counted in `unmatched`.
+- **One rollout per window serves every horizon.** Each rollout has k_max + 1 frames, and windows
+  are scored on `evaluate`'s window set. Its `extra` argument scores precomputed predictions with
+  the same stats, ratio and out-of-view split as the closed-form baselines.
+
 ## Seams
 
 | unit | pure? | touches | tested by |
 |---|---|---|---|
 | `metrics.*` | yes, numpy + stdlib | none | `tests/test_metrics.py` (synthetic arrays with known answers) |
 | `probes.*` | yes, numpy + scikit-learn (CPU) | none | `tests/test_probes.py` (synthetic embeddings) |
+| `baselines.match_clearance`, `sim_ball` | yes | none | `tests/test_baselines.py` (synthetic terrains) |
+| `baselines.simulator_predict` | MuJoCo physics, CPU, no GL. `simulate` is injectable | none | fast: one real short episode, with true params within 1 cm and median ≤ 1e-6 m; stubs for the policy |
+| `eval.run_baselines` | no | disk (dataset, run dir) | fast with a stub rollout; slow with real physics end to end |
 
 ## Files
 
@@ -136,3 +167,5 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 |---|---|
 | `metrics.py` | errors, ratio, `coverage`, `rollout_drift`, `to_series`, `predictive_std`, `event_response` / `event_behaviour`, `by_visibility` / `visibility`, `evaluate_positions`, `SplitResult`, `report` |
 | `probes.py` | `pool`, `ProbeData`, `fit_probes`, `score_probes`, `run_probes` |
+| `baselines.py` | closed-form baselines (`predict`), `sim_ball`, `match_clearance`, `simulator_predict`, `evaluate` (with `extra` precomputed predictions) |
+| `eval.py` | `--baselines` CLI: loads a split, plus each episode's terrain, ball and spin for the simulator, and writes `baselines.json` to a run dir |

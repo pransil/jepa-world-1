@@ -10,34 +10,140 @@ separately and never used to claim generalisation (SPEC §7.3).
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
+import sys
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 from jepa_world import baselines
 from jepa_world.data.build import split_dir
-from jepa_world.data.dataset import load_split, valid_starts
+from jepa_world.data.dataset import EpisodeSet, load_split, read_manifest, valid_starts
+from jepa_world.sim.ball import mean_ball
+from jepa_world.sim.episode import simulate_from_state
+from jepa_world.sim.io import load_episode
 from jepa_world.utils.config import load_config
 from jepa_world.utils.paths import new_run_dir
 from jepa_world.utils.repro import run_metadata
 
 
-def run_baselines(cfg: dict, split: str) -> tuple[Path, dict]:
+@dataclasses.dataclass(frozen=True, eq=False)
+class _Physics:
+    """What the simulator baseline needs from an episode file, beyond EpisodeSet's arrays."""
+
+    sim_cfg: dict
+    terrain: object
+    ball: object
+    spin: np.ndarray  # (T,)
+    cam_pos: np.ndarray  # (T, 2)
+
+
+def _episode_physics(cfg: dict, split: str, es: EpisodeSet) -> list[_Physics]:
+    """Each episode's terrain, true ball, spin and stored sim config, in `es`'s row order (the
+    manifest's). Frames are read and dropped: EpisodeSet doesn't carry these fields."""
+    path = split_dir(cfg, split)
+    rows = read_manifest(path)["episodes"]
+    if len(rows) != es.n:
+        raise ValueError(f"{path}: manifest lists {len(rows)} episodes, the split holds {es.n}")
+    out = []
+    for i, row in enumerate(rows):
+        ep = load_episode(path / row["file"])
+        if not np.array_equal(ep.ball_pos, es.ball_pos[i]):
+            raise ValueError(
+                f"{path / row['file']}: positions differ from the loaded split's row {i}"
+            )
+        out.append(_Physics(ep.meta["sim_cfg"], ep.terrain, ep.ball, ep.ball_spin, ep.cam_pos))
+    return out
+
+
+def _params_record(params: str, sim_cfg: dict):
+    if params == "true":
+        return "episode"
+    mean = dataclasses.asdict(mean_ball(sim_cfg))
+    if params == "true_radius":
+        return {
+            "radius": "episode",
+            "friction": mean["friction"],
+            "restitution": mean["restitution"],
+        }
+    return mean
+
+
+def simulator_baselines(
+    cfg: dict,
+    split: str,
+    es: EpisodeSet,
+    starts: np.ndarray,
+    horizons: Sequence[int],
+    sim_params: Sequence[str],
+    simulate: Callable = simulate_from_state,
+) -> tuple[dict, dict]:
+    """Predictions {simulator_<params>: {k: (M, 2)}} in `baselines.window_index` order, and a
+    record per params: what was used, how many starts were shifted (`match_clearance`), how many
+    found no vertical match, and the time taken. One rollout per window, CPU only (no GPU lock)."""
+    physics = _episode_physics(cfg, split, es)
+    extra, info = {}, {}
+    for params in sim_params:
+        t0 = time.perf_counter()
+        per_k = {k: [] for k in horizons}
+        dz, unmatched = [], []
+        for i, ph in enumerate(physics):
+            ball = baselines.sim_ball(params, ph.ball, ph.sim_cfg)
+            preds, rec = baselines.simulator_predict(
+                ph.sim_cfg, ph.terrain, ball, ph.ball.radius, es.ball_pos[i], es.ball_vel[i],
+                ph.spin, starts, horizons, cam_pos=ph.cam_pos, simulate=simulate,
+            )  # fmt: skip
+            for k in horizons:
+                per_k[k].append(preds[k])
+            dz.append(rec["dz"])
+            unmatched.append(rec["unmatched"])
+            if (i + 1) % 20 == 0:
+                print(f"[simulator {params}] {i + 1}/{len(physics)} episodes", file=sys.stderr)
+        dz, unmatched = np.concatenate(dz), np.concatenate(unmatched)
+        extra[baselines.simulator_name(params)] = {k: np.concatenate(v) for k, v in per_k.items()}
+        info[params] = {
+            "params": _params_record(params, physics[0].sim_cfg),
+            "windows": int(len(dz)),
+            "shifted": int(np.count_nonzero(dz)),
+            "max_abs_dz_m": float(np.abs(dz).max()),
+            "unmatched": int(unmatched.sum()),
+            "seconds": round(time.perf_counter() - t0, 1),
+        }
+    return extra, info
+
+
+def run_baselines(
+    cfg: dict,
+    split: str,
+    sim_params: Sequence[str] = baselines.DEFAULT_SIM_PARAMS,
+    simulate: Callable = simulate_from_state,
+) -> tuple[Path, dict]:
     """Score every position baseline on `split`, at every model.horizons k, over one shared window
     set t in [C-1, T-1-max(model.horizons)]. M6 must score the model on the same windows for its
     ratios to persistence to be like-for-like (data/DESIGN.md). Writes a fresh run dir.
 
+    `sim_params` picks the simulator baselines (baselines.SIM_PARAMS); empty runs none.
     Loads the frames too, which go unused here. Eval reads only dev or test (at most 200
     episodes, about 150 MB), and a positions-only reader would duplicate sim/io's format."""
     es = load_split(cfg, split)
     horizons = list(cfg["model"]["horizons"])
     c = cfg["model"]["context_frames"]
     starts = valid_starts(es.T, c, max(horizons))
+    extra, sim_info = {}, {}
+    if sim_params:
+        extra, sim_info = simulator_baselines(
+            cfg, split, es, starts, horizons, sim_params, simulate
+        )
     scores = baselines.evaluate(
-        es.ball_pos, es.ball_vel, 1 / es.fps, starts, horizons, c, es.out_of_view
+        es.ball_pos, es.ball_vel, 1 / es.fps, starts, horizons, c, es.out_of_view, extra=extra
     )
     result = {"split": split, **scores}
+    if sim_info:
+        result["simulator"] = sim_info
     run = new_run_dir(f"baselines-{split}")
     (run / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
     meta = {**run_metadata(), "dataset": str(split_dir(cfg, split))}
@@ -72,6 +178,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", help="config for --baselines")
     p.add_argument("--split", default="test", choices=["dev", "test"])
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    p.add_argument(
+        "--sim-params",
+        nargs="*",
+        choices=baselines.SIM_PARAMS,
+        default=list(baselines.DEFAULT_SIM_PARAMS),
+        help="simulator baselines' ball parameters (default: %(default)s; none: give no values)",
+    )
     args = p.parse_args(argv)
 
     if args.run:
@@ -81,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.config:
         p.error("--baselines needs --config")
     cfg = load_config(args.config, args.set)
-    run, result = run_baselines(cfg, args.split)
+    run, result = run_baselines(cfg, args.split, sim_params=args.sim_params)
     print(
         f"run dir: {run}\nsplit {args.split}: {result['episodes']} episodes, "
         f"{result['windows']} windows (t in {result['starts']})"

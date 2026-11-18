@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from fake_episodes import SHORT, G, Recorder
+from fake_episodes import SHORT, G, Recorder, physics_episode
 from tiny import BASE
 
 from jepa_world import baselines
 from jepa_world import eval as eval_cli
 from jepa_world.data import build
 from jepa_world.data.dataset import valid_starts
+from jepa_world.sim.ball import mean_ball
+from jepa_world.sim.episode import simulate_from_state
+from jepa_world.sim.terrain import Terrain
 from jepa_world.utils import paths
 from jepa_world.utils.config import load_config
 
@@ -152,7 +157,8 @@ def test_eval_baselines_cli_writes_a_run_dir():
     overrides = [*SHORT, "model.horizons=[1, 2, 3, 4, 5, 10, 20]"]
     cfg = load_config(BASE, overrides)
     build.build_split(cfg, "test", simulate=Recorder())
-    args = ["--baselines", "--config", str(BASE), "--split", "test"]
+    # --sim-params with no values: the closed-form baselines only (the simulator has its own tests)
+    args = ["--baselines", "--config", str(BASE), "--split", "test", "--sim-params"]
     for o in overrides:
         args += ["--set", o]
     assert eval_cli.main(args) == 0
@@ -173,3 +179,221 @@ def test_eval_baselines_cli_writes_a_run_dir():
 def test_eval_without_a_mode_is_an_error():
     with pytest.raises(SystemExit):
         eval_cli.main([])
+
+
+# --- simulator-aware baseline (SPEC §7.1) -------------------------------------------------------
+# Re-simulates the known terrain from the true state at t (sim.episode.simulate_from_state).
+# Params: docs/decisions/2026-11-17-simulator-baseline-params.md. Policy: jepa_world/DESIGN.md.
+
+SIM_SEEDS = (100001, 1000)  # SHORT config: an impact start at t = 6 (true gap -1.8 cm)
+SIM_STARTS = np.arange(3, 10)  # every valid t for T = 30, C = 4, k_max = 20
+
+
+@pytest.fixture(scope="module")
+def short_sim_cfg():
+    return load_config(BASE, SHORT)["sim"]
+
+
+@pytest.fixture(scope="module")
+def real_episode(short_sim_cfg):
+    return physics_episode(short_sim_cfg, *SIM_SEEDS)
+
+
+def flat(height=0.0):
+    x = np.linspace(-5.0, 5.0, 101)
+    return Terrain(x=x, heights=np.full_like(x, height))
+
+
+def test_sim_ball_modes(short_sim_cfg, real_episode):
+    true, mean = real_episode.ball, mean_ball(short_sim_cfg)
+    assert baselines.sim_ball("true", true, short_sim_cfg) is true
+    assert baselines.sim_ball("mean", true, short_sim_cfg) == mean
+    tr = baselines.sim_ball("true_radius", true, short_sim_cfg)
+    assert (tr.radius, tr.friction, tr.restitution) == (
+        true.radius,
+        mean.friction,
+        mean.restitution,
+    )
+    with pytest.raises(ValueError, match="oracle"):
+        baselines.sim_ball("oracle", true, short_sim_cfg)
+    assert set(baselines.DEFAULT_SIM_PARAMS) <= set(baselines.SIM_PARAMS)
+
+
+def test_match_clearance_is_exactly_zero_for_the_true_radius():
+    pos = np.array([[0.0, 0.15], [1.0, 0.149], [2.0, 3.0]])
+    dz, unmatched = baselines.match_clearance(flat(), pos, 0.15, 0.15)
+    assert (dz == 0.0).all() and not unmatched.any()
+
+
+@pytest.mark.parametrize("r_true, r", [(0.15, 0.25), (0.35, 0.25)])
+def test_match_clearance_on_flat_ground_is_the_radius_difference(r_true, r):
+    pos = np.array([[0.0, r_true], [1.0, r_true - 0.01], [2.0, 2.0]])  # touching, pressed, flying
+    dz, unmatched = baselines.match_clearance(flat(), pos, r_true, r)
+    np.testing.assert_allclose(dz, r - r_true, atol=1e-12)
+    assert not unmatched.any()
+
+
+@pytest.mark.parametrize("r_true, r", [(0.15, 0.25), (0.35, 0.15)])
+def test_match_clearance_keeps_the_true_gap_on_a_slope(r_true, r):
+    x = np.linspace(-5.0, 5.0, 201)
+    slope = Terrain(x=x, heights=0.6 * x)
+    xs = np.array([-1.0, 0.0, 1.5])
+    pos = np.stack(
+        [xs, 0.6 * xs + r_true / np.cos(np.arctan(0.6)) + np.array([-0.01, 0.0, 0.3])], 1
+    )
+    dz, unmatched = baselines.match_clearance(slope, pos, r_true, r)
+    shifted = pos + np.stack([np.zeros_like(dz), dz], 1)
+    np.testing.assert_allclose(slope.gap(shifted, r), slope.gap(pos, r_true), atol=1e-9)
+    assert not unmatched.any()
+
+
+def test_match_clearance_falls_back_beside_a_wall():
+    # A 3 m step at x = 0. The ball rests against its face, well above the floor, so no vertical
+    # shift short of climbing over the step changes its clearance.
+    x = np.linspace(-5.0, 5.0, 1001)
+    step = Terrain(x=x, heights=np.where(x < 0.0, 0.0, 3.0))
+    dz, unmatched = baselines.match_clearance(step, np.array([[-0.16, 1.0]]), 0.15, 0.25)
+    assert unmatched.tolist() == [True]
+    np.testing.assert_allclose(dz, [0.1])
+
+
+def test_simulator_with_true_params_reproduces_the_episode(short_sim_cfg, real_episode):
+    ep = real_episode
+    assert (ep.terrain.gap(ep.ball_pos[SIM_STARTS], ep.ball.radius) < 0).any(), "no contact start"
+    preds, info = baselines.simulator_predict(
+        short_sim_cfg, ep.terrain, ep.ball, ep.ball.radius,
+        ep.ball_pos, ep.ball_vel, ep.ball_spin, SIM_STARTS, HORIZONS, cam_pos=ep.cam_pos,
+    )  # fmt: skip
+    assert set(preds) == set(HORIZONS) and (info["dz"] == 0).all()
+    e = np.concatenate(
+        [np.linalg.norm(preds[k] - ep.ball_pos[SIM_STARTS + k], axis=-1) for k in HORIZONS]
+    )
+    assert e.max() <= 0.01 and np.median(e) <= 1e-6  # sim/DESIGN.md's round-trip bounds
+
+
+def test_simulator_with_another_radius_starts_at_the_true_clearance_and_slip(
+    short_sim_cfg, real_episode
+):
+    ep, starts = real_episode, np.array([5, 6, 7])  # 6 is the impact
+    mean = mean_ball(short_sim_cfg)
+    calls = []
+
+    def recording(sim_cfg, terrain, ball, pos, vel, spin, frames, **kw):
+        roll = simulate_from_state(sim_cfg, terrain, ball, pos, vel, spin, frames, **kw)
+        calls.append((np.array(pos), float(spin), roll))
+        return roll
+
+    preds, info = baselines.simulator_predict(
+        short_sim_cfg, ep.terrain, mean, ep.ball.radius, ep.ball_pos, ep.ball_vel, ep.ball_spin,
+        starts, [1, 5], simulate=recording,
+    )  # fmt: skip
+    assert len(calls) == len(starts)
+    for i, (t, (pos, spin, roll)) in enumerate(zip(starts, calls, strict=True)):
+        true_gap = ep.terrain.gap(ep.ball_pos[t], ep.ball.radius)
+        assert ep.terrain.gap(pos, mean.radius) == pytest.approx(true_gap, abs=1e-9)
+        assert roll.meta["from_state"]["start_gap"] == pytest.approx(true_gap, abs=1e-9)
+        assert spin * mean.radius == pytest.approx(ep.ball_spin[t] * ep.ball.radius)
+        assert pos[0] == ep.ball_pos[t, 0] and pos[1] == ep.ball_pos[t, 1] + info["dz"][i]
+        for k in (1, 5):
+            np.testing.assert_array_equal(preds[k][i], roll.ball_pos[k] - [0.0, info["dz"][i]])
+    assert np.isfinite(preds[5]).all()
+
+
+def _still(sim_cfg, terrain, ball, pos, vel, spin, frames, **kw):
+    """A rollout stand-in: the ball stays where it starts."""
+    pos = np.asarray(pos, dtype=float)
+    return SimpleNamespace(ball_pos=np.tile(pos, (frames, 1)), meta={"from_state": {}})
+
+
+def test_simulator_sees_nothing_after_t(short_sim_cfg, real_episode):
+    ep = real_episode
+    seen = []
+
+    def spy(*args, **kw):
+        seen.append(args[3:6])
+        return _still(*args, **kw)
+
+    for t in (3, 6, 9):
+        poisoned = [a.astype(float).copy() for a in (ep.ball_pos, ep.ball_vel, ep.ball_spin)]
+        for a in poisoned:
+            a[t + 1 :] = np.nan
+        seen.clear()
+        preds, _ = baselines.simulator_predict(
+            short_sim_cfg, ep.terrain, ep.ball, ep.ball.radius, *poisoned, np.array([t]), [1, 20],
+            simulate=spy,
+        )  # fmt: skip
+        assert all(np.isfinite(np.hstack([np.ravel(v) for v in s])).all() for s in seen)
+        np.testing.assert_array_equal(preds[20][0], ep.ball_pos[t])
+
+
+def test_simulator_rejects_starts_without_a_full_horizon(short_sim_cfg, real_episode):
+    ep = real_episode
+    with pytest.raises(ValueError, match="k_max"):
+        baselines.simulator_predict(
+            short_sim_cfg, ep.terrain, ep.ball, ep.ball.radius,
+            ep.ball_pos, ep.ball_vel, ep.ball_spin, np.array([10]), [20], simulate=_still,
+        )  # fmt: skip
+
+
+def test_evaluate_scores_extra_predictions_like_the_closed_form_ones():
+    pos, vel = motion("ballistic", n=3)
+    starts = valid_starts(T, C, max(HORIZONS))
+    ep, t = (a.ravel() for a in np.meshgrid(np.arange(3), starts, indexing="ij"))
+    copy = {k: baselines.predict("persistence", pos, vel, ep, t, k, DT) for k in HORIZONS}
+    oov = np.zeros((3, T), bool)
+    oov[2, 20:] = True
+    out = baselines.evaluate(
+        pos, vel, DT, starts, HORIZONS, C, out_of_view=oov, extra={"copy": copy}
+    )
+    assert out["error_m"]["copy"] == out["error_m"]["persistence"]
+    assert out["ratio_to_persistence"]["copy"] == {str(k): 1.0 for k in HORIZONS}
+    by_view = out["mean_error_m_by_view_at_t_plus_k"]
+    assert by_view["copy"] == by_view["persistence"]
+    with pytest.raises(ValueError, match="copy"):
+        baselines.evaluate(pos, vel, DT, starts, HORIZONS, C, extra={"copy": {1: copy[1][:-1]}})
+
+
+def test_run_baselines_feeds_the_simulator_each_episodes_own_terrain_ball_and_spin():
+    overrides = [*SHORT, "model.horizons=[1, 2, 5, 20]"]
+    cfg = load_config(BASE, overrides)
+    build.build_split(cfg, "test", simulate=physics_episode)
+    seen = []
+
+    def spy(sim_cfg, terrain, ball, pos, vel, spin, frames, **kw):
+        seen.append((terrain, ball, float(spin), frames))
+        return _still(sim_cfg, terrain, ball, pos, vel, spin, frames, **kw)
+
+    run, out = eval_cli.run_baselines(cfg, "test", sim_params=("true", "mean"), simulate=spy)
+    names = {"simulator_true", "simulator_mean"}
+    assert names <= set(out["error_m"]) and names <= set(out["mean_error_m_by_view_at_t_plus_k"])
+    # The stand-in stays put, so the simulator must score exactly like persistence.
+    assert out["error_m"]["simulator_true"] == out["error_m"]["persistence"]
+    for k, s in out["error_m"]["simulator_mean"].items():
+        assert s == pytest.approx(out["error_m"]["persistence"][k])
+    windows_ = out["windows"]
+    assert len(seen) == 2 * windows_ and {f for *_, f in seen} == {21}
+    sim = out["simulator"]
+    assert sim["true"]["params"] == "episode" and sim["true"]["shifted"] == 0
+    assert sim["mean"]["params"] == dataclasses.asdict(mean_ball(cfg["sim"]))
+    assert sim["mean"]["windows"] == windows_ and sim["mean"]["unmatched"] >= 0
+    true_balls = {b.radius for _, b, _, _ in seen[:windows_]}
+    assert len(true_balls) == out["episodes"]  # each episode's own ball
+    assert {b.radius for _, b, _, _ in seen[windows_:]} == {mean_ball(cfg["sim"]).radius}
+    assert json.loads((run / "baselines.json").read_text())["simulator"] == sim
+
+
+@pytest.mark.slow
+def test_eval_cli_simulator_on_real_physics_end_to_end():
+    overrides = [*SHORT, "model.horizons=[1, 2, 5, 10, 20]"]
+    cfg = load_config(BASE, overrides)
+    build.build_split(cfg, "test", simulate=physics_episode)
+    args = ["--baselines", "--config", str(BASE), "--split", "test", "--sim-params", "true", "mean"]
+    for o in overrides:
+        args += ["--set", o]
+    assert eval_cli.main(args) == 0
+    (run,) = (paths.artifacts_root() / "runs").iterdir()
+    out = json.loads((run / "baselines.json").read_text())
+    for k in ("1", "5", "20"):
+        assert out["error_m"]["simulator_true"][k]["p90"] <= 1e-3  # the oracle reproduces GT
+        assert np.isfinite(out["error_m"]["simulator_mean"][k]["mean"])
+    assert out["ratio_to_persistence"]["simulator_true"]["20"] < 0.01

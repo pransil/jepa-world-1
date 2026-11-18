@@ -148,6 +148,7 @@ dependencies = [
     { name = "mujoco" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pillow" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
     { name = "tensorboard" },
@@ -165,6 +166,7 @@ dev = [
 requires-dist = [
     { name = "mujoco", specifier = ">=4.0.1" },
     { name = "numpy", specifier = ">=2.4.6" },
+    { name = "pillow", specifier = ">=13.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scikit-learn", specifier = ">=1.9.1" },
     { name = "tensorboard", specifier = ">=2.21.0" },

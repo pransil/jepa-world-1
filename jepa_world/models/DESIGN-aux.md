@@ -142,7 +142,7 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
 - **`loss/goal` sums the per-horizon NLLs** (Σ_k, like the latent terms). The variance guard and
   `emb_std` still cover only the levels horizon heads read: the guard protects the latent
   targets from collapse, which the aux heads don't affect.
-- **Batches.** The goal stage switches the loader to `with_gt=True` (`train._with_gt`). Train
+- **Batches.** The goal stage switches the loader to `with_gt=True` (`train.needs_gt`). Train
   keeps only `frames` and `ball_pos`. A batch reaches `max(model horizons, goal horizons)` past t
   (`train.batch_k_max`). The synthetic source's `ball_pos` is in frame units (x = u/S, z = 1 −
   v/S), and is for smoke runs only.

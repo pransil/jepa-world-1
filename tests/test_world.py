@@ -170,6 +170,16 @@ def test_inactive_aux_heads_get_no_gradient():
     assert all(p.grad is None for p in model.pixel.parameters())
 
 
+def test_inactive_aux_heads_keep_no_autograd_graph():
+    """Before its stage starts, an aux head runs only to be logged: no graph is kept for it."""
+    cfg = tiny_aux_cfg()
+    model, frames = _model(cfg), random_frames(cfg)
+    off = model(frames, aux_active=())
+    assert not off["pixel"].requires_grad and not off["goal"][0].requires_grad
+    on = model(frames)
+    assert on["pixel"].requires_grad and on["goal"][0].requires_grad
+
+
 def test_active_goal_head_trains_l3_even_with_near_heads_only():
     """Near heads read only L1, so without the goal head the L2/L3 encoder stages get nothing."""
     cfg = tiny_aux_cfg()

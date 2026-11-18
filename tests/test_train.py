@@ -204,6 +204,17 @@ def test_train_step_keeps_unstarted_aux_stages_out_of_the_total():
     assert all(p.grad is not None for p in model.goal.parameters())
 
 
+def test_same_seed_gives_identical_losses_with_aux_stages(tmp_path):
+    cfg = tiny_aux_cfg("train.steps=2")
+    a = train.run(cfg, tmp_path / "a", device=torch.device("cpu"))
+    b = train.run(cfg, tmp_path / "b", device=torch.device("cpu"))
+    assert a == b and {"loss/goal", "loss/pix"} <= set(a)
+    c = train.run(
+        tiny_aux_cfg("train.steps=2", "seed=1"), tmp_path / "c", device=torch.device("cpu")
+    )
+    assert a != c
+
+
 def test_run_logs_the_aux_terms_every_step(tmp_path):
     cfg = tiny_aux_cfg("train.steps=3")
     train.check_config(cfg)

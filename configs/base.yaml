@@ -29,6 +29,7 @@ sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
     ledges: [2, 5]            # number of ledges, uniform integer (deep drops; walls the other way)
     ledge_height: [1.0, 3.0]  # metres; the sign is random (a step down or up along +x)
     ledge_width: 0.2          # metres of smoothstep transition
+    ledge_gap: 1.0            # metres: min spacing between ledges, and from the wall zones
     wall_width: 2.0           # metres at each end
     wall_height: 6.0          # metres added at the outer edge (quadratic ramp)
     base: 0.5                 # heightfield slab thickness below its lowest point

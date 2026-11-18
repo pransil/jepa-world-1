@@ -6,12 +6,14 @@
 ## Question
 SPEC §3.1 lists friction as a hidden per-episode parameter, and M6 probes for it, but it doesn't
 say which physical friction is meant. In MuJoCo, sliding friction alone barely affects a rolling
-ball: on flat ground, 2.0 m/s drops only to 1.94 m/s over 4 s (condim 3, measured on 4.0.1).
+ball: on flat ground, 2.0 m/s drops only to 1.94 m/s over 4 s (condim 3; a scratch measurement on
+4.0.1 during design).
 
 ## Options
 - **A: sliding μ + rolling drag.** One draw f sets sliding μ = f and rolling resistance
   = `contact.rolling_per_friction` · f (condim 6). Friction visibly slows the ball on every
-  terrain. Measured: a rolling coefficient of 0.005 takes 2.0 m/s down to 1.44 m/s in 4 s.
+  terrain. In the same scratch measurement, a rolling coefficient of 0.005 took 2.0 m/s down to 1.44 m/s in
+  4 s.
 - **B: sliding μ only.** Standard Coulomb. It is visible only when the ball slips on steep slopes
   or at landings.
 - **C: rolling drag only.** μ is fixed high, and the parameter sets rolling resistance only.

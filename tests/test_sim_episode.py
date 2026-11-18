@@ -9,16 +9,17 @@ The rendered-geometry test is in test_sim_render.py (render tier).
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace as NS
 
 import mujoco
 import numpy as np
 import pytest
 
 from jepa_world.sim import camera
-from jepa_world.sim.ball import sample_ball, start_z
-from jepa_world.sim.episode import GT_FIELDS, simulate_episode
+from jepa_world.sim.ball import BallParams, sample_ball, start_z
+from jepa_world.sim.episode import GT_FIELDS, ContactTracker, simulate, simulate_episode
 from jepa_world.sim.scene import body_id, build_model
-from jepa_world.sim.terrain import sample_terrain
+from jepa_world.sim.terrain import Terrain, sample_terrain
 from jepa_world.utils.config import load_config
 
 SEEDS = [(ts, bs) for ts in range(10) for bs in range(2)]  # 20 physics-only episodes, ~0.3 s
@@ -217,7 +218,7 @@ def test_camera_and_pixel_ground_truth_follow_the_camera_rules(sim_cfg, episodes
 
 def test_events_are_not_degenerate(sim_cfg, episodes):
     """A generator whose flags are always False would pass every test above, so check they fire.
-    Out-of-view is rarer (about 16% of episodes, M1.md), so search seeds for one instead of
+    Out-of-view is rarer (about 17% of episodes, docs/milestones/M1.md), so search seeds for one instead of
     relying on the fixed sample."""
     contact = np.concatenate([ep.contact for ep in episodes])
     assert 0.3 < contact.mean() < 1.0
@@ -225,3 +226,72 @@ def test_events_are_not_degenerate(sim_cfg, episodes):
     assert any(
         simulate_episode(sim_cfg, ts, 0, render=False).out_of_view.any() for ts in range(100, 160)
     ), "no out-of-view frame in 60 episodes"
+
+
+# ---------------------------------------------------------------- the bounce definition
+
+
+_BALL, _TERRAIN = 1, 0
+
+
+def _state(touching: bool, normal=(0.0, 0.0, 1.0), ball_first: bool = False):
+    """A stand-in for MjData with one ball-terrain contact (normal from terrain to ball) or none."""
+    if not touching:
+        return NS(ncon=0, contact=[])
+    n = -np.asarray(normal) if ball_first else np.asarray(normal)  # frame normal: geom1 -> geom2
+    g1, g2 = (_BALL, _TERRAIN) if ball_first else (_TERRAIN, _BALL)
+    return NS(ncon=1, contact=[NS(frame=np.r_[n, np.zeros(6)], geom1=g1, geom2=g2)])
+
+
+def _airborne(tracker, steps):
+    for _ in range(steps):
+        assert tracker.visit(_state(False), np.zeros(2)) == (False, False)
+
+
+def test_tracker_landing_after_enough_flight_at_speed_is_a_bounce(sim_cfg):
+    tr = ContactTracker(_BALL, 0.01, sim_cfg)
+    fast = np.array([0.0, -(sim_cfg["contact"]["bounce_min_speed"] + 0.1)])
+    _airborne(tr, tr.min_air_steps)
+    assert tr.visit(_state(True), fast) == (True, True)
+    assert tr.visit(_state(True), fast) == (True, False), "staying in contact is not a new landing"
+
+
+def test_tracker_short_hop_is_not_a_bounce(sim_cfg):
+    tr = ContactTracker(_BALL, 0.01, sim_cfg)
+    assert tr.min_air_steps == round(sim_cfg["contact"]["min_air_s"] / 0.01)
+    _airborne(tr, tr.min_air_steps - 1)
+    assert tr.visit(_state(True), np.array([0.0, -5.0])) == (True, False)
+
+
+def test_tracker_slow_touchdown_is_not_a_bounce(sim_cfg):
+    tr = ContactTracker(_BALL, 0.01, sim_cfg)
+    _airborne(tr, 10 * tr.min_air_steps)
+    slow = np.array([0.0, -(sim_cfg["contact"]["bounce_min_speed"] - 0.1)])
+    assert tr.visit(_state(True), slow) == (True, False)
+
+
+def test_tracker_approach_speed_is_along_the_normal_whichever_geom_is_first(sim_cfg):
+    tr = ContactTracker(_BALL, 0.01, sim_cfg)
+    tilt = np.array([np.sin(0.4), 0.0, np.cos(0.4)])  # surface normal on a slope
+    into = -3.0 * np.array([tilt[0], tilt[2]])  # straight into the surface at 3 m/s
+    along = 3.0 * np.array([tilt[2], -tilt[0]])  # sliding along it
+    for first in (False, True):
+        assert tr.approach_speed(_state(True, tilt, first), into) == pytest.approx(3.0)
+        assert tr.approach_speed(_state(True, tilt, first), along) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_flat_drop_bounces_at_the_predicted_frame_then_settles(sim_cfg):
+    n, half = sim_cfg["terrain"]["columns"], sim_cfg["terrain"]["length"] / 2
+    flat = Terrain(x=np.linspace(-half, half, n), heights=np.zeros(n), params={"flat": True})
+    drop = 1.0
+    ball = BallParams(radius=0.25, friction=0.5, restitution=0.5, x0=0.0, drop=drop, vx0=0.0)
+    ep = simulate(sim_cfg, flat, ball, render=False)
+    b = np.flatnonzero(ep.bounce)
+    t_land = np.sqrt(2 * drop / sim_cfg["gravity"])
+    assert b[0] == int(np.ceil(t_land * sim_cfg["fps"])), (b, t_land)
+    assert len(b) >= 2 and (np.diff(b) > 0).all()
+    assert not ep.contact[: b[0]].any(), "airborne until the first landing"
+    assert ep.contact[-20:].all() and not ep.bounce[-20:].any(), (
+        "settled: resting contact, no bounces"
+    )
+    assert ep.meta["terrain_seed"] is None and ep.meta["ball_seed"] is None

@@ -5,17 +5,18 @@ Physics only (MuJoCo on CPU, no GL), so these run in the fast tier and in Linux 
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 from pathlib import Path
 
 import mujoco
 import numpy as np
 import pytest
+
+from jepa_world.sim import contact
 from jepa_world.sim.ball import BallParams, sample_ball
 from jepa_world.sim.scene import build_model, geom_id
 from jepa_world.sim.terrain import Terrain, sample_terrain
-
-from jepa_world.sim import contact
 from jepa_world.utils.config import load_config
 
 
@@ -76,6 +77,21 @@ def test_restitution_holds_in_the_real_scene_for_both_radius_extremes(sim_cfg):
         for r in (r_lo, r_hi):
             got = _bounce_in_scene(sim_cfg, _ball(radius=r, restitution=e), ref)
             assert abs(got - e) < 0.03, (e, r, got)
+
+
+def test_calibration_survives_a_stiff_short_contact(sim_cfg):
+    """At stiffness 1e5 the contact lasts about 6 substeps, so the raw e(damping) curve has
+    substep-quantisation ties. The calibration must still give a monotone inverse, not raise."""
+    stiff = copy.deepcopy(sim_cfg)
+    stiff["contact"]["stiffness"] = 1.0e5
+    damping, e = contact.calibration_table(stiff)
+    assert np.all(np.diff(damping) > 0) and np.all(np.diff(e) < 0)
+    lo, hi = (
+        max(stiff["ball"]["restitution"][0], e.min()),
+        min(stiff["ball"]["restitution"][1], e.max()),
+    )
+    b = [contact.damping_for(x, stiff) for x in np.linspace(lo, hi, 7)]
+    assert np.all(np.diff(b) <= 0), "higher restitution needs less damping"
 
 
 def test_restitution_outside_the_table_raises(sim_cfg):

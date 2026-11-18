@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 import numpy as np
 
 TERRAIN_STREAM = 0x7E2A1  # SeedSequence stream id: terrain draws never share bits with ball draws
-LEDGE_GAP = 1.0  # metres: minimum distance between two ledges
 
 
 @dataclass(frozen=True, eq=False)
@@ -92,11 +91,17 @@ def sample_terrain(sim_cfg: dict, terrain_seed: int) -> Terrain:
     # alone never outran the lagging camera: at most 4% of episodes had an out-of-view frame.
     lo, hi = tc["ledges"]
     n_ledges = int(rng.integers(lo, hi + 1))
-    # One ledge per equal-width bin, at least LEDGE_GAP / 2 from the bin's edges, so ledges never
-    # merge into one taller cliff.
-    margin = tc["wall_width"] + 1.0
+    # One ledge per equal-width bin, at least ledge_gap / 2 from the bin's edges, so ledges never
+    # merge into one taller cliff, and stay ledge_gap clear of the wall zones.
+    gap = float(tc["ledge_gap"])
+    margin = tc["wall_width"] + gap
+    if hi > 0 and 2 * (half - margin) / hi < gap:
+        raise ValueError(
+            f"terrain too short for {hi} ledges: each needs a {gap} m bin, but "
+            f"length {tc['length']} minus walls and margins leaves {2 * (half - margin):.2f} m"
+        )
     edges = np.linspace(-half + margin, half - margin, n_ledges + 1)
-    ledge_x = rng.uniform(edges[:-1] + LEDGE_GAP / 2, edges[1:] - LEDGE_GAP / 2)
+    ledge_x = rng.uniform(edges[:-1] + gap / 2, edges[1:] - gap / 2)
     ledge_h = rng.uniform(*tc["ledge_height"], size=n_ledges) * rng.choice(
         [-1.0, 1.0], size=n_ledges
     )

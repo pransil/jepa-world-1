@@ -27,19 +27,49 @@ from jepa_world.utils.repro import run_metadata
 _RED, _YELLOW = (255, 40, 40), (255, 220, 0)
 
 
+def _runs(flags: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(start indices, lengths) of the True runs in a 1-D bool array."""
+    edges = np.diff(np.r_[0, flags.astype(int), 0])
+    starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+    return starts, ends - starts
+
+
 def episode_stats(episodes: list[Episode]) -> dict:
+    """Event rates and ranges over a sample of episodes. Every number the M1 summary cites."""
     n = len(episodes)
     oov = [ep.out_of_view for ep in episodes]
+    lengths, below, above = [], 0, 0
+    for ep in episodes:
+        starts, runs = _runs(ep.out_of_view)
+        lengths += runs.tolist()
+        for s in starts:
+            if ep.ball_pos[s, 1] < ep.cam_pos[s, 1]:
+                below += 1
+            else:
+                above += 1
+    run_stats = (
+        {
+            "median": float(np.median(lengths)),
+            "p90": float(np.percentile(lengths, 90)),
+            "max": int(max(lengths)),
+        }
+        if lengths
+        else None
+    )
     return {
         "episodes": n,
         "contact_rate": float(np.mean([ep.contact.mean() for ep in episodes])),
-        "airborne_frame_rate": float(np.mean([(~ep.contact).mean() for ep in episodes])),
+        # contact[t] is False only if no contact acted anywhere in [t-1, t] (see episode.py)
+        "free_flight_frame_rate": float(np.mean([(~ep.contact).mean() for ep in episodes])),
         "bounces_per_episode": float(np.mean([ep.bounce.sum() for ep in episodes])),
         "out_of_view_rate": float(np.mean([o.mean() for o in oov])),
         "episodes_with_out_of_view": int(sum(bool(o.any()) for o in oov)),
+        "out_of_view_exits": {"below": below, "above": above},
+        "out_of_view_run_frames": run_stats,
         "max_speed_p90": float(
             np.percentile([np.linalg.norm(ep.ball_vel, axis=1).max() for ep in episodes], 90)
         ),
+        "max_abs_x": float(max(np.abs(ep.ball_pos[:, 0]).max() for ep in episodes)),
     }
 
 
@@ -78,6 +108,10 @@ def main(argv: list[str] | None = None) -> Path:
         "--stats-episodes", type=int, default=200, help="physics-only episodes for event rates"
     )
     args = ap.parse_args(argv)
+    if args.stats_episodes < 1:
+        ap.error("--stats-episodes must be at least 1")
+    if not 0 <= args.episodes <= args.stats_episodes:
+        ap.error("--episodes must be between 0 and --stats-episodes (it renders a subset of them)")
 
     from PIL import Image
 

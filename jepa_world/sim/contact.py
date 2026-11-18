@@ -19,7 +19,7 @@ import mujoco
 import numpy as np
 
 CONDIM = 6
-_GRID = 41  # damping samples between 0 and critical damping
+_GRID = 61  # damping samples from 0 to twice critical damping (2 * 2 sqrt(k))
 _PROBE_RADIUS = 0.25  # direct-mode solref is mass-normalised, so the probe radius is immaterial
 
 
@@ -38,14 +38,21 @@ def _key(sim_cfg: dict) -> tuple:
     )
 
 
-def _measure(stiffness, damping, solimp, h, gravity, speed) -> float:
-    """Launch a ball at `speed` straight down onto a plane, from first touch, with gravity on. Return
-    the rebound ratio v_out / v_in, measured when the contact ends."""
+@lru_cache(maxsize=8)
+def _probe_model(h: float, gravity: float) -> mujoco.MjModel:
+    """A ball on one vertical slide joint above a plane, compiled once per (h, gravity). Callers set
+    solref/solimp before each use; MjData is always fresh, so reuse is deterministic."""
     xml = f"""<mujoco><option timestep="{h!r}" gravity="0 0 {-gravity!r}" cone="elliptic"/>
       <worldbody><geom name="floor" type="plane" size="5 5 0.1" condim="{CONDIM}"/>
       <body><joint type="slide" axis="0 0 1"/>
       <geom type="sphere" size="{_PROBE_RADIUS}" condim="{CONDIM}"/></body></worldbody></mujoco>"""
-    m = mujoco.MjModel.from_xml_string(xml)
+    return mujoco.MjModel.from_xml_string(xml)
+
+
+def _measure(stiffness, damping, solimp, h, gravity, speed) -> float:
+    """Launch a ball at `speed` straight down onto a plane, from first touch, with gravity on. Return
+    the rebound ratio v_out / v_in, measured when the contact ends."""
+    m = _probe_model(h, gravity)
     for g in range(m.ngeom):
         m.geom_solref[g] = (-stiffness, -damping)
         m.geom_solimp[g] = solimp
@@ -64,12 +71,22 @@ def _measure(stiffness, damping, solimp, h, gravity, speed) -> float:
 
 @lru_cache(maxsize=8)
 def _table(key: tuple) -> tuple[np.ndarray, np.ndarray]:
+    """Measured e(damping), made strictly decreasing.
+
+    The raw curve is quantised by the substep at which the ball separates. With a stiff, short
+    contact (stiffness 1e5 lasts about 6 substeps at 1/600 s), neighbouring grid points can tie or
+    invert slightly. Take the running minimum (a monotone envelope) and keep the points where it
+    strictly falls, so the inverse is well defined. At the base config the raw curve is already
+    strictly decreasing, and test_damping_for_inverts_the_measurement holds it to 0.01.
+    """
     stiffness, solimp, h, gravity, speed = key
-    damping = np.linspace(0.0, 2.0 * np.sqrt(stiffness), _GRID)
-    e = np.array([_measure(stiffness, b, solimp, h, gravity, speed) for b in damping])
-    if not np.all(np.diff(e) < 0):
-        raise RuntimeError(f"restitution is not monotone in damping: {e.round(4).tolist()}")
-    return damping, e
+    damping = np.linspace(0.0, 4.0 * np.sqrt(stiffness), _GRID)
+    raw = np.array([_measure(stiffness, b, solimp, h, gravity, speed) for b in damping])
+    envelope = np.minimum.accumulate(raw)
+    keep = np.r_[True, np.diff(envelope) < 0]
+    if keep.sum() < 2:
+        raise RuntimeError(f"restitution does not vary with damping: {raw.round(4).tolist()}")
+    return damping[keep], envelope[keep]
 
 
 def calibration_table(sim_cfg: dict) -> tuple[np.ndarray, np.ndarray]:

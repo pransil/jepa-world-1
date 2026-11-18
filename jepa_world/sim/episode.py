@@ -13,7 +13,6 @@ Event flags, for frame t (frames are at t / fps):
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 
 import mujoco
@@ -21,7 +20,7 @@ import numpy as np
 
 from jepa_world.sim import camera
 from jepa_world.sim.ball import BallParams, sample_ball, start_z
-from jepa_world.sim.contact import contact_params, timestep
+from jepa_world.sim.contact import timestep
 from jepa_world.sim.scene import build_model, geom_id
 from jepa_world.sim.terrain import Terrain, sample_terrain
 from jepa_world.utils.paths import config_hash
@@ -59,39 +58,64 @@ class Episode:
     seg: np.ndarray | None = None  # (T, S, S) int16 geom id per pixel, -1 = background
 
 
-class _ContactTracker:
-    """Visits each physics state once, in order, and records touches and landings."""
+class ContactTracker:
+    """Visits each physics state once, in order, and flags touches and landings.
 
-    def __init__(self, m: mujoco.MjModel, ball_geom: int, h: float, sim_cfg: dict):
+    A landing (a bounce) is a touch whose previous `min_air_s` of states, counted in whole substeps,
+    were all airborne, and whose normal approach speed is at least `bounce_min_speed`.
+    """
+
+    def __init__(self, ball_geom: int, h: float, sim_cfg: dict):
         c = sim_cfg["contact"]
-        self.m, self.ball_geom, self.h = m, ball_geom, h
-        self.min_air, self.min_speed = float(c["min_air_s"]), float(c["bounce_min_speed"])
+        self.ball_geom = ball_geom
+        # Whole substeps, so the threshold doesn't depend on float sums of h.
+        self.min_air_steps = int(np.ceil(float(c["min_air_s"]) / h - 1e-9))
+        self.min_speed = float(c["bounce_min_speed"])
         self.touching = False
-        self.air = 0.0  # seconds since the last touching state
+        self.air_steps = 0  # airborne states since the last touch
 
-    def visit(self, d: mujoco.MjData, vel: np.ndarray) -> tuple[bool, bool]:
-        """d.contact must describe the state whose velocity is `vel`. Returns (touching, landing)."""
+    def visit(self, d, vel: np.ndarray) -> tuple[bool, bool]:
+        """`d` (MjData, or anything with .ncon and .contact[i].frame/.geom1) must describe the state
+        whose (vx, vz) is `vel`. Returns (touching, landing)."""
         touching = d.ncon > 0
         landing = False
         if touching:
-            if not self.touching and self.air >= self.min_air:
-                landing = self._approach_speed(d, vel) >= self.min_speed
-            self.air = 0.0
+            if not self.touching and self.air_steps >= self.min_air_steps:
+                landing = self.approach_speed(d, vel) >= self.min_speed
+            self.air_steps = 0
         else:
-            self.air += self.h
+            self.air_steps += 1
         self.touching = touching
         return touching, landing
 
-    def _approach_speed(self, d: mujoco.MjData, vel: np.ndarray) -> float:
+    def approach_speed(self, d, vel: np.ndarray) -> float:
+        """Largest speed of the ball toward the terrain along any contact normal (0 if separating)."""
         v = np.array([vel[0], 0.0, vel[1]])
         best = 0.0
         for i in range(d.ncon):
             con = d.contact[i]
-            n = np.array(con.frame[:3])  # points from geom1 to geom2
+            n = np.asarray(con.frame[:3], dtype=np.float64)  # points from geom1 to geom2
             if con.geom1 == self.ball_geom:
                 n = -n  # make it point from the terrain to the ball
             best = max(best, -float(v @ n))
         return best
+
+
+def plain_json(obj, path: str = "sim"):
+    """A deep copy of `obj` in plain JSON types, which is what goes into episode files. numpy
+    scalars and arrays become Python numbers and lists, and tuples become lists. Anything else that
+    JSON can't hold (a YAML date, a set, an object) raises TypeError and names its path."""
+    if isinstance(obj, dict):
+        return {str(k): plain_json(v, f"{path}.{k}") for k, v in obj.items()}
+    if isinstance(obj, list | tuple):
+        return [plain_json(v, f"{path}[{i}]") for i, v in enumerate(obj)]
+    if isinstance(obj, np.ndarray):
+        return plain_json(obj.tolist(), path)
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if obj is None or isinstance(obj, bool | int | float | str):
+        return obj
+    raise TypeError(f"{path}: {type(obj).__name__} {obj!r} is not JSON-serialisable")
 
 
 def simulate_episode(
@@ -103,19 +127,40 @@ def simulate_episode(
 ) -> Episode:
     """Deterministic in (sim_cfg, terrain_seed, ball_seed). render=False skips GL entirely. The
     physics, and so every ground-truth array, is identical either way."""
+    terrain = sample_terrain(sim_cfg, terrain_seed)
+    ball = sample_ball(sim_cfg, terrain_seed, ball_seed)
+    return simulate(
+        sim_cfg,
+        terrain,
+        ball,
+        render=render,
+        segmentation=segmentation,
+        seeds=(terrain_seed, ball_seed),
+    )
+
+
+def simulate(
+    sim_cfg: dict,
+    terrain: Terrain,
+    ball: BallParams,
+    render: bool = True,
+    segmentation: bool = False,
+    seeds: tuple[int | None, int | None] = (None, None),
+) -> Episode:
+    """Run one episode on a given terrain and ball. simulate_episode is the seeded entry point; this
+    one serves hand-built scenes (tests, and physics baselines that re-simulate known terrain)."""
     if segmentation and not render:
         raise ValueError("segmentation requires render=True")
+    cfg_plain = plain_json(sim_cfg)  # fail before simulating, not halfway through a dataset build
     T, n, S = int(sim_cfg["episode_frames"]), int(sim_cfg["substeps"]), int(sim_cfg["frame_size"])
     h = timestep(sim_cfg)
     rig_y = -float(sim_cfg["camera"]["distance"])
 
-    terrain = sample_terrain(sim_cfg, terrain_seed)
-    ball = sample_ball(sim_cfg, terrain_seed, ball_seed)
     m = build_model(terrain, ball, sim_cfg)
     d = mujoco.MjData(m)
     d.qpos[:] = [ball.x0, start_z(terrain, ball), 0.0]
     d.qvel[:] = [ball.vx0, 0.0, ball.vx0 / ball.radius]
-    tracker = _ContactTracker(m, geom_id(m, "ball"), h, sim_cfg)
+    tracker = ContactTracker(geom_id(m, "ball"), h, sim_cfg)
 
     pos, vel = np.zeros((T, 2)), np.zeros((T, 2))
     spin, cam = np.zeros(T), np.zeros((T, 2))
@@ -162,14 +207,14 @@ def simulate_episode(
     ball_px = camera.project(pos, cam, sim_cfg)
     meta = {
         "generator_version": sim_cfg["generator_version"],
-        "terrain_seed": int(terrain_seed),
-        "ball_seed": int(ball_seed),
+        "terrain_seed": None if seeds[0] is None else int(seeds[0]),
+        "ball_seed": None if seeds[1] is None else int(seeds[1]),
         "camera_mode": sim_cfg["camera_mode"],
         "timestep": h,
         "px_per_m": camera.px_per_m(sim_cfg),
-        "damping": -contact_params(ball, sim_cfg)["solref"][1],
-        "sim_cfg_hash": config_hash(sim_cfg),
-        "sim_cfg": copy.deepcopy(sim_cfg),
+        "damping": -float(m.geom_solref[geom_id(m, "ball")][1]),  # what MuJoCo actually used
+        "sim_cfg_hash": config_hash(cfg_plain),
+        "sim_cfg": cfg_plain,
     }
     return Episode(
         t=np.arange(T) / sim_cfg["fps"],

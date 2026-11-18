@@ -16,8 +16,8 @@ but always False). Physics baselines (M2/M6, which can reuse `build_model`).
 cfg["sim"], terrain_seed ─► sample_terrain ─► Terrain(x (N,), heights (N,), params)
 cfg["sim"], terrain_seed, ball_seed ─► sample_ball ─► BallParams(radius, friction, restitution, x0, drop, vx0)
 Terrain, BallParams ─► build_model ─► MjModel (hfield, 3-joint ball, mocap camera rig)
-simulate_episode: per frame, `substeps` mj_steps ─► contact/bounce flags ─► camera.track ─► render
-          ─► Episode
+simulate (simulate_episode = seeded wrapper): per frame, `substeps` mj_steps ─► contact/bounce
+          flags ─► camera.track ─► render ─► Episode
 ```
 
 | Episode field | shape, dtype | meaning |
@@ -31,10 +31,16 @@ simulate_episode: per frame, `substeps` mj_steps ─► contact/bounce flags ─
 | `contact`, `bounce`, `out_of_view`, `occluded` | (T,) bool | event flags, defined below |
 | `terrain`, `ball`, `meta` | Terrain, BallParams, dict | seeds, generator_version, cfg hash, view |
 
-**Event flags.** `contact[t]`: the ball touched the terrain at any physics substep in (t−1, t]
-(at t = 0, at the initial state). `bounce[t]`: a contact onset in (t−1, t] after at least
-`min_air_s` airborne, with normal approach speed ≥ `bounce_min_speed`, i.e. a landing.
-`out_of_view[t]`: the projected ball disc lies entirely outside the image.
+**Event flags.**
+- `contact[t]`: the ball touches the terrain in some physics state from frame t−1's instant to
+  frame t's instant, both included. Those are exactly the states whose contact forces act during
+  (t−1, t], so `contact[t]` False means the step from t−1 to t is pure free flight. A ball that
+  lifts off exactly at frame t−1 still has `contact[t]` True. At t = 0 it is the initial touch
+  state.
+- `bounce[t]`: a contact onset (a landing) at a state in (t−1, t], after at least `min_air_s` of
+  airborne substeps (counted as an integer), with normal approach speed ≥ `bounce_min_speed`.
+  `ContactTracker` implements it, and `test_tracker_*` pins each threshold.
+- `out_of_view[t]`: the projected ball disc lies entirely outside the image.
 
 ## Key decisions
 
@@ -50,40 +56,49 @@ simulate_episode: per frame, `substeps` mj_steps ─► contact/bounce flags ─
   [decision](../../docs/decisions/2026-11-17-camera-mode-track-lagged.md)
 - **Friction = sliding μ + rolling drag** from one draw, condim 6.
   [decision](../../docs/decisions/2026-11-17-friction-sliding-plus-rolling.md)
-- **Restitution is calibrated, not formula-mapped.** Soft-contact `dampratio` gave e = 0.34 for
-  a target of 0.8, and it depended strongly on impact speed. Direct-mode solref
-  `(-stiffness, -damping)` at stiffness 3e4 is nearly independent of speed and radius
-  (0.69 / 0.65 / 0.64 at 1 / 4 / 8 m/s). A drop simulation measures e over a damping grid, and
-  `contact.damping_for` inverts that monotone curve at `restitution_ref_speed`. The table is
-  cached per process. What remains: e at other impact speeds differs by a few hundredths. M1.md
-  reports the measured spread.
+- **Restitution is calibrated, not formula-mapped.** Two things ruled out a formula. Standard
+  solref `(timeconst, dampratio)` with dampratio from the textbook e(ζ) gave e = 0.34 for a target
+  of 0.8, and e varied strongly with impact speed. That was a scratch measurement during design,
+  not reproduced by a committed command. Direct mode `(-stiffness, -damping)` is a mass-normalised
+  spring-damper. A drop simulation measures e over a damping grid, and `contact.damping_for`
+  inverts the curve at `restitution_ref_speed`. The curve is quantised by the separation substep,
+  and at stiff settings it can tie, so the table is its monotone envelope. It is cached per
+  process. The measured spread with impact speed is in M1.md (preview `stats.json`), and
+  `test_restitution_holds_in_the_real_scene_for_both_radius_extremes` holds e to ±0.03 at the
+  reference speed.
 - **Contact is tracked per substep, not just at frame instants.** A 20 ms impact falls between
   two frames, so per-frame sampling would miss bounces. It also makes "no contact in (t−1, t]
   ⇒ ballistic step" an exact test.
 - **Terrain = red-noise sinusoids (relief drawn, slope-capped) + 2–5 smoothed ledges + quadratic
-  end walls.** Smooth hills alone never produced the out-of-view events that `track_lagged` exists
-  for. At most 4% of episodes left the frame, whatever the camera settings: rolling over 1.5–3 m
-  of relief is too slow to outrun a lagging camera. Ledges (1–3 m steps, sign random) give
-  deep drops in one direction and walls in the other. Ledges sit in separate bins at least
-  1 m apart, so they never merge into one taller cliff. The walls keep the ball on the terrain:
-  max |x| over 100 episodes was 18.3 m, against 20 m. The geometry oracle is the piecewise-linear
+  end walls.** Smooth hills alone rarely produced the out-of-view events that `track_lagged`
+  exists for. With ledges off, 3% of episodes left the frame (M1.md). Rolling over 1.5–3 m of
+  relief is too slow to outrun a lagging camera. Ledges (1–3 m steps, sign random) give deep
+  drops in one direction and walls in the other. Ledges sit in separate bins at least
+  `ledge_gap` apart, so they never merge into one taller cliff, and a config too short for its
+  ledges raises. The walls keep the ball on the terrain: `max_abs_x` in M1.md, and
+  `test_ball_stays_on_the_terrain`. The geometry oracle is the piecewise-linear
   interpolation of the hfield samples. That is exactly MuJoCo's triangulated surface, so
   `Terrain.gap` is an exact check against MuJoCo's contacts, ledges included
   (`test_mujoco_contact_agrees_with_the_terrain_polyline`).
-- **Camera tuning** (view 3.6 m, deadzone 0.6 m, lerp_z 0.04; measured in `docs/milestones/M1.md`).
-  These give out-of-view in about 17% of episodes, with a median blackout of 4 frames. A 1.4 m
-  deadzone lost: after a drop it parked the ball on the frame's bottom edge with no terrain
-  visible. lerp_z trades event count against blackout length: 0.03 gives 21% of episodes but a
-  p90 blackout of 23 frames, and 0.05 gives 12.5%.
+- **Camera tuning** (view 3.6 m, deadzone 0.6 m, lerp_z 0.04). The out-of-view rate and
+  blackout lengths, and the lerp_z 0.03 / 0.05 alternatives, are in
+  [M1.md](../../docs/milestones/M1.md), each with its preview run dir. A 1.4 m deadzone lost:
+  after a drop it parked the ball on the frame's bottom edge with no terrain visible (seen in
+  preview contact sheets during tuning). lerp_z trades event count against blackout length.
 - **Frame 0 frames the landing.** The camera starts min(drop, deadzone_z) below the ball. Centring
-  on a ball that starts up to 2 m in the air made the initial drop leave the view at about
-  frame 11 in a quarter of all episodes. That was an artefact of initialisation, not an event.
+  on a ball that starts up to 2 m in the air made the initial drop leave the view in about a
+  quarter of episodes, nearly all at the same frame (scratch measurement during tuning). That was
+  an artefact of initialisation, not an event.
 - **Seeds.** Terrain comes from `SeedSequence([TERRAIN_STREAM, terrain_seed])`, and the ball
   from `SeedSequence([BALL_STREAM, terrain_seed, ball_seed])`, so a terrain does not change when
   the ball seed changes.
-- **Determinism scope.** Ground truth is bitwise-identical for the same seeds on any machine
-  with the same MuJoCo build. Frames are byte-identical on the same machine and GL stack, but
-  not guaranteed across GPUs.
+- **Determinism scope.** Proven, on the same machine and software stack: ground truth is
+  bitwise-identical for the same seeds (`test_same_seeds_regenerate_identically`), and so are
+  frames (`test_same_seeds_render_identical_frames`). Not guaranteed across machines. numpy's
+  sin, exp and log can differ by an ulp between platforms and SIMD paths, and contacts amplify
+  such differences. Frames also depend on the GPU and GL stack. Datasets are keyed by config
+  hash only, so M2 should build each dataset on one machine and record
+  `utils.repro.run_metadata()` (platform, library versions) next to its `config.json`.
 - **Background is black, and shading is flat:** a strong ambient headlight, no specular, no
   shadows. Visual detail should not dominate the loss (SPEC §3.3).
 
@@ -105,7 +120,7 @@ simulate_episode: per frame, `substeps` mj_steps ─► contact/bounce flags ─
 | `contact.py` | restitution calibration, `contact_params`: solref, solimp, friction triple |
 | `scene.py` | `build_model`: MJCF, hfield data, ids |
 | `camera.py` | `initial`, `track`, `project`, `out_of_view`, `px_per_m` (pure) |
-| `episode.py` | `Episode`, `simulate_episode`: the stepping loop and event flags |
+| `episode.py` | `Episode`, `simulate_episode` (seeded) / `simulate` (given terrain and ball), `ContactTracker`, `plain_json` |
 | `render.py` | `FrameRenderer`: RGB and segmentation (GL) |
 | `io.py` | `save_episode` / `load_episode` (.npz plus JSON metadata) |
 | `preview.py` | CLI: contact sheets and `stats.json` into a run dir |

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from jepa_world.sim.terrain import LEDGE_GAP, Terrain, sample_terrain
+from jepa_world.sim.terrain import Terrain, sample_terrain
 from jepa_world.utils.config import load_config
 
 
@@ -72,14 +73,14 @@ def test_slope_is_capped_away_from_walls_and_ledges(sim_cfg):
 
 def test_ledges_are_steps_of_the_configured_size_away_from_the_walls(sim_cfg):
     tc = sim_cfg["terrain"]
-    half, margin = tc["length"] / 2, tc["wall_width"] + 1.0
+    half, margin = tc["length"] / 2, tc["wall_width"] + tc["ledge_gap"]
     for seed in range(10):
         t = sample_terrain(sim_cfg, seed)
         lx, lh = np.array(t.params["ledge_x"]), np.array(t.params["ledge_height"])
         assert tc["ledges"][0] <= len(lx) <= tc["ledges"][1]
         assert (np.abs(lx) <= half - margin).all()
         assert ((np.abs(lh) >= tc["ledge_height"][0]) & (np.abs(lh) <= tc["ledge_height"][1])).all()
-        assert (np.diff(lx) >= LEDGE_GAP).all(), "ledges must not merge into one cliff"
+        assert (np.diff(lx) >= tc["ledge_gap"]).all(), "ledges must not merge into one cliff"
         # The step is sampled on the column grid, so measure one column beyond each end of it.
         reach = tc["ledge_width"] / 2 + (t.x[1] - t.x[0])
         for x_s, h_s in zip(lx, lh, strict=True):
@@ -94,6 +95,15 @@ def test_relief_is_drawn_from_the_configured_range_then_slope_capped(sim_cfg):
         p = sample_terrain(sim_cfg, seed).params
         assert lo <= p["target_relief"] <= hi
         assert p["slope_scale"] <= 1.0
+
+
+def test_too_many_ledges_for_the_length_raises(sim_cfg):
+    cfg = copy.deepcopy(sim_cfg)
+    cfg["terrain"]["length"] = 12.0  # 12 - 2 * (2 + 1) = 6 m for up to 5 ledges: 1.2 m bins, OK
+    sample_terrain(cfg, 0)
+    cfg["terrain"]["length"] = 10.0  # 4 m for 5 ledges: 0.8 m bins < 1 m gap
+    with pytest.raises(ValueError, match="too short"):
+        sample_terrain(cfg, 0)
 
 
 def test_end_walls_rise_wall_height_above_the_terrain_inside_them(sim_cfg):

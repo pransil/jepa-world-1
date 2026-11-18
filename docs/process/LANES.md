@@ -65,10 +65,18 @@ and only M3's *loss decreases on the dev set* test waits for M2. Inside a milest
 ## Cleaning up
 
 A lane that has merged its PR removes its own worktree, following the order in `/builder` Step J:
-`ExitWorktree keep`, `git pull --ff-only` in the main clone, then `git worktree remove` (never
-`--force`) and `git branch -d`. Run `tools/lane-owners.sh` to see the rest. Merged, clean trees
-show as `merged: removable`. A worktree with no live session might be paused, not abandoned, so
-ask the user before removing anyone else's.
+1. `ExitWorktree keep`;
+2. `git pull --ff-only` in the main clone;
+3. `tools/finish-lane.sh wt-<slug>`.
+
+The script removes the worktree and its local branch only when the PR merged at the branch's tip,
+nothing is uncommitted or unpulled, and no live session is inside it. Otherwise it removes nothing
+and says why. It is the only allowed way to delete a worktree. The user's settings deny a raw
+`git worktree remove` (`tools/DESIGN.md`).
+
+Run `tools/lane-owners.sh` to see the rest. Merged, clean trees show as `merged: removable`. A
+worktree with no live session might be paused, not abandoned, so ask the user before removing
+anyone else's.
 
 **About branch protection.** `main` requires a PR and a green `fast-tests` check, with no
 approvals, and admins are included. GitHub rejects a direct push of any commit that hasn't passed

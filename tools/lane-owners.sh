@@ -17,20 +17,15 @@
 # the user knows which.
 set -uo pipefail
 
+. "$(dirname "$0")/lane-lib.sh"
+
 BASE=${BASE:-origin/main}
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "not in a git repo"; exit 2; }
-MAIN=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
+MAIN=$(cd "$ROOT" && lane_main_clone)
 git -C "$MAIN" fetch -q origin 2>/dev/null || echo "(fetch failed: origin refs may be stale)"
 
-cwd_of() { lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; }
 LIVE=()   # "pid<TAB>cwd"
-for sock in /tmp/cc-socks/*.sock; do
-  [ -S "$sock" ] || continue
-  pid=$(basename "$sock" .sock)
-  case "$pid" in ''|*[!0-9]*) continue ;; esac
-  kill -0 "$pid" 2>/dev/null || continue
-  LIVE+=("$pid"$'\t'"$(cwd_of "$pid")")
-done
+while IFS= read -r e; do LIVE+=("$e"); done < <(lane_live_sessions)
 owner_of() {  # pids whose cwd is inside worktree $1 (but not inside a nested worktree of it)
   local out="" e pid cwd
   for e in "${LIVE[@]+"${LIVE[@]}"}"; do

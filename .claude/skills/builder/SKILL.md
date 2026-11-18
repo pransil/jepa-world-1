@@ -148,12 +148,17 @@ or merge a PR with failing tests.
   your commits.
   1. `ExitWorktree` with `action: "keep"`. The session is back in the main clone.
   2. `git pull --ff-only`, so the main clone's `main` now contains the merge.
-  3. Check that `git -C .claude/worktrees/wt-<slug> status --porcelain` is empty and
-     `git rev-list --count main..worktree-wt-<slug>` is `0`.
-  4. Run `git worktree remove .claude/worktrees/wt-<slug>` (never `--force`) and
-     `git branch -d worktree-wt-<slug>` (`-d`, not `-D`, so git itself refuses an unmerged
-     branch). These deletions may ask the user for permission, and that's expected. If they are
-     declined, leave the tree and say so in the output.
+  3. `tools/finish-lane.sh wt-<slug>`. It removes the worktree and the local branch only if all of these hold:
+     - the PR merged at the branch's exact tip;
+     - `main` has every commit from the branch;
+     - the tree holds no uncommitted, untracked or non-cache ignored files;
+     - the tree isn't locked;
+     - no live session is inside it.
+
+     Otherwise it removes nothing and lists why. If it refuses, leave the tree, and give the
+     reasons in the output. Fix only causes that are yours, such as an unpulled `main`.
+     Raw `git worktree remove` is denied in the user's settings, and this script is the
+     allowed path (`tools/DESIGN.md`). Don't work around a refusal.
 - Never pass `discard_changes: true` or `--force` without the user's say-so.
 
 ## Output

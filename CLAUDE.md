@@ -37,6 +37,7 @@ uv sync                 # create/refresh .venv (per worktree; fast, uses uv's sh
 ./test fix              # ruff format + autofix
 tools/lane-owners.sh [paths]   # who is working where; collision check for paths
 tools/gpu-status.sh     # MPS lock holder and running jobs
+tools/finish-lane.sh wt-<slug>   # after the merge, from the main clone: remove a merged, clean lane
 uv run python -m jepa_world.train --config configs/x.yaml [--set key=value]   # (from M3)
 ```
 
@@ -57,7 +58,7 @@ configs/      base.yaml = SPEC defaults; one yaml per experiment, inheriting fro
 tests/        conftest.py defines the tiers; test_<module>.py per module
 experiments/  one note per experiment       docs/decisions/  one file per SPEC §9 decision
 docs/milestones/  M1..M7 summaries          docs/process/LANES.md  parallel-work rules
-tools/        lane-owners.sh, gpu-status.sh
+tools/        lane-owners.sh, finish-lane.sh, gpu-status.sh (tools/DESIGN.md)
 ```
 
 The code lives under one package, `jepa_world/`, instead of SPEC §10's top-level `sim/ data/

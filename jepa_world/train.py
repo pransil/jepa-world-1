@@ -20,6 +20,8 @@ from pathlib import Path
 import torch
 import yaml
 
+from jepa_world.data.dataset import batches as episode_batches
+from jepa_world.data.dataset import load_split, require_split
 from jepa_world.data.synthetic import moving_disc_batch
 from jepa_world.models.jepa import JEPA, compute_losses
 from jepa_world.utils.config import load_config
@@ -50,12 +52,19 @@ def model_horizons(cfg: dict) -> list[int]:
 
 
 def _require_built_source(cfg: dict) -> None:
+    """'episodes' needs data.split built for this config (FileNotFoundError names the command)."""
     source = cfg["data"]["source"]
-    if source != "synthetic":
-        raise NotImplementedError(
-            f"data.source={source!r}: the episode loader is built in M2 (jepa_world/data). "
-            "Until then only 'synthetic' exists"
-        )
+    if source == "episodes":
+        require_split(cfg, cfg["data"]["split"])
+    elif source != "synthetic":
+        raise ValueError(f"data.source={source!r}: expected 'episodes' or 'synthetic'")
+
+
+def _episode_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
+    """The M2 loader on data.split, in the same layout as the synthetic source."""
+    es = load_split(cfg, cfg["data"]["split"])
+    c = cfg["model"]["context_frames"]
+    yield from episode_batches(es, cfg["train"]["batch_size"], c, max(horizons), cfg["seed"])
 
 
 def check_config(cfg: dict) -> list[int]:
@@ -101,6 +110,8 @@ def train_step(
 def make_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
     """Endless CPU batches in the M3 layout (B, C + k_max, 3, S, S), seeded from cfg['seed']."""
     _require_built_source(cfg)
+    if cfg["data"]["source"] == "episodes":
+        yield from _episode_batches(cfg, horizons)
     g = torch.Generator().manual_seed(cfg["seed"])
     n = cfg["model"]["context_frames"] + max(horizons)
     while True:

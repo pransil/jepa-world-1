@@ -14,11 +14,11 @@ Not here yet:
 - the U-Net decoder path, which exists only for the pixel decoder (M5);
 - the goal head and pixel decoder (M5);
 - top-down prediction (SPEC §9.2);
-- checkpoint resume;
-- the real episode dataset (M2).
+- checkpoint resume.
 
-Until M2 lands, the synthetic moving-disc source (`data/synthetic.py`) feeds smoke runs and
-benchmarks. It is not evidence about the task.
+Batches come from M2's episode loader (`data.source: episodes`, `jepa_world/data/DESIGN.md`).
+The synthetic moving-disc source (`data/synthetic.py`) remains for tests, benchmarks and smoke
+runs. It is not evidence about the task.
 
 ## Batch contract (the M2 ↔ model interface)
 
@@ -39,9 +39,10 @@ C−1 is time t. k_max is the largest built horizon: 5 for near only (9 frames),
 frames ─┬─ [:, :C] ─► context_encoder ─► L1 ─► near heads k=1..5 ─► mean ───────────► loss/k = mean_{b,h,w} Σ_c (μ−tgt)²
         │                               ├─ L2 ─► far head k=10 ─► mean, logvar ─┐
         │                               └─ L3 ─► far head k=20 ─► mean, logvar ─┴──► loss/k = mean_{b,h,w} Σ_c ½[(tgt−μ)²e^{−logvar} + logvar + log 2π]
-        │                  every level an ACTIVE head reads ─► variance_guard ─► loss/var
-        └─ [:, k:k+C] grouped by the level the head reads ─► target_encoder (no_grad, upto that level) ─► detach ─► tgt
+        │                  each level an ACTIVE head reads ─► variance_guard ─► var/<L>, summed ─► loss/var
+        └─ [:, k:k+C] grouped by the level the head reads ─► target_encoder (no_grad, upto that level) ─► detach ─► [target_norm] ─► tgt
 loss/total = Σ_{k active} w_k·loss/k + w_var·loss/var        after opt.step():  θ_target ← m·θ_target + (1−m)·θ_context
+inactive heads, and levels only they read, run under no_grad: logged, never trained
 ```
 
 ## Key decisions
@@ -66,17 +67,34 @@ loss/total = Σ_{k active} w_k·loss/k + w_var·loss/var        after opt.step()
   So the variance is always positive and finite (e^±10). It is the identity near 0 and keeps a
   gradient everywhere. A hard `clamp` lost because it zeroes the gradient once outside the range.
 - **Far-head width = the level's channels** (`l2_head_hidden: 128`, `l3_head_hidden: 256`, 3×3).
-  SPEC fixes only the L1 width. At 32×32 and 8×8 these heads are cheap: the measured step time
-  is in the PR and `docs/milestones/M4.md`. 32 wide like L1 lost: it would squeeze 128/256
-  channels through a much narrower layer, for no compute reason.
-- **Each far head also logs `sqerr/k`** (its mean's squared L2, the same metric as the near
-  loss) **and `logvar/k`** (mean predicted log-variance). NLL can fall just by tightening the
-  variance. `sqerr` shows whether the *prediction* improved, and `logvar` shows the uncertainty
-  that SPEC §7.2 later calibrates.
-- **Stage schedule within a run** (SPEC §5.5): every built head runs and is logged every step,
-  but only *active* horizons (stage started, `train.stage_start`) enter `loss/total`, and the
-  variance guard covers only levels read by active heads. An inactive head gets no gradient.
+  SPEC fixes only the L1 width. On MPS (B = 32), 32-wide far heads saved only 14 ms of a 158 ms
+  step: most of the far stage's cost is the L2/L3 encoder and the far targets
+  (`docs/milestones/M4.md`). 32 wide like L1 lost: it squeezes 128/256 channels through a narrow
+  layer to save little.
+- **Diagnostics, all detached, logged every step:**
+  - `relerr/k`, for every horizon: the error relative to predicting the batch-mean target. It is
+    scale-free, so shrinking the embeddings cannot improve it: 1.0 = no better than the mean.
+  - `sqerr/k` and `logvar/k` for far heads: the mean's squared L2, and the mean predicted
+    log-variance. NLL can fall just by tightening the variance; these show whether the
+    prediction improved.
+  - `var/<L>`: each level's guard value.
+  - `emb_std/<L>`: the context embeddings' batch std.
+- **Variance guard: summed over active levels**, each level weighted `w_var`. Averaging lost: the
+  L1 guard's weight would drop 3× the moment far starts.
+- **Stage schedule within a run** (SPEC §5.5): `train.stage_start.<s>` is the number of steps
+  completed before stage s joins (far: 2000 → metrics steps 1–2000 are near-only). Every built
+  head is logged every step, but only *active* horizons enter `loss/total`. Inactive heads, and
+  the context levels only they read, run under `no_grad` (`UNetEncoder(x, after=...)` finishes
+  the encoding without a graph), so a stage that hasn't started costs no backward memory.
   [stage-schedule-within-run](../../docs/decisions/2026-11-17-stage-schedule-within-run.md)
+- **Guard summed over channels, at w_var = 25** (`loss.var_reduce: sum`). With raw targets, the
+  far NLL rewards shrinking L2/L3 (smaller error → smaller predicted variance → more negative
+  NLL). The mean-reduced guard at w_var = 1 was too weak to resist that: L3 collapsed, and the
+  log-variance ran to the floor. The summed guard prevented both on synthetic and real dev data.
+  LayerNorm'd targets (`loss.target_norm: layernorm`) lost: they did not stop the collapse. Both
+  switches remain for ablations.
+  [far-collapse-guard-sum](../../docs/decisions/2026-11-17-far-collapse-guard-sum.md),
+  [experiment](../../experiments/2026-11-17-m4-far-collapse.md)
 - **The target encoder runs once per level group:** the stacks of all heads reading a level are
   concatenated along the batch and encoded `upto` that level. Near stacks stop at L1, and only the
   two far stacks pay for L2/L3. GroupNorm is per sample, so grouping can't change a result.
@@ -95,16 +113,16 @@ loss/total = Σ_{k active} w_k·loss/k + w_var·loss/var        after opt.step()
 | Unit | Pure? | Touches | Tested by |
 |---|---|---|---|
 | `unet.UNetEncoder`, `heads.HorizonHead`, `heads.GaussianHead` | yes | — | `tests/test_unet.py`, `tests/test_heads.py` (CPU, 16×16) |
-| `jepa.JEPA`, `latent_loss`, `gaussian_nll`, `variance_guard`, `compute_losses`, stack slicing | yes | — | `tests/test_jepa.py` |
+| `jepa.JEPA`, `latent_loss`, `gaussian_nll`, `relative_error`, `normalize_target`, `variance_guard`, `compute_losses`, stack slicing | yes | — | `tests/test_jepa.py` |
 | `data/synthetic.moving_disc_batch` | yes (explicit `torch.Generator`) | — | `tests/test_synthetic.py` |
-| `train.train_step`, `train.active_horizons` | mutates model + optimizer | device | `tests/test_train.py` |
-| `train.run` / `train.main` | no | run dir (`train.start_run`), GPU lock (always taken by `main`) | `tests/test_train.py` (CPU, tmp artifact root) |
-| `bench.bench_heads` / `bench.main` | no | MPS timing, GPU lock, run dir | `tests/test_bench.py`; `@mps` test in `tests/test_train.py` |
+| `train.train_step`, `train.active_horizons` | mutates model + optimizer | device | `tests/test_train.py`, `tests/test_train_far.py` |
+| `train.run` / `train.main` | no | run dir (`train.start_run`), GPU lock (always taken by `main`) | `tests/test_train.py`, `tests/test_train_far.py` (CPU, tmp artifact root) |
+| `bench.bench_heads` / `bench.main` | no | MPS timing, GPU lock, run dir | `tests/test_bench.py`; `@mps` tests in `tests/test_train.py`, `tests/test_train_far.py` |
 
 ## Files
 
 | File | Responsibility |
 |---|---|
-| `unet.py` | `ConvBlock` (conv → GroupNorm → SiLU), `UNetEncoder` (levels from config, `upto` early stop), `encoder_from_cfg` |
+| `unet.py` | `ConvBlock` (conv → GroupNorm → SiLU), `UNetEncoder` (levels from config, `upto` early stop, `after` continuation), `encoder_from_cfg` |
 | `heads.py` | `HorizonHead` (features + k-vector + action slot → mean map), `GaussianHead` (→ mean, bounded logvar) |
-| `jepa.py` | `JEPA` (context/target encoders, heads, `ema_update`), stack slicing, `latent_loss`, `gaussian_nll`, `variance_guard`, `compute_losses` |
+| `jepa.py` | `JEPA` (context/target encoders, heads, `ema_update`, `active` forward), stack slicing, `latent_loss`, `gaussian_nll`, `relative_error`, `normalize_target`, `variance_guard`, `compute_losses` |

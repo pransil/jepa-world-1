@@ -81,12 +81,12 @@ model:                        # SPEC §4
 
 loss:                         # SPEC §5
   latent_distance: mse        # squared L2, summed over channels, mean over positions (docs/decisions/2026-11-17-latent-distance-sq-l2.md)
-  target_norm: none           # [OPEN] none | layernorm (per position, over channels): M4 far-collapse comparison
+  target_norm: none           # none | layernorm (per position, over channels): raw kept (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
   collapse_guard: true        # VICReg-style variance floor (docs/decisions/2026-11-17-collapse-guard-on.md)
   var_gamma: 1.0              # target batch std per (channel, position)
   var_eps: 1.0e-4             # inside the sqrt, so a zero-variance feature has a finite gradient
-  var_reduce: mean            # [OPEN] mean | sum (over channels, like the latent losses): M4 far-collapse comparison
-  w_var: 1.0                  # loss/var = sum over active levels of each level's guard
+  var_reduce: sum             # mean | sum (over channels, like the latent losses): sum stops the far-NLL collapse (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
+  w_var: 25.0                 # VICReg's variance weight (same decision); loss/var = sum over active levels of each level's guard
   w_k: 1.0
   w_goal: 0.5
   w_pix: 0.05
@@ -99,7 +99,7 @@ train:                        # SPEC §6
   weight_decay: 0.01          # torch 2.15 AdamW default
   precision: fp32             # do not assume bf16 works on MPS
   stages: [near, far, goal, pixel]   # SPEC §5.5
-  stage_start: {near: 0, far: 2000}  # step a stage's terms join loss/total; logged from step 0 (docs/decisions/2026-11-17-stage-schedule-within-run.md). far: placeholder
+  stage_start: {near: 0, far: 2000}  # steps completed before a stage joins loss/total (logged throughout): docs/decisions/2026-11-17-stage-schedule-within-run.md. far: placeholder
   steps: 10000                # placeholder, set per experiment
   log_every: 50               # flush interval for metrics.jsonl; every step is still logged
   ckpt_every: 2000            # plus one checkpoint at the end

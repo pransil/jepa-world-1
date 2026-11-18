@@ -12,9 +12,11 @@ import sys
 
 import pytest
 import torch
+from fake_episodes import SMALL_SPLITS, Recorder, decode
 from tiny import ALL, CONFIGS, FAR, NEAR, random_frames, tiny_cfg, tiny_far_cfg
 
 from jepa_world import train
+from jepa_world.data import build
 from jepa_world.data.synthetic import moving_disc_batch
 
 
@@ -58,7 +60,7 @@ def test_stage_start_counts_completed_steps(tmp_path):
     train.run(cfg, tmp_path, device=torch.device("cpu"))
     lines = [json.loads(s) for s in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     for r in lines:
-        near_only = sum(r[f"loss/k{k}"] for k in NEAR) + r["var/L1"]
+        near_only = sum(r[f"loss/k{k}"] for k in NEAR) + cfg["loss"]["w_var"] * r["var/L1"]
         if r["step"] <= 2:
             assert r["loss/total"] == pytest.approx(near_only, rel=1e-5), r["step"]
         else:
@@ -160,3 +162,22 @@ def test_far_train_step_on_mps_at_spec_shapes_is_finite_with_no_cpu_fallback():
     assert all(result["finite"].values()), result
     assert {f"loss/k{k}" for k in ALL} <= set(result["finite"])
     assert result["fallbacks"] == [], result["fallbacks"]
+
+
+# ---------------------------------------------------------------- far stage on M2's episode loader
+
+
+def test_far_stage_reads_24_frame_windows_from_the_episode_loader(tmp_path):
+    # k_max = 20, so each window is C + 20 = 24 consecutive frames, ending inside the episode.
+    cfg = tiny_far_cfg("data.source=episodes", "data.split=dev", *SMALL_SPLITS, "train.steps=2")
+    build.build_split(cfg, "dev", simulate=Recorder())
+    horizons = train.check_config(cfg)
+    assert horizons == ALL
+    batch = next(train.make_batches(cfg, horizons))
+    c = cfg["model"]["context_frames"]
+    assert batch.shape == (2, c + 20, 3, 16, 16)
+    idx, _, _ = decode(batch)
+    assert (idx[:, 0] >= 0).all() and (idx[:, -1] <= cfg["sim"]["episode_frames"] - 1).all()
+    assert (idx[:, 1:] - idx[:, :-1] == 1).all()  # consecutive, in order
+    final = train.run(cfg, tmp_path, device=torch.device("cpu"))
+    assert {f"loss/k{k}" for k in ALL} <= set(final)

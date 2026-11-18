@@ -20,6 +20,10 @@ from jepa_world.models.jepa import (
     variance_guard,
 )
 
+# The guard's configured weight and reduction (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
+W_VAR = tiny_cfg()["loss"]["w_var"]
+VAR_REDUCE = tiny_cfg()["loss"]["var_reduce"]
+
 
 def _model(cfg=None) -> JEPA:
     torch.manual_seed(0)
@@ -319,7 +323,7 @@ def test_every_loss_term_is_present_and_finite():
     assert set(losses) == expected
     for name, v in losses.items():
         assert v.ndim == 0 and torch.isfinite(v), name
-    manual = sum(losses[f"loss/k{k}"] for k in NEAR) + losses["loss/var"]
+    manual = sum(losses[f"loss/k{k}"] for k in NEAR) + W_VAR * losses["loss/var"]
     torch.testing.assert_close(losses["loss/total"], manual)
 
 
@@ -416,7 +420,7 @@ def test_every_term_is_logged_with_far_heads():
     assert set(losses) == FAR_KEYS
     for name, v in losses.items():
         assert v.ndim == 0 and torch.isfinite(v), name
-    manual = sum(losses[f"loss/k{k}"] for k in ALL) + losses["loss/var"]
+    manual = sum(losses[f"loss/k{k}"] for k in ALL) + W_VAR * losses["loss/var"]
     torch.testing.assert_close(losses["loss/total"], manual)
     diagnostics = [f"{p}/k{k}" for k in FAR for p in ("sqerr", "logvar")]
     diagnostics += [f"relerr/k{k}" for k in ALL] + ["var/L1", "var/L2", "var/L3"]
@@ -450,9 +454,9 @@ def test_inactive_horizons_are_logged_but_left_out_of_the_total():
     model, losses = _far_losses(active=NEAR)
     assert {f"loss/k{k}" for k in FAR} <= set(losses)  # still logged
     out = model(random_frames(tiny_far_cfg()))
-    guard_l1 = variance_guard(out["context"]["L1"], 1.0, 1e-4)
+    guard_l1 = variance_guard(out["context"]["L1"], 1.0, 1e-4, reduce=VAR_REDUCE)
     torch.testing.assert_close(losses["loss/var"], guard_l1)  # guard covers active levels only
-    manual = sum(losses[f"loss/k{k}"] for k in NEAR) + losses["loss/var"]
+    manual = sum(losses[f"loss/k{k}"] for k in NEAR) + W_VAR * losses["loss/var"]
     torch.testing.assert_close(losses["loss/total"], manual)
 
 

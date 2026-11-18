@@ -1,7 +1,8 @@
 # Collapse guard: VICReg variance term, on by default
 
 - **Date:** 2026-11-17   **Decided by:** user   **SPEC ref:** §9.3, §5.1
-- **Status:** accepted
+- **Status:** accepted. The guard's reduction (now summed over channels) and weight (now 25) were
+  amended by [2026-11-17-far-collapse-guard-sum.md](2026-11-17-far-collapse-guard-sum.md) in M4.
 
 ## Question
 Should the VICReg-style variance term on the context embeddings be part of the default training

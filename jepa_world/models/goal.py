@@ -38,8 +38,9 @@ def displacement_targets(
             f"{context_frames} context frames need {need}"
         )
     t = context_frames - 1
-    idx = torch.tensor([t + k for k in horizons], device=ball_pos.device)
-    return (ball_pos[:, idx] - ball_pos[:, t : t + 1]).to(torch.float32)
+    # Basic slices, not an index tensor: no host -> device copy per call in the train loop.
+    future = torch.stack([ball_pos[:, t + k] for k in horizons], dim=1)
+    return (future - ball_pos[:, t : t + 1]).to(torch.float32)
 
 
 def goal_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

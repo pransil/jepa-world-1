@@ -1,6 +1,7 @@
 """Evaluation: baselines, metrics, probes, calibration. Baselines in M2, everything else in M6 (SPEC §7).
 
   uv run python -m jepa_world.eval --baselines --config configs/base.yaml --split test   (M2)
+      add --sim-params true mean for the simulator-aware baseline                      (M6)
   uv run python -m jepa_world.eval --run <run dir> --split test                          (M6)
 
 Headline numbers come from the held-out test terrain seeds only. Dev-set numbers are reported
@@ -124,6 +125,7 @@ def simulator_baselines(
             "shifted": int(np.count_nonzero(np.abs(r["shift"]).sum(axis=1))),
             "abs_shift_m": _quantiles(np.linalg.norm(r["shift"], axis=1)),
             "unmatched": int(r["unmatched"].sum()),
+            "clearance_miss_m": _quantiles(r["clearance_miss"]),
             "seconds": round(time.perf_counter() - t0, 1),
         }
     return extra, info
@@ -132,7 +134,7 @@ def simulator_baselines(
 def run_baselines(
     cfg: dict,
     split: str,
-    sim_params: Sequence[str] = baselines.DEFAULT_SIM_PARAMS,
+    sim_params: Sequence[str] = (),
     simulate: Callable = simulate_from_state,
 ) -> tuple[Path, dict]:
     """Score every position baseline on `split`, at every model.horizons k, over one shared window
@@ -196,8 +198,11 @@ def main(argv: list[str] | None = None) -> int:
         "--sim-params",
         nargs="*",
         choices=baselines.SIM_PARAMS,
-        default=list(baselines.DEFAULT_SIM_PARAMS),
-        help="simulator baselines' ball parameters (default: %(default)s; none: give no values)",
+        default=[],
+        help=(
+            "also run the simulator-aware baseline with these ball parameters (minutes of CPU "
+            f"each); the proposed set is {' '.join(baselines.PROPOSED_SIM_PARAMS)}"
+        ),
     )
     args = p.parse_args(argv)
 

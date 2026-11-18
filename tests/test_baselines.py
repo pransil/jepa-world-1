@@ -156,8 +156,7 @@ def test_eval_baselines_cli_writes_a_run_dir():
     overrides = [*SHORT, "model.horizons=[1, 2, 3, 4, 5, 10, 20]"]
     cfg = load_config(BASE, overrides)
     build.build_split(cfg, "test", simulate=Recorder())
-    # --sim-params with no values: the closed-form baselines only (the simulator has its own tests)
-    args = ["--baselines", "--config", str(BASE), "--split", "test", "--sim-params"]
+    args = ["--baselines", "--config", str(BASE), "--split", "test"]  # no simulator by default
     for o in overrides:
         args += ["--set", o]
     assert eval_cli.main(args) == 0
@@ -215,7 +214,7 @@ def test_sim_ball_modes(short_sim_cfg, real_episode):
     )
     with pytest.raises(ValueError, match="oracle"):
         baselines.sim_ball("oracle", true, short_sim_cfg)
-    assert set(baselines.DEFAULT_SIM_PARAMS) <= set(baselines.SIM_PARAMS)
+    assert set(baselines.PROPOSED_SIM_PARAMS) <= set(baselines.SIM_PARAMS)
 
 
 def test_match_clearance_is_exactly_zero_for_the_true_radius():
@@ -291,6 +290,9 @@ def test_a_diverged_rollout_raises_instead_of_scoring_nan(short_sim_cfg, real_ep
             short_sim_cfg, ep.terrain, ep.ball, ep.ball.radius,
             ep.ball_pos, ep.ball_vel, ep.ball_spin, np.array([4]), [1, 5], simulate=blown,
         )  # fmt: skip
+
+
+def test_evaluate_rejects_non_finite_extra_predictions():
     pos, vel = motion("uniform", n=1)
     starts = valid_starts(T, C, 5)
     bad = {1: np.full((len(starts), 2), np.nan), 5: np.zeros((len(starts), 2))}
@@ -335,6 +337,7 @@ def test_simulator_with_another_radius_starts_at_the_true_clearance_and_slip(
         assert roll.meta["from_state"]["start_gap"] == pytest.approx(true_gap, abs=1e-9)
         assert spin * mean.radius == pytest.approx(ep.ball_spin[t] * ep.ball.radius)
         np.testing.assert_array_equal(pos, ep.ball_pos[t] + info["shift"][i])
+        assert not info["unmatched"][i] and info["clearance_miss"][i] <= 1e-9
         for k in (1, 5):
             np.testing.assert_array_equal(preds[k][i], roll.ball_pos[k] - info["shift"][i])
     assert np.isfinite(preds[5]).all()
@@ -379,7 +382,7 @@ def test_simulator_rejects_starts_without_a_full_horizon(short_sim_cfg, real_epi
 def test_evaluate_scores_extra_predictions_like_the_closed_form_ones():
     pos, vel = motion("ballistic", n=3)
     starts = valid_starts(T, C, max(HORIZONS))
-    ep, t = (a.ravel() for a in np.meshgrid(np.arange(3), starts, indexing="ij"))
+    ep, t = baselines.window_index(3, starts)  # the documented order of `extra`
     copy = {k: baselines.predict("persistence", pos, vel, ep, t, k, DT) for k in HORIZONS}
     oov = np.zeros((3, T), bool)
     oov[2, 20:] = True
@@ -429,6 +432,8 @@ def test_run_baselines_feeds_the_simulator_each_episodes_own_terrain_ball_and_sp
     }  # fmt: skip
     assert sim["mean"]["windows"] == windows_ and sim["mean"]["unmatched"] >= 0
     assert sim["mean"]["shifted"] == windows_  # a radius other than the true one always shifts
+    assert sim["true"]["clearance_miss_m"]["max"] == 0.0
+    assert sim["mean"]["unmatched"] > 0 or sim["mean"]["clearance_miss_m"]["max"] <= 1e-9
     true_balls = {b.radius for _, b, _, _ in seen[:windows_]}
     assert len(true_balls) == out["episodes"]  # each episode's own ball
     assert {b.radius for _, b, _, _ in seen[windows_:]} == {mean_ball(cfg["sim"]).radius}
@@ -448,10 +453,10 @@ def test_cli_passes_sim_params_through(monkeypatch):
 
     monkeypatch.setattr(eval_cli, "run_baselines", fake_run)
     base = ["--baselines", "--config", str(BASE), "--split", "test"]
-    assert eval_cli.main(base) == 0
+    assert eval_cli.main(base) == 0  # the closed-form baselines only, as in M2
+    assert eval_cli.main([*base, "--sim-params", *baselines.PROPOSED_SIM_PARAMS]) == 0
     assert eval_cli.main([*base, "--sim-params", "true_radius"]) == 0
-    assert eval_cli.main([*base, "--sim-params"]) == 0
-    assert got == [list(baselines.DEFAULT_SIM_PARAMS), ["true_radius"], []]
+    assert got == [[], list(baselines.PROPOSED_SIM_PARAMS), ["true_radius"]]
     with pytest.raises(SystemExit):
         eval_cli.main([*base, "--sim-params", "oracle"])
 

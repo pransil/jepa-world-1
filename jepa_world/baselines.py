@@ -28,7 +28,7 @@ from jepa_world.sim.terrain import Terrain
 
 BASELINES = ("persistence", "const_velocity", "const_velocity_fd")
 SIM_PARAMS = ("true", "mean", "true_radius")
-DEFAULT_SIM_PARAMS = (
+PROPOSED_SIM_PARAMS = (
     "true",
     "mean",
 )  # proposed: docs/decisions/2026-11-17-simulator-baseline-params.md
@@ -169,7 +169,8 @@ def simulator_predict(
     (spin·r_true/r), and the predictions are the rollout minus the shift. With the true radius,
     all three are exact no-ops. Returns the predictions, and per start:
     - "shift" (2,);
-    - "unmatched" (bool);
+    - "unmatched" (bool), and "clearance_miss", |clearance − the true one| after the shift (0 to
+      tolerance unless unmatched);
     - "gap_true", the true ball's clearance at t;
     - "gap_as_given", this ball's clearance at the unshifted centre (negative means it would have
       started inside the terrain).
@@ -204,10 +205,12 @@ def simulator_predict(
             )
         for k in horizons:
             preds[k][i] = traj[k] - shift
+    gap_true = terrain.gap(pos[starts], true_radius)
     return preds, {
         "shift": shifts,
         "unmatched": unmatched,
-        "gap_true": terrain.gap(pos[starts], true_radius),
+        "clearance_miss": np.abs(terrain.gap(pos[starts] + shifts, ball.radius) - gap_true),
+        "gap_true": gap_true,
         "gap_as_given": terrain.gap(pos[starts], ball.radius),
     }
 

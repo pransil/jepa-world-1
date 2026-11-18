@@ -108,8 +108,12 @@ fi
 
 # Last, because it is the slow check (~0.3 s): any process of this user whose cwd is inside the
 # worktree, a Claude session or a background job alike. Skipped when already refusing.
+# caffeinate is exempt. Claude Code starts `caffeinate -i -t 300` in the session's cwd to keep the
+# Mac awake, so one is usually still inside a worktree just after ExitWorktree. It only holds a
+# power assertion and touches no files, and it exits within 5 minutes anyway.
 if [ -z "$PROBLEMS" ] && [ -d "$WT" ]; then
   while IFS=$'\t' read -r pid cmd cwd; do
+    [ "$cmd" = caffeinate ] && continue
     case "$cwd/" in "$WT"/*) problem "process $pid ($cmd) is running inside $NAME ($cwd)" ;; esac
   done < <(lane_process_cwds)
 fi

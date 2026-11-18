@@ -16,15 +16,17 @@ lane_cwd_of() {
   printf '%s\n' "$cwd"
 }
 
-# Every process of this user, one "pid<TAB>command<TAB>cwd" line each (command is "?" on Linux
-# without lsof). One lsof call takes about 0.3 s on macOS, so callers run it last.
+# Every process this user can see, one "pid<TAB>command<TAB>cwd" line each. Linux reads /proc
+# (another user's cwd is unreadable, so it is left out), with names from ps. macOS has no /proc
+# and uses one lsof call, which takes about 0.3 s, so callers run this last.
 lane_process_cwds() {
-  if command -v lsof >/dev/null 2>&1; then
+  if [ -d /proc/self ]; then
+    awk -F'\t' 'NR == FNR { name[$1] = $2; next } $2 != "" { print $1 "\t" (($1 in name) ? name[$1] : "?") "\t" $2 }' \
+      <(ps -eo pid=,comm= | awk '{ pid = $1; sub(/^ *[0-9]+ +/, ""); print pid "\t" $0 }') \
+      <(ls -l /proc/[0-9]*/cwd 2>/dev/null | awk -F' -> ' '{ n = split($1, a, "/"); print a[n - 1] "\t" $2 }')
+  else
     lsof -a -u "$(id -u)" -d cwd -Fpcn 2>/dev/null |
       awk '/^p/ { p = substr($0, 2) } /^c/ { c = substr($0, 2) } /^n/ { print p "\t" c "\t" substr($0, 2) }'
-  else
-    ls -l /proc/[0-9]*/cwd 2>/dev/null |
-      awk -F' -> ' '{ n = split($1, a, "/"); print a[n - 1] "\t?\t" $2 }'
   fi
 }
 

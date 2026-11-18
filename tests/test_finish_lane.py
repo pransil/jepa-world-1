@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -118,9 +119,9 @@ class Lanes:
 
 
 @contextmanager
-def process_in(cwd: Path):
+def process_in(cwd: Path, argv: list[str] | None = None):
     """A process of this user whose working directory is `cwd`, as a session or a job would be."""
-    proc = subprocess.Popen(["sleep", "30"], cwd=cwd)
+    proc = subprocess.Popen(argv or ["sleep", "30"], cwd=cwd)
     try:
         yield proc
     finally:
@@ -131,6 +132,19 @@ def process_in(cwd: Path):
 @pytest.fixture(scope="module")
 def lanes(tmp_path_factory):
     return Lanes(tmp_path_factory.mktemp("lanes").resolve())
+
+
+def caffeinate_argv(tmp: Path) -> list[str]:
+    """A process named caffeinate. Claude Code starts `caffeinate -i -t 300` to keep the Mac awake,
+    in the session's cwd at the time, so one is often still inside a worktree just after
+    ExitWorktree. macOS has the real one (and SIGKILLs copies of Apple binaries). Linux has none,
+    so there it is a copy of sleep under that name."""
+    if real := shutil.which("caffeinate"):
+        return [real, "-i", "-t", "30"]
+    fake = tmp / "caffeinate"
+    if not fake.exists():
+        shutil.copy(shutil.which("sleep"), fake)
+    return [str(fake), "30"]
 
 
 def output(r: subprocess.CompletedProcess) -> str:
@@ -173,11 +187,14 @@ def test_removes_a_merged_lane_once_no_process_runs_inside(lanes):
     (wt / "pkg" / "__pycache__" / "x.cpython-312.pyc").write_bytes(b"")
     (wt / ".claude").mkdir()
     (wt / ".claude" / "settings.local.json").write_text("{}")
-    with process_in(lanes.main):  # a session in the main clone is not inside the lane
+    # A session in the main clone is not inside the lane, and caffeinate only holds a power
+    # assertion, so neither blocks it. Any other process inside does.
+    with process_in(lanes.main), process_in(wt, caffeinate_argv(lanes.main.parent)) as caff:
         with process_in(wt / "pkg") as job:
             r = lanes.finish("wt-done")
             assert r.returncode == 1, output(r)
             assert f"process {job.pid} " in output(r)
+            assert f"process {caff.pid} " not in output(r)
             assert lanes.exists("wt-done") == (True, True)
         r = lanes.finish("wt-done")
     assert r.returncode == 0, output(r)

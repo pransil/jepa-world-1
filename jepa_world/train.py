@@ -2,7 +2,7 @@
 
 Contract every version of this script keeps (the /experiment skill relies on it):
   uv run python -m jepa_world.train --config configs/<x>.yaml [--set key=value ...] [--name NAME]
-  - runs under utils.locks.gpu_lock() on MPS
+  - runs under utils.locks.gpu_lock()
   - writes to utils.paths.new_run_dir(): config.yaml, meta.json (utils.repro.run_metadata),
     metrics.jsonl (every loss term, every step), checkpoints/, tensorboard/
 """
@@ -13,6 +13,7 @@ from __future__ import annotations
 # PYTORCH_ENABLE_MPS_FALLBACK) before this module, so before torch.
 import argparse
 import json
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -30,29 +31,50 @@ from jepa_world.utils.repro import run_metadata, seed_everything
 LATER_STAGES = {"far": "M4", "goal": "M5", "pixel": "M5"}
 
 
-def check_config(cfg: dict) -> list[int]:
-    """Fail before any run dir exists if the config asks for something not built yet.
-    Returns the horizons that get heads."""
+def model_horizons(cfg: dict) -> list[int]:
+    """The horizons that get heads under train.stages. M3 builds the near stage only."""
     later = [s for s in cfg["train"]["stages"] if s != "near"]
     if later:
         built_in = ", ".join(f"{s} in {LATER_STAGES.get(s, '?')}" for s in later)
         raise NotImplementedError(
             f"train.stages {later} are not built yet ({built_in}); use [near]"
         )
+    far = set(cfg["model"]["far_horizons"])
+    horizons = [k for k in cfg["model"]["horizons"] if k not in far]
+    if not horizons:
+        raise ValueError(
+            f"model.horizons {cfg['model']['horizons']} has no near horizon "
+            f"(far_horizons {sorted(far)}); the near stage needs at least one"
+        )
+    return horizons
+
+
+def _require_built_source(cfg: dict) -> None:
     source = cfg["data"]["source"]
     if source != "synthetic":
         raise NotImplementedError(
             f"data.source={source!r}: the episode loader is built in M2 (jepa_world/data). "
             "Until then only 'synthetic' exists"
         )
+
+
+def check_config(cfg: dict) -> list[int]:
+    """Everything a training run needs, checked once, before any run dir exists.
+    Returns the horizons that get heads."""
+    horizons = model_horizons(cfg)
+    _require_built_source(cfg)
     if cfg["train"]["optimizer"] != "adamw":
         raise ValueError(f"train.optimizer={cfg['train']['optimizer']!r}: only 'adamw' exists")
-    far = set(cfg["model"]["far_horizons"])
-    return [k for k in cfg["model"]["horizons"] if k not in far]
+    if cfg["train"]["precision"] != "fp32":
+        raise NotImplementedError(
+            f"train.precision={cfg['train']['precision']!r}: only fp32 is implemented. A "
+            "lower-precision path must be built and tested explicitly first (SPEC §6)"
+        )
+    return horizons
 
 
 def build_model(cfg: dict) -> JEPA:
-    return JEPA(cfg, check_config(cfg))
+    return JEPA(cfg, model_horizons(cfg))
 
 
 def build_optimizer(model: JEPA, cfg: dict) -> torch.optim.Optimizer:
@@ -78,7 +100,7 @@ def train_step(
 
 def make_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
     """Endless CPU batches in the M3 layout (B, C + k_max, 3, S, S), seeded from cfg['seed']."""
-    check_config(cfg)
+    _require_built_source(cfg)
     g = torch.Generator().manual_seed(cfg["seed"])
     n = cfg["model"]["context_frames"] + max(horizons)
     while True:
@@ -115,7 +137,10 @@ def run(
     device: torch.device | None = None,
 ) -> dict[str, float]:
     """Train for cfg['train']['steps'] steps, logging every term of every step to
-    run_dir/metrics.jsonl and TensorBoard. Returns the last step's terms."""
+    run_dir/metrics.jsonl and TensorBoard. Returns the last step's terms.
+
+    If a step raises, the steps buffered since the last flush are still written before the
+    exception propagates, because those are the steps that explain the failure."""
     from torch.utils.tensorboard import SummaryWriter  # slow import, only needed here
 
     device = device or torch.device("cpu")
@@ -133,20 +158,36 @@ def run(
     writer = SummaryWriter(str(run_dir / "tensorboard"))
     try:
         with open(run_dir / "metrics.jsonl", "a") as f:
-            for step in range(1, steps + 1):
-                losses = train_step(model, opt, next(batches).to(device), cfg)
-                keys = keys or list(losses)
-                last = torch.stack([losses[k] for k in keys])
-                rows.append((step, last))
-                if step % log_every == 0 or step == steps:
-                    _flush(rows, keys, f, writer)
-                if step % ckpt_every == 0 or step == steps:
-                    save_checkpoint(
-                        run_dir / "checkpoints" / f"step_{step:07d}.pt", model, opt, step, cfg
-                    )
+            try:
+                for step in range(1, steps + 1):
+                    losses = train_step(model, opt, next(batches).to(device), cfg)
+                    keys = keys or list(losses)
+                    last = torch.stack([losses[k] for k in keys])
+                    rows.append((step, last))
+                    if step % log_every == 0 or step == steps:
+                        _flush(rows, keys, f, writer)
+                    if step % ckpt_every == 0 or step == steps:
+                        save_checkpoint(
+                            run_dir / "checkpoints" / f"step_{step:07d}.pt", model, opt, step, cfg
+                        )
+            finally:
+                if rows:  # only after an exception: the last step always flushes
+                    try:
+                        _flush(rows, keys, f, writer)
+                    except Exception as e:  # never mask the original error
+                        print(f"[train] lost {len(rows)} buffered steps: {e}", file=sys.stderr)
     finally:
         writer.close()
     return dict(zip(keys, last.cpu().tolist(), strict=True)) if last is not None else {}
+
+
+def start_run(cfg: dict, name: str, device: torch.device, **meta) -> Path:
+    """A fresh run dir holding config.yaml and meta.json (code, libraries, machine, device)."""
+    run_dir = new_run_dir(name)
+    (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
+    meta = {**run_metadata(), "device": str(device), **meta}
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    return run_dir
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,12 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config, args.set)
     check_config(cfg)  # before a run dir exists
     device = pick_device(cfg["train"]["device"])
-    run_dir = new_run_dir(args.name or Path(args.config).stem)
-    (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
-    meta = {**run_metadata(), "device": str(device)}
-    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    run_dir = start_run(cfg, args.name or Path(args.config).stem, device)
     print(f"run dir: {run_dir}  device: {device}", flush=True)
-    with gpu_lock(f"train {run_dir.name}", enabled=device.type == "mps"):
+    with gpu_lock(f"train {run_dir.name}"):
         final = run(cfg, run_dir, device=device)
     print(json.dumps({"final": final}, indent=2))
     return 0

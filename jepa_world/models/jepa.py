@@ -46,15 +46,20 @@ def latent_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return (pred - target.detach()).square().sum(dim=1).mean()
 
 
-def batch_std(z: torch.Tensor, eps: float = 0.0) -> torch.Tensor:
-    """Std over the batch of every (channel, position) feature. correction=0, so B=1 gives 0."""
-    return torch.sqrt(z.var(dim=0, correction=0) + eps)
+def batch_var(z: torch.Tensor) -> torch.Tensor:
+    """Variance over the batch of every (channel, position) feature: (B, C, H, W) -> (C, H, W).
+    correction=0, so B = 1 gives 0, not NaN."""
+    return z.var(dim=0, correction=0)
+
+
+def _guard_from_var(var: torch.Tensor, gamma: float, eps: float) -> torch.Tensor:
+    return F.relu(gamma - torch.sqrt(var + eps)).mean()
 
 
 def variance_guard(z: torch.Tensor, gamma: float, eps: float) -> torch.Tensor:
     """VICReg-style floor: mean over features of relu(gamma - batch std)
     (docs/decisions/2026-11-17-collapse-guard-on.md)."""
-    return F.relu(gamma - batch_std(z, eps)).mean()
+    return _guard_from_var(batch_var(z), gamma, eps)
 
 
 # ---------------------------------------------------------------- model
@@ -161,17 +166,15 @@ def compute_losses(
         lk = latent_loss(out["pred"][k], out["target"][k])
         losses[f"loss/k{k}"] = lk
         total = total + loss_cfg["w_k"] * lk
-    read = sorted(set(model.head_level.values()))
-    if loss_cfg["collapse_guard"]:
-        var = torch.stack(
-            [
-                variance_guard(out["context"][lv], loss_cfg["var_gamma"], loss_cfg["var_eps"])
-                for lv in read
-            ]
-        ).mean()
-        losses["loss/var"] = var
-        total = total + loss_cfg["w_var"] * var
+    guards, stds = [], {}
+    for lv in sorted(set(model.head_level.values())):  # each level a head reads
+        var = batch_var(out["context"][lv])  # one reduction, used for the guard and the log
+        stds[f"emb_std/{lv}"] = var.detach().sqrt().mean()
+        if loss_cfg["collapse_guard"]:
+            guards.append(_guard_from_var(var, loss_cfg["var_gamma"], loss_cfg["var_eps"]))
+    if guards:
+        losses["loss/var"] = torch.stack(guards).mean()
+        total = total + loss_cfg["w_var"] * losses["loss/var"]
     losses["loss/total"] = total
-    for lv in read:
-        losses[f"emb_std/{lv}"] = batch_std(out["context"][lv].detach()).mean()
+    losses.update(stds)
     return losses

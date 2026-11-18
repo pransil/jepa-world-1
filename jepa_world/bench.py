@@ -4,8 +4,9 @@
       [--hidden 16 32 64] [--kernel 3 1] [--iters 20] [--warmup 5] [--set key=value ...]
 
 For each (hidden width, kernel) variant: ms per forward+backward of the five near heads alone,
-ms per full train_step (encoder + target + heads + AdamW + EMA), parameter count, MPS driver memory,
-and any op that fell back to CPU. Runs under the GPU lock. Writes results.json to a new run dir.
+ms per full train_step (encoder + target + heads + AdamW + EMA), parameter counts, and MPS driver
+memory. Ops that fell back to CPU are recorded across the whole run. Runs under the GPU lock and
+writes results.json to a new run dir. Frames are always synthetic: timing needs shapes, not data.
 """
 
 from __future__ import annotations
@@ -19,22 +20,21 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 import torch
-import yaml
 
 from jepa_world.data.synthetic import moving_disc_batch
 from jepa_world.models.jepa import context_stack
-from jepa_world.train import build_model, build_optimizer, check_config, train_step
+from jepa_world.train import build_model, build_optimizer, model_horizons, start_run, train_step
 from jepa_world.utils.config import load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
-from jepa_world.utils.paths import new_run_dir
-from jepa_world.utils.repro import run_metadata, seed_everything
+from jepa_world.utils.repro import seed_everything
 
 
 @contextmanager
 def record_mps_fallbacks() -> Iterator[list[str]]:
-    """Collect the 'will fall back to run on the CPU' warnings raised inside the block.
-    torch warns once per op per process, so run this around the first use of each op."""
+    """Collect the 'will fall back to run on the CPU' warnings raised inside the block (the list
+    is filled when the block exits). torch emits each one ONCE PER PROCESS, so this only sees an
+    op's first use. Wrap everything from the first MPS op on, or use a fresh process."""
     got: list[str] = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -58,10 +58,45 @@ def _time_ms(fn: Callable[[], object], device: torch.device, iters: int, warmup:
     return 1000 * (time.perf_counter() - t0) / iters
 
 
-def _mps_mb() -> float | None:
-    if not torch.backends.mps.is_available():
-        return None
-    return torch.mps.driver_allocated_memory() / 2**20
+def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> dict:
+    """All of a variant's tensors are locals, so they are freed when this returns."""
+    seed_everything(cfg["seed"])
+    model = build_model(cfg).to(device)
+    opt = build_optimizer(model, cfg)
+    n = cfg["model"]["context_frames"] + max(model.horizons)
+    frames = moving_disc_batch(
+        cfg["train"]["batch_size"],
+        n,
+        cfg["sim"]["frame_size"],
+        generator=torch.Generator().manual_seed(cfg["seed"]),
+    ).to(device)
+    with torch.no_grad():
+        feat = model.context_encoder(context_stack(frames, model.context_frames), upto="L1")["L1"]
+
+    def heads_fwd_bwd():
+        model.heads.zero_grad(set_to_none=True)
+        sum(h(feat).square().mean() for h in model.heads.values()).backward()
+
+    def full_step():
+        train_step(model, opt, frames, cfg)
+
+    ms_heads = _time_ms(heads_fwd_bwd, device, iters, warmup)
+    ms_step = _time_ms(full_step, device, iters, warmup)
+    return {
+        "hidden": cfg["model"]["l1_head_hidden"],
+        "kernel": cfg["model"]["l1_head_kernel"],
+        "batch_size": cfg["train"]["batch_size"],
+        "device": str(device),
+        "ms_heads_fwd_bwd": ms_heads,
+        "ms_train_step": ms_step,
+        "head_params": sum(p.numel() for p in model.heads.parameters()),
+        "total_trainable_params": sum(p.numel() for p in model.trainable_parameters()),
+        # The cache is emptied between variants, and the caching allocator keeps this variant's
+        # freed blocks, so driver memory here approximates this variant's peak.
+        "mps_driver_mb": (
+            torch.mps.driver_allocated_memory() / 2**20 if device.type == "mps" else None
+        ),
+    }
 
 
 def bench_heads(
@@ -70,54 +105,18 @@ def bench_heads(
     variants: list[tuple[int, int]],
     iters: int = 20,
     warmup: int = 5,
-) -> list[dict]:
+) -> dict:
+    """{"rows": one dict per (hidden, kernel) variant, "fallbacks": ops that fell back to CPU}."""
+    model_horizons(cfg)  # fail early on configs M3 can't build
     rows = []
-    for hidden, kernel in variants:
-        c = copy.deepcopy(cfg)
-        c["model"]["l1_head_hidden"], c["model"]["l1_head_kernel"] = hidden, kernel
-        horizons = check_config(c)
-        seed_everything(c["seed"])
-        model = build_model(c).to(device)
-        opt = build_optimizer(model, c)
-        n = c["model"]["context_frames"] + max(horizons)
-        frames = moving_disc_batch(
-            c["train"]["batch_size"],
-            n,
-            c["sim"]["frame_size"],
-            generator=torch.Generator().manual_seed(c["seed"]),
-        ).to(device)
-        with torch.no_grad():
-            feat = model.context_encoder(context_stack(frames, model.context_frames), upto="L1")[
-                "L1"
-            ]
-
-        def heads_fwd_bwd(model=model, feat=feat):
-            model.heads.zero_grad(set_to_none=True)
-            sum(h(feat).square().mean() for h in model.heads.values()).backward()
-
-        with record_mps_fallbacks() as fallbacks:
-            ms_heads = _time_ms(heads_fwd_bwd, device, iters, warmup)
-            ms_step = _time_ms(
-                lambda m=model, o=opt, x=frames, c=c: train_step(m, o, x, c), device, iters, warmup
-            )
-        rows.append(
-            {
-                "hidden": hidden,
-                "kernel": kernel,
-                "batch_size": c["train"]["batch_size"],
-                "device": str(device),
-                "ms_heads_fwd_bwd": ms_heads,
-                "ms_train_step": ms_step,
-                "head_params": sum(p.numel() for p in model.heads.parameters()),
-                "total_trainable_params": sum(p.numel() for p in model.trainable_parameters()),
-                "mps_driver_mb": _mps_mb() if device.type == "mps" else None,
-                "fallbacks": sorted(set(fallbacks)),
-            }
-        )
-        del model, opt, frames, feat
-        if device.type == "mps":
-            torch.mps.empty_cache()
-    return rows
+    with record_mps_fallbacks() as fallbacks:
+        for hidden, kernel in variants:
+            c = copy.deepcopy(cfg)
+            c["model"]["l1_head_hidden"], c["model"]["l1_head_kernel"] = hidden, kernel
+            if device.type == "mps":
+                torch.mps.empty_cache()
+            rows.append(_bench_variant(c, device, iters, warmup))
+    return {"rows": rows, "fallbacks": sorted(set(fallbacks))}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -131,27 +130,24 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     cfg = load_config(args.config, args.set)
-    check_config(cfg)
+    model_horizons(cfg)  # before a run dir exists
     device = pick_device(cfg["train"]["device"])
     variants = [(h, k) for k in args.kernel for h in args.hidden]
-    run_dir = new_run_dir("bench-l1-heads")
-    (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
-    meta = {**run_metadata(), "device": str(device), "iters": args.iters, "warmup": args.warmup}
-    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-    with gpu_lock("bench-l1-heads", enabled=device.type == "mps"):
-        rows = bench_heads(cfg, device, variants, iters=args.iters, warmup=args.warmup)
-    (run_dir / "results.json").write_text(json.dumps(rows, indent=2))
+    run_dir = start_run(cfg, "bench-l1-heads", device, iters=args.iters, warmup=args.warmup)
+    with gpu_lock("bench-l1-heads"):  # always: a timing taken while another job runs is wrong
+        result = bench_heads(cfg, device, variants, iters=args.iters, warmup=args.warmup)
+    (run_dir / "results.json").write_text(json.dumps(result, indent=2))
     print(f"run dir: {run_dir}")
     print(
         f"{'hidden':>6} {'kernel':>6} {'heads ms':>9} {'step ms':>8} {'head params':>11} {'MB':>7}"
     )
-    for r in rows:
+    for r in result["rows"]:
         mb = f"{r['mps_driver_mb']:.0f}" if r["mps_driver_mb"] is not None else "-"
         print(
             f"{r['hidden']:>6} {r['kernel']:>6} {r['ms_heads_fwd_bwd']:>9.1f} "
             f"{r['ms_train_step']:>8.1f} {r['head_params']:>11} {mb:>7}"
-            + (f"  FALLBACKS: {r['fallbacks']}" if r["fallbacks"] else "")
         )
+    print(f"CPU fallbacks: {result['fallbacks'] or 'none'}")
     return 0
 
 

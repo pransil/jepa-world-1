@@ -55,11 +55,16 @@ class UNetEncoder(nn.Module):
         self.names: list[str] = []
         self.stages = nn.ModuleList()
         c_prev, s_prev = in_ch, input_size
-        for name, ch, size in levels:
-            ratio, rem = divmod(s_prev, size)
-            if size <= 0 or rem or ratio < 1 or ratio & (ratio - 1):
+        for i, (name, ch, size) in enumerate(levels):
+            ratio = s_prev // size if size > 0 else 0
+            if size <= 0 or s_prev % size or ratio & (ratio - 1):
                 raise ValueError(
                     f"level {name}: resolution {s_prev} -> {size} is not a power of 2 reduction"
+                )
+            if i == 0 and ratio != 1:
+                raise ValueError(
+                    f"level {name}: the first level must be at the input resolution "
+                    f"{input_size}, got {size} (downsampling the raw input is not supported)"
                 )
             steps = ratio.bit_length() - 1
             layers: list[nn.Module] = [

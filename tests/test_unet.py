@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 import torch
-from jepa_world.models.unet import UNetEncoder, encoder_from_cfg
 from tiny import spec_cfg, tiny_cfg
+
+from jepa_world.models.unet import UNetEncoder, encoder_from_cfg
 
 
 def test_levels_have_configured_shapes_tiny():
@@ -51,6 +52,8 @@ def test_l2_to_l3_takes_two_stride2_steps():
         ([("L1", 8, 16), ("L2", 16, 12)], 2, "power of 2"),  # resolution must shrink by 2^n
         ([("L1", 8, 16), ("L2", 16, 8), ("L3", 32, 4), ("L4", 32, 8)], 2, "power of 2"),  # grows
         ([("L1", 6, 16)], 4, "groups"),  # 4 GroupNorm groups do not divide 6 channels
+        ([("L1", 8, 16), ("L2", 16, 0)], 2, "power of 2"),  # size 0: no ZeroDivisionError
+        ([("L1", 8, 8)], 2, "input resolution"),  # L1 must not downsample the raw input
     ],
 )
 def test_bad_level_specs_raise(levels, groups, match):

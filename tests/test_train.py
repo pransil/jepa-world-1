@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import itertools
 import json
+import subprocess
+import sys
 
 import pytest
 import torch
-from tiny import CONFIGS, NEAR, TINY, random_frames, spec_cfg, tiny_cfg
+from tiny import CONFIGS, NEAR, TINY, random_frames, tiny_cfg
 
 from jepa_world import train
 from jepa_world.data.synthetic import moving_disc_batch
@@ -131,18 +133,72 @@ def test_cli_rejects_bad_config_before_creating_a_run_dir():
     assert not (paths.artifacts_root() / "runs").exists()
 
 
-@pytest.mark.mps
-def test_train_step_on_mps_at_spec_shapes_is_finite_with_no_cpu_fallback():
-    from jepa_world.bench import record_mps_fallbacks
+def test_precision_other_than_fp32_is_refused():
+    with pytest.raises(NotImplementedError, match="fp32"):
+        train.check_config(tiny_cfg("train.precision=bf16"))
 
-    cfg = spec_cfg("train.batch_size=2")
+
+def test_config_without_a_near_horizon_is_refused():
+    with pytest.raises(ValueError, match="near horizon"):
+        train.check_config(tiny_cfg("model.horizons=[10, 20]"))
+
+
+def test_model_builds_for_any_data_source():
+    # Data-source checks belong to the run entry points, not to model construction: M2's
+    # dev-set test must be able to build the model from an episodes config.
+    model = train.build_model(tiny_cfg("data.source=episodes"))
+    assert model.horizons == NEAR
+
+
+def test_a_crash_still_writes_the_buffered_steps(tmp_path):
+    cfg = tiny_cfg("train.steps=10", "train.log_every=50")
+    frames = random_frames(cfg)
+
+    def three_then_crash():
+        for _ in range(3):
+            yield frames
+        raise RuntimeError("simulated failure at step 4")
+
+    with pytest.raises(RuntimeError, match="step 4"):
+        train.run(cfg, tmp_path, batches=three_then_crash(), device=torch.device("cpu"))
+    lines = (tmp_path / "metrics.jsonl").read_text().splitlines()
+    assert [json.loads(s)["step"] for s in lines] == [1, 2, 3]
+
+
+MPS_STEP = """
+import json, sys
+sys.path.insert(0, "tests")
+import jepa_world  # sets PYTORCH_ENABLE_MPS_FALLBACK before torch
+import torch
+from tiny import spec_cfg
+from jepa_world import train
+from jepa_world.bench import record_mps_fallbacks
+from jepa_world.data.synthetic import moving_disc_batch
+
+cfg = spec_cfg("train.batch_size=2")
+with record_mps_fallbacks() as fallbacks:
     torch.manual_seed(0)
     dev = torch.device("mps")
     model = train.build_model(cfg).to(dev)
     opt = train.build_optimizer(model, cfg)
     frames = moving_disc_batch(2, 9, 64, generator=torch.Generator().manual_seed(0)).to(dev)
-    with record_mps_fallbacks() as fallbacks:
-        losses = train.train_step(model, opt, frames, cfg)
-        torch.mps.synchronize()
-    assert all(torch.isfinite(v).item() for v in losses.values())
-    assert fallbacks == [], fallbacks
+    losses = train.train_step(model, opt, frames, cfg)
+    torch.mps.synchronize()
+finite = {k: bool(torch.isfinite(v).item()) for k, v in losses.items()}
+print(json.dumps({"finite": finite, "fallbacks": fallbacks}))
+"""
+
+
+@pytest.mark.mps
+def test_train_step_on_mps_at_spec_shapes_is_finite_with_no_cpu_fallback():
+    # torch warns about each fallback op once per process, so an earlier MPS test in this
+    # process could hide one. A fresh interpreter sees every op's first use.
+    root = CONFIGS.parent
+    r = subprocess.run(
+        [sys.executable, "-c", MPS_STEP], cwd=root, capture_output=True, text=True, timeout=120
+    )
+    assert r.returncode == 0, r.stderr
+    result = json.loads(r.stdout.strip().splitlines()[-1])
+    assert all(result["finite"].values()), result
+    assert {f"loss/k{k}" for k in NEAR} <= set(result["finite"])
+    assert result["fallbacks"] == [], result["fallbacks"]

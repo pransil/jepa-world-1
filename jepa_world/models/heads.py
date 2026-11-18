@@ -2,11 +2,14 @@
 
 HorizonHead: near heads (k = 1..5, on L1), a deterministic mean.
 GaussianHead: far heads (k = 10 on L2, k = 20 on L3), a mean and a bounded log-variance.
+TopDownHead: M7 top-down branches (off by default). A far head's coarse level, upsampled, predicts
+the next-finer target at the same horizon (models/DESIGN.md, "Top-down prediction").
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from jepa_world.models.unet import ConvBlock, check_groups
@@ -78,3 +81,23 @@ class GaussianHead(HorizonHead):
         mean, raw = super().forward(feat, action).chunk(2, dim=1)
         b = self.logvar_bound
         return mean, b * torch.tanh(raw / b)
+
+
+class TopDownHead(nn.Module):
+    """coarse feat (B, in_ch, s, s) -> bilinear x`scale` -> GaussianHead -> (mean, logvar), each
+    (B, out_ch, s*scale, s*scale). It reads only the coarse level, so the finer target's error flows
+    back into it (docs/decisions/2026-11-17-top-down-targets.md). Bilinear, not nearest (blocky
+    tiles) or a transposed conv (checkerboard artefacts, more parameters)."""
+
+    def __init__(self, in_ch: int, out_ch: int, *, scale: int, **gaussian_kw):
+        super().__init__()
+        if int(scale) != scale or scale < 2:
+            raise ValueError(f"scale must be an integer >= 2, got {scale}")
+        self.scale = int(scale)
+        self.head = GaussianHead(in_ch, out_ch, **gaussian_kw)
+
+    def forward(
+        self, feat: torch.Tensor, action: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        up = F.interpolate(feat, scale_factor=self.scale, mode="bilinear", align_corners=False)
+        return self.head(up, action)

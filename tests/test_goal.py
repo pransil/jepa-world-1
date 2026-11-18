@@ -91,6 +91,21 @@ def test_variance_positive_and_finite_even_for_extreme_inputs(scale):
     assert (var > 0).all() and torch.isfinite(var).all()
 
 
+@pytest.mark.parametrize("raw", [1e3, -1e3])
+def test_logvar_bound_holds_when_the_raw_output_is_extreme(raw):
+    """GroupNorm keeps the hidden layer small, so extreme *inputs* never reach the bound. Push the
+    raw log-variance itself to +-1e3 (exp overflows to inf or underflows to 0 without the bound)."""
+    head = _head()
+    with torch.no_grad():
+        head.mlp[-1].bias[2:] = raw  # outputs [2:4] are the raw log-variance
+    mean, logvar = head(torch.rand(2, 8, 4, 4))
+    assert (logvar.abs() <= BOUND).all()
+    var = logvar.exp()
+    assert (var > 0).all() and torch.isfinite(var).all()
+    nll = goal_nll(mean, logvar, torch.zeros_like(mean))
+    assert torch.isfinite(nll).all()
+
+
 @pytest.mark.parametrize("scale", [1.0, 1e4])
 def test_nll_finite_for_extreme_inputs_and_targets(scale):
     head = _head()

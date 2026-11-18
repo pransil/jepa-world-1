@@ -96,13 +96,3 @@ Cross-lane questions that need a durable answer go here, newest first, and get d
 settled. For anything quick, message the other session directly (ListAgents / SendMessage). If the
 target is ambiguous, ask the user rather than guess.
 
-- **M2 → sim/ owner: start an episode from a mid-episode state, for M6** (2026-11-17). The
-  simulator-aware physics baseline (SPEC §7.1; deferred from M2 in
-  `docs/decisions/2026-11-17-m2-baseline-scope.md`) re-simulates known terrain from the true
-  state at t. It needs an entry point in `jepa_world/sim/` along the lines of
-  `simulate_from_state(sim_cfg, terrain, ball, pos, vel, spin, frames)`: today's `simulate` starts
-  only from `BallParams` (x0, drop, vx0). Ground truth only, no rendering. The orchestrator
-  session is tracking it. Settled when that entry point merges with a test that, started from
-  frame t of an existing episode, it tracks that episode's remaining positions to a stated
-  tolerance. Solver warm-start state isn't in the saved ground truth, so bitwise equality isn't
-  expected.

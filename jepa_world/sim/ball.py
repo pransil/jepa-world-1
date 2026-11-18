@@ -10,6 +10,17 @@ from jepa_world.sim.terrain import Terrain
 
 BALL_STREAM = 0xBA11  # SeedSequence stream id, distinct from the terrain's
 
+# BallParams field <- its range in cfg["ball"], in draw order. sample_ball draws in this order, so
+# reordering it changes every episode. mean_ball reads the same table.
+RANGES = (
+    ("radius", "radius"),
+    ("friction", "friction"),
+    ("restitution", "restitution"),
+    ("x0", "start_x"),
+    ("drop", "drop"),
+    ("vx0", "vx0"),
+)
+
 
 @dataclass(frozen=True)
 class BallParams:
@@ -30,13 +41,16 @@ def sample_ball(sim_cfg: dict, terrain_seed: int, ball_seed: int) -> BallParams:
     rng = np.random.default_rng(
         np.random.SeedSequence([BALL_STREAM, int(terrain_seed), int(ball_seed)])
     )
+    return BallParams(**{field: float(rng.uniform(*bc[key])) for field, key in RANGES})
+
+
+def mean_ball(sim_cfg: dict) -> BallParams:
+    """The mean of `sample_ball`'s distribution: every draw is uniform, so each field is its range's
+    midpoint. For re-simulating with unknown hidden parameters (`simulate_from_state` uses only
+    radius, friction and restitution)."""
+    bc = sim_cfg["ball"]
     return BallParams(
-        radius=float(rng.uniform(*bc["radius"])),
-        friction=float(rng.uniform(*bc["friction"])),
-        restitution=float(rng.uniform(*bc["restitution"])),
-        x0=float(rng.uniform(*bc["start_x"])),
-        drop=float(rng.uniform(*bc["drop"])),
-        vx0=float(rng.uniform(*bc["vx0"])),
+        **{field: (float(bc[key][0]) + float(bc[key][1])) / 2 for field, key in RANGES}
     )
 
 

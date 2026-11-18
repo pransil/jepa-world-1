@@ -91,7 +91,7 @@ def simulator_baselines(
     - the parameters used;
     - how many starts the true centre would have put inside the terrain (`inside_as_given`,
       against `inside_true` for the true ball);
-    - how many were shifted (`match_clearance`), and how many found no vertical match;
+    - how many were shifted (`match_clearance`), by how far, and how many didn't converge;
     - the time taken.
 
     One rollout per window, on the CPU. Repeated params run once."""
@@ -117,12 +117,12 @@ def simulator_baselines(
         extra[baselines.simulator_name(params)] = {k: np.concatenate(v) for k, v in per_k.items()}
         info[params] = {
             "params": _params_record(balls),
-            "windows": int(len(r["dz"])),
+            "windows": int(len(r["shift"])),
             "inside_true": int((r["gap_true"] < 0).sum()),
             "inside_as_given": int((r["gap_as_given"] < 0).sum()),
             "gap_as_given_m": _quantiles(r["gap_as_given"]),
-            "shifted": int(np.count_nonzero(r["dz"])),
-            "abs_dz_m": _quantiles(np.abs(r["dz"])),
+            "shifted": int(np.count_nonzero(np.abs(r["shift"]).sum(axis=1))),
+            "abs_shift_m": _quantiles(np.linalg.norm(r["shift"], axis=1)),
             "unmatched": int(r["unmatched"].sum()),
             "seconds": round(time.perf_counter() - t0, 1),
         }

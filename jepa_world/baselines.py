@@ -32,7 +32,8 @@ DEFAULT_SIM_PARAMS = (
     "true",
     "mean",
 )  # proposed: docs/decisions/2026-11-17-simulator-baseline-params.md
-MATCH_RANGE = 8.0  # match_clearance looks for a vertical shift up to this many |r - r_true|
+MATCH_TOL = 1e-9  # m: match_clearance's clearance tolerance
+MATCH_ITERS = 20  # match_clearance's steps along the surface normal (smooth terrain needs 1)
 
 
 def predict(
@@ -89,46 +90,62 @@ def sim_ball(params: str, true_ball: BallParams, sim_cfg: dict) -> BallParams:
     raise ValueError(f"unknown simulator params {params!r}; expected one of {SIM_PARAMS}")
 
 
-def match_clearance(
-    terrain: Terrain, pos, true_radius: float, radius: float, max_factor: float = MATCH_RANGE
-) -> tuple[np.ndarray, np.ndarray]:
-    """Vertical shifts dz (n,) that give a ball of `radius` centred at pos + (0, dz) the same
-    clearance (`Terrain.gap`) as the true ball at pos, and a mask of the windows where none was
-    found within |dz| <= max_factor·|Δr|, where dz falls back to Δr = radius − true_radius.
+def _outward_normal(terrain: Terrain, p: np.ndarray) -> np.ndarray:
+    """(n, 2) unit gradient of the signed distance to the terrain polyline at points p (n, 2): away
+    from the closest surface point, outward (up out of the terrain from inside it). The same
+    projection as `Terrain.gap`. A point exactly on the surface takes its segment's upward normal."""
+    a = np.stack([terrain.x[:-1], terrain.heights[:-1]], axis=1)  # (S, 2) segment starts
+    ab = np.stack([np.diff(terrain.x), np.diff(terrain.heights)], axis=1)  # (S, 2)
+    ap = p[:, None, :] - a[None]  # (n, S, 2)
+    s = np.clip((ap * ab).sum(-1) / (ab * ab).sum(-1), 0.0, 1.0)
+    v = ap - s[..., None] * ab  # closest point → p, per segment
+    d = np.linalg.norm(v, axis=-1)
+    j = d.argmin(axis=1)
+    rows = np.arange(len(p))
+    v, d = v[rows, j], d[rows, j]
+    sign = np.where(p[:, 1] >= terrain.height_at(p[:, 0]), 1.0, -1.0)
+    seg = ab[j]
+    up = np.stack([-seg[:, 1], seg[:, 0]], axis=1) / np.linalg.norm(seg, axis=1, keepdims=True)
+    on_surface = d < 1e-12
+    safe = np.where(on_surface, 1.0, d)[:, None]
+    return np.where(on_surface[:, None], up, sign[:, None] * v / safe)
 
-    dz is exactly 0 for the true radius. On flat ground it is Δr. Otherwise it comes from a
-    bisection: the signed distance is 1-Lipschitz, so |dz| >= |Δr|, and the bracket grows from Δr
-    by doubling, capped at exactly max_factor·Δr. Against a near-vertical face no vertical shift
-    helps, hence the fallback."""
-    if not max_factor >= 1.0:
-        raise ValueError(f"max_factor {max_factor} must be >= 1: |dz| is at least |Δr|")
+
+def match_clearance(
+    terrain: Terrain,
+    pos,
+    true_radius: float,
+    radius: float,
+    tol: float = MATCH_TOL,
+    max_iter: int = MATCH_ITERS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Shifts (n, 2) that give a ball of `radius` centred at pos + shift the same clearance
+    (`Terrain.gap`) as the true ball at pos, and a mask of the windows where that wasn't reached
+    within `tol` after `max_iter` steps. Those keep their best iterate.
+
+    Each step moves the centre along the outward surface normal by the clearance still missing,
+    p ← p + (target − gap(p))·n(p). On smooth terrain the first step is exact: Δr·n, with
+    Δr = radius − true_radius. Beside a vertical face it is horizontal. In a floor-and-riser
+    corner the second step clears the other face. The shift is exactly 0 for the true radius."""
     pos = np.asarray(pos, dtype=np.float64).reshape(-1, 2)
     n = len(pos)
-    dr = float(radius) - float(true_radius)
-    if dr == 0.0:
-        return np.zeros(n), np.zeros(n, dtype=bool)
+    if float(radius) == float(true_radius):
+        return np.zeros((n, 2)), np.zeros(n, dtype=bool)
     target = terrain.gap(pos, true_radius)
-    sign = np.sign(dr)
-    limit = float(max_factor) * dr
-
-    def past(dz: np.ndarray) -> np.ndarray:
-        """True once the shifted ball is as clear as the true one (up for dr > 0, down for < 0)."""
-        shifted = pos + np.stack([np.zeros(n), dz], axis=1)
-        return sign * (terrain.gap(shifted, radius) - target) >= 0
-
-    near, far = np.zeros(n), np.full(n, dr)  # past(near) is False: gap there is target − |dr|
-    while True:
-        grow = ~past(far) & (far != limit)
-        if not grow.any():
+    p = pos.copy()
+    miss = target - terrain.gap(p, radius)
+    best, best_miss = p.copy(), np.abs(miss)
+    for _ in range(int(max_iter)):
+        active = np.abs(miss) > tol
+        if not active.any():
             break
-        near = np.where(grow, far, near)
-        far = np.where(grow, sign * np.minimum(2.0 * np.abs(far), abs(limit)), far)
-    unmatched = ~past(far)
-    for _ in range(60):  # |bracket| <= 8·0.2 m, so 60 halvings is far below float resolution
-        mid = 0.5 * (near + far)
-        ok = past(mid)
-        near, far = np.where(ok, near, mid), np.where(ok, mid, far)
-    return np.where(unmatched, dr, far), unmatched
+        step = miss[:, None] * _outward_normal(terrain, p)
+        p = np.where(active[:, None], p + step, p)
+        miss = target - terrain.gap(p, radius)
+        better = np.abs(miss) < best_miss
+        best = np.where(better[:, None], p, best)
+        best_miss = np.where(better, np.abs(miss), best_miss)
+    return best - pos, best_miss > tol
 
 
 def simulator_predict(
@@ -148,11 +165,16 @@ def simulator_predict(
     start t. pos, vel: (T, 2), spin: (T,), cam_pos: (T, 2) or None. Only index t is read.
 
     With `ball.radius` other than `true_radius`, the start is mapped to that ball: the same
-    clearance (`match_clearance`, shift dz), the same surface speed (spin·r_true/r), and the
-    predictions are the rollout minus dz. With the true radius, all three are exact no-ops.
-    Returns the predictions, and per start: "dz", "unmatched" (bool), "gap_true" (the true ball's
-    clearance at t) and "gap_as_given" (this ball's at the unshifted centre; negative = it would
-    have started inside the terrain). Raises if a rollout returns a non-finite position."""
+    clearance (`match_clearance`, a shift along the surface normal), the same surface speed
+    (spin·r_true/r), and the predictions are the rollout minus the shift. With the true radius,
+    all three are exact no-ops. Returns the predictions, and per start:
+    - "shift" (2,);
+    - "unmatched" (bool);
+    - "gap_true", the true ball's clearance at t;
+    - "gap_as_given", this ball's clearance at the unshifted centre (negative means it would have
+      started inside the terrain).
+
+    Raises if a rollout returns a non-finite position."""
     pos = np.asarray(pos, dtype=np.float64)
     vel = np.asarray(vel, dtype=np.float64)
     spin = np.asarray(spin, dtype=np.float64).ravel()
@@ -165,11 +187,11 @@ def simulator_predict(
         raise ValueError(
             f"starts [{starts.min()}, {starts.max()}] with k_max={k_max} don't fit T={len(pos)}"
         )
-    dz, unmatched = match_clearance(terrain, pos[starts], true_radius, ball.radius)
+    shifts, unmatched = match_clearance(terrain, pos[starts], true_radius, ball.radius)
     spin_scale = float(true_radius) / float(ball.radius)
     preds = {k: np.empty((len(starts), 2)) for k in horizons}
     for i, t in enumerate(starts):
-        shift = np.array([0.0, dz[i]])
+        shift = shifts[i]
         roll = simulate(
             sim_cfg, terrain, ball, pos[t] + shift, vel[t], spin[t] * spin_scale, k_max + 1,
             cam_pos=None if cam_pos is None else np.asarray(cam_pos)[t],
@@ -177,13 +199,13 @@ def simulator_predict(
         traj = np.asarray(roll.ball_pos, dtype=np.float64)
         if not np.isfinite(traj[: k_max + 1]).all():
             raise FloatingPointError(
-                f"simulator rollout from t={t} (radius {ball.radius}, dz {dz[i]:.4g}, "
+                f"simulator rollout from t={t} (radius {ball.radius}, shift {shift.round(4)}, "
                 f"unmatched {bool(unmatched[i])}) produced a non-finite position"
             )
         for k in horizons:
             preds[k][i] = traj[k] - shift
     return preds, {
-        "dz": dz,
+        "shift": shifts,
         "unmatched": unmatched,
         "gap_true": terrain.gap(pos[starts], true_radius),
         "gap_as_given": terrain.gap(pos[starts], ball.radius),

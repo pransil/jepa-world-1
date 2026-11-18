@@ -220,45 +220,62 @@ def test_sim_ball_modes(short_sim_cfg, real_episode):
 
 def test_match_clearance_is_exactly_zero_for_the_true_radius():
     pos = np.array([[0.0, 0.15], [1.0, 0.149], [2.0, 3.0]])
-    dz, unmatched = baselines.match_clearance(flat(), pos, 0.15, 0.15)
-    assert (dz == 0.0).all() and not unmatched.any()
+    shift, unmatched = baselines.match_clearance(flat(), pos, 0.15, 0.15)
+    assert shift.shape == (3, 2) and (shift == 0.0).all() and not unmatched.any()
 
 
 @pytest.mark.parametrize("r_true, r", [(0.15, 0.25), (0.35, 0.25)])
-def test_match_clearance_on_flat_ground_is_the_radius_difference(r_true, r):
+def test_match_clearance_on_flat_ground_is_the_radius_difference_upward(r_true, r):
     pos = np.array([[0.0, r_true], [1.0, r_true - 0.01], [2.0, 2.0]])  # touching, pressed, flying
-    dz, unmatched = baselines.match_clearance(flat(), pos, r_true, r)
-    np.testing.assert_allclose(dz, r - r_true, atol=1e-12)
+    shift, unmatched = baselines.match_clearance(flat(), pos, r_true, r)
+    np.testing.assert_allclose(shift, [[0.0, r - r_true]] * 3, atol=1e-12)
     assert not unmatched.any()
 
 
 @pytest.mark.parametrize("r_true, r", [(0.15, 0.25), (0.35, 0.15)])
-def test_match_clearance_keeps_the_true_gap_on_a_slope(r_true, r):
+def test_match_clearance_on_a_slope_is_the_radius_difference_along_the_normal(r_true, r):
     x = np.linspace(-5.0, 5.0, 201)
     slope = Terrain(x=x, heights=0.6 * x)
     xs = np.array([-1.0, 0.0, 1.5])
     pos = np.stack(
         [xs, 0.6 * xs + r_true / np.cos(np.arctan(0.6)) + np.array([-0.01, 0.0, 0.3])], 1
     )
-    dz, unmatched = baselines.match_clearance(slope, pos, r_true, r)
-    shifted = pos + np.stack([np.zeros_like(dz), dz], 1)
-    np.testing.assert_allclose(slope.gap(shifted, r), slope.gap(pos, r_true), atol=1e-9)
+    shift, unmatched = baselines.match_clearance(slope, pos, r_true, r)
+    np.testing.assert_allclose(slope.gap(pos + shift, r), slope.gap(pos, r_true), atol=1e-9)
+    normal = np.array([-0.6, 1.0]) / np.hypot(0.6, 1.0)
+    np.testing.assert_allclose(shift, np.outer([r - r_true] * 3, normal), atol=1e-9)
     assert not unmatched.any()
 
 
-def test_match_clearance_searches_exactly_max_factor_radius_differences():
-    # On a slope s, a touching ball needs dz = Δr·sqrt(1 + s²). With s = 5.92 that is 6.0·Δr:
-    # beyond a range of 5·Δr, within one of 8·Δr.
-    x = np.linspace(-5.0, 5.0, 201)
-    s = np.sqrt(35.0)
-    steep = Terrain(x=x, heights=s * x)
-    pos = np.array([[0.2, s * 0.2 + 0.15 * np.sqrt(1 + s * s)]])  # touching with r_true = 0.15
-    dz8, un8 = baselines.match_clearance(steep, pos, 0.15, 0.25, max_factor=8.0)
-    assert not un8.any() and dz8[0] == pytest.approx(0.6, abs=1e-9)
-    dz5, un5 = baselines.match_clearance(steep, pos, 0.15, 0.25, max_factor=5.0)
-    assert un5.all() and dz5[0] == pytest.approx(0.1)
-    with pytest.raises(ValueError, match="max_factor"):
-        baselines.match_clearance(steep, pos, 0.15, 0.25, max_factor=0.5)
+STEP_X = np.linspace(-5.0, 5.0, 1001)  # 1 cm columns
+
+
+def test_match_clearance_beside_a_face_moves_away_from_it():
+    # A 3 m step at x = 0. The ball rests against its face, well above the floor: the vertical
+    # shift that used to be tried here can't change the clearance, the normal one can.
+    step = Terrain(x=STEP_X, heights=np.where(STEP_X < 0.0, 0.0, 3.0))
+    pos = np.array([[-0.16, 1.0]])
+    shift, unmatched = baselines.match_clearance(step, pos, 0.15, 0.25)
+    assert not unmatched.any()
+    np.testing.assert_allclose(step.gap(pos + shift, 0.25), step.gap(pos, 0.15), atol=1e-9)
+    assert shift[0, 0] == pytest.approx(-0.1, abs=1e-3) and abs(shift[0, 1]) < 1e-3
+
+
+def test_match_clearance_in_a_corner_clears_both_faces():
+    step = Terrain(x=STEP_X, heights=np.where(STEP_X < 0.0, 0.0, 3.0))
+    pos = np.array([[-0.16, 0.15]])  # resting on the floor, against the riser
+    shift, unmatched = baselines.match_clearance(step, pos, 0.15, 0.25)
+    assert not unmatched.any()
+    np.testing.assert_allclose(step.gap(pos + shift, 0.25), step.gap(pos, 0.15), atol=1e-9)
+    assert shift[0, 0] < -0.05 and shift[0, 1] > 0.05  # up off the floor and away from the riser
+
+
+def test_match_clearance_reports_a_ball_that_cannot_fit():
+    # A 40 cm slot: a 0.15 m ball rests on its floor, a 0.25 m one can't sit anywhere in it at
+    # that clearance. The iteration can't converge, and the window is flagged.
+    slot = Terrain(x=STEP_X, heights=np.where(np.abs(STEP_X) < 0.2, 0.0, 3.0))
+    shift, unmatched = baselines.match_clearance(slot, np.array([[0.0, 0.15]]), 0.15, 0.25)
+    assert unmatched.tolist() == [True] and np.isfinite(shift).all()
 
 
 def test_a_diverged_rollout_raises_instead_of_scoring_nan(short_sim_cfg, real_episode):
@@ -281,16 +298,6 @@ def test_a_diverged_rollout_raises_instead_of_scoring_nan(short_sim_cfg, real_ep
         baselines.evaluate(pos, vel, DT, starts, [1, 5], C, extra={"bad": bad})
 
 
-def test_match_clearance_falls_back_beside_a_wall():
-    # A 3 m step at x = 0. The ball rests against its face, well above the floor, so no vertical
-    # shift short of climbing over the step changes its clearance.
-    x = np.linspace(-5.0, 5.0, 1001)
-    step = Terrain(x=x, heights=np.where(x < 0.0, 0.0, 3.0))
-    dz, unmatched = baselines.match_clearance(step, np.array([[-0.16, 1.0]]), 0.15, 0.25)
-    assert unmatched.tolist() == [True]
-    np.testing.assert_allclose(dz, [0.1])
-
-
 def test_simulator_with_true_params_reproduces_the_episode(short_sim_cfg, real_episode):
     ep = real_episode
     assert (ep.terrain.gap(ep.ball_pos[SIM_STARTS], ep.ball.radius) < 0).any(), "no contact start"
@@ -298,7 +305,7 @@ def test_simulator_with_true_params_reproduces_the_episode(short_sim_cfg, real_e
         short_sim_cfg, ep.terrain, ep.ball, ep.ball.radius,
         ep.ball_pos, ep.ball_vel, ep.ball_spin, SIM_STARTS, HORIZONS, cam_pos=ep.cam_pos,
     )  # fmt: skip
-    assert set(preds) == set(HORIZONS) and (info["dz"] == 0).all()
+    assert set(preds) == set(HORIZONS) and (info["shift"] == 0).all()
     e = np.concatenate(
         [np.linalg.norm(preds[k] - ep.ball_pos[SIM_STARTS + k], axis=-1) for k in HORIZONS]
     )
@@ -327,9 +334,9 @@ def test_simulator_with_another_radius_starts_at_the_true_clearance_and_slip(
         assert ep.terrain.gap(pos, mean.radius) == pytest.approx(true_gap, abs=1e-9)
         assert roll.meta["from_state"]["start_gap"] == pytest.approx(true_gap, abs=1e-9)
         assert spin * mean.radius == pytest.approx(ep.ball_spin[t] * ep.ball.radius)
-        assert pos[0] == ep.ball_pos[t, 0] and pos[1] == ep.ball_pos[t, 1] + info["dz"][i]
+        np.testing.assert_array_equal(pos, ep.ball_pos[t] + info["shift"][i])
         for k in (1, 5):
-            np.testing.assert_array_equal(preds[k][i], roll.ball_pos[k] - [0.0, info["dz"][i]])
+            np.testing.assert_array_equal(preds[k][i], roll.ball_pos[k] - info["shift"][i])
     assert np.isfinite(preds[5]).all()
 
 

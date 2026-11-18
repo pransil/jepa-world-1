@@ -20,10 +20,11 @@ terrains, and below constant velocity's at k ≥ 5. It does not reach the simula
 **Baselines, on the same test windows** (ratio to persistence, at k = 1 / 5 / 20), from run
 `20261118T065246Z-worktree-wt-sim-baseline-baselines-test-590f46`:
 - constant velocity: 0.17 / 0.57 / 1.21;
-- simulator with mean ball parameters (the proposed headline physics bar,
+- simulator with mean ball parameters, **the headline physics bar** (accepted by the user on
+  2026-11-18;
   [docs/decisions/2026-11-17-simulator-baseline-params.md](../docs/decisions/2026-11-17-simulator-baseline-params.md),
-  status: proposed): 0.014 / 0.055 / 0.080;
-- simulator with true parameters (the oracle ceiling): 0.000.
+  whose status m6's docs PR flips): 0.014 / 0.055 / 0.080;
+- simulator with true parameters, **the oracle ceiling** (same decision): 0.000.
 
 **Also reported:**
 - calibration: the fraction of truths inside the 50% and 90% intervals;
@@ -36,11 +37,12 @@ terrains, and below constant velocity's at k ≥ 5. It does not reach the simula
 **Budget:** 2 seeds × 24000 steps, B = 32, MPS under the GPU lock, sized to about 75–90 min per
 seed at the measured step time (below).
 
-**Placeholders this run inherits** (proposed, not decided by the user):
+**Settings this run uses, accepted by the user on 2026-11-18** (relayed by the orchestrator; m6's
+docs PR flips both decision files from proposed):
 - `stage_start` goal 4000 and pixel 6000, `goal_hidden` 128, `pix_widths` [64, 32], and
   `loss/goal` = the sum over 7 horizons
   ([docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md](../docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md));
-- the simulator-bar choice.
+- the physics bar: the simulator with mean parameters, with true parameters as the oracle (above).
 
 ## Step cost (MPS, B = 32, synthetic batches, `python -m jepa_world.bench`, load average 70–85)
 

@@ -1,6 +1,6 @@
 # Headline run: the full model (near, far, goal, pixel) on base.yaml's defaults, train split.
-# Stage starts are base.yaml's (far 2000, goal 4000, pixel 6000: goal/pixel PROPOSED in
-# docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md). Only the length is set here:
+# Stage starts are base.yaml's (far 2000, goal 4000, pixel 6000: goal/pixel accepted by the user
+# 2026-11-18, docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md). Only the length is set here:
 # 24000 steps, so the full model trains for 18000 steps after pixel joins.
 # Seeds: 0 (this file) and 1 (--set seed=1). experiments/2026-11-17-headline-full-model.md
 base: base.yaml

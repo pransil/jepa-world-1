@@ -4,6 +4,7 @@ L1 8ch @ 16, L2 16ch @ 8 (2x down), L3 32ch @ 2 (4x down), like SPEC's 64 -> 32 
 not in conftest.py, so other lanes editing conftest can't collide with it.
 
 tiny_cfg() is near-only (the M3 shape). tiny_far_cfg() adds the far stage, active from step 0.
+tiny_aux_cfg() is near + goal + pixel (M5), every stage active from step 0.
 """
 
 from __future__ import annotations
@@ -36,6 +37,13 @@ TINY = [
     "data.source=synthetic",
 ]
 FAR_STAGE = ["train.stages=[near, far]"]
+AUX = [
+    "train.stages=[near, goal, pixel]",
+    "train.stage_start={near: 0, far: 0, goal: 0, pixel: 0}",
+    "model.goal_horizons=[1, 3, 5]",
+    "model.goal_hidden=4",
+    "model.pix_widths=[4, 4]",
+]
 
 NEAR = [1, 2, 3, 4, 5]
 FAR = [10, 20]
@@ -52,13 +60,21 @@ def tiny_far_cfg(*overrides: str) -> dict:
     return load_config(BASE, [*TINY, *FAR_STAGE, *overrides])
 
 
+def tiny_aux_cfg(*overrides: str) -> dict:
+    return load_config(BASE, [*TINY, *AUX, *overrides])
+
+
 def spec_cfg(*overrides: str) -> dict:
     """SPEC §4.2 shapes (64x64, 64/128/256 channels), near stage only unless overridden."""
     return load_config(BASE, ["train.stages=[near]", "data.source=synthetic", *overrides])
 
 
 def k_max(cfg: dict) -> int:
-    return max(FAR) if "far" in cfg["train"]["stages"] else max(NEAR)
+    stages = cfg["train"]["stages"]
+    ks = NEAR + (FAR if "far" in stages else [])
+    if "goal" in stages:
+        ks += list(cfg["model"]["goal_horizons"])
+    return max(ks)
 
 
 def random_frames(cfg: dict, batch: int = 2, seed: int = 0) -> torch.Tensor:
@@ -67,3 +83,10 @@ def random_frames(cfg: dict, batch: int = 2, seed: int = 0) -> torch.Tensor:
     c = cfg["model"]["context_frames"]
     s = cfg["sim"]["frame_size"]
     return torch.rand(batch, c + k_max(cfg), 3, s, s, generator=g)
+
+
+def random_batch(cfg: dict, batch: int = 2, seed: int = 0) -> dict[str, torch.Tensor]:
+    """random_frames plus a random ball_pos (B, C + k_max, 2) on the same time axis (with_gt)."""
+    frames = random_frames(cfg, batch, seed)
+    g = torch.Generator().manual_seed(seed + 1)
+    return {"frames": frames, "ball_pos": torch.randn(batch, frames.shape[1], 2, generator=g)}

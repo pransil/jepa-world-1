@@ -253,3 +253,18 @@ def test_forward_backward_on_mps():
     nll.sum().backward()
     assert torch.isfinite(nll).all().item()
     assert l3.grad is not None and l2.grad is not None
+
+
+def test_goal_nll_and_the_far_head_nll_share_one_formula():
+    """One NLL in the repo (models/losses.py): for K = 1 the goal NLL (sum over x, z; mean over B)
+    equals the far heads' NLL on the same numbers laid out as (B, 2 channels, 1, 1)."""
+    from jepa_world.models import losses
+    from jepa_world.models.jepa import gaussian_nll
+
+    m, lv, t = torch.randn(4, 1, 2), torch.randn(4, 1, 2), torch.randn(4, 1, 2)
+    as_map = [x.reshape(4, 2, 1, 1) for x in (m, lv, t)]
+    torch.testing.assert_close(goal_nll(m, lv, t)[0], gaussian_nll(*as_map))
+    err2 = (t - m).square()
+    torch.testing.assert_close(
+        goal_nll(m, lv, t), losses.gaussian_nll_terms(err2, lv).sum(-1).mean(0)
+    )

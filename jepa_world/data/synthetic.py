@@ -25,9 +25,19 @@ def _fold(p: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> torch.Tensor:
 
 
 def moving_disc_batch(
-    batch: int, frames: int, size: int, *, generator: torch.Generator | None = None
-) -> torch.Tensor:
-    """(batch, frames, 3, size, size) float32 in [0, 1]. Deterministic given `generator` (CPU)."""
+    batch: int,
+    frames: int,
+    size: int,
+    *,
+    generator: torch.Generator | None = None,
+    with_gt: bool = False,
+) -> torch.Tensor | dict[str, torch.Tensor]:
+    """(batch, frames, 3, size, size) float32 in [0, 1]. Deterministic given `generator` (CPU).
+
+    with_gt=True returns {"frames": the same clips, "ball_pos": (batch, frames, 2) float32}: the
+    disc centre in FRAME units, x = u / size and z = 1 - v / size (z up), not world metres. Enough
+    for goal-stage smoke runs; the episode loader carries the real metres. Same generator, same
+    frames either way."""
 
     def u(*shape: int, lo: float = 0.0, hi: float = 1.0) -> torch.Tensor:
         return lo + (hi - lo) * torch.rand(*shape, generator=generator)
@@ -59,4 +69,7 @@ def moving_disc_batch(
     sky, gnd, ball = (torch.tensor(c).view(1, 1, 3, 1, 1) for c in (SKY, GROUND, BALL))
     background = sky + (gnd - sky) * ground[:, None, None]  # (B, 1, 3, S, S)
     img = background + (ball - background) * disc[:, :, None]
-    return img.clamp_(0.0, 1.0).contiguous()
+    img = img.clamp_(0.0, 1.0).contiguous()
+    if not with_gt:
+        return img
+    return {"frames": img, "ball_pos": torch.stack([x / s, 1.0 - y / s], dim=-1)}

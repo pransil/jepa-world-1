@@ -1,5 +1,8 @@
 # models/: JEPA core (M3 near heads, M4 far heads)
 
+The goal head, the pixel decoder and `WorldModel` (M5) have their own note:
+[DESIGN-aux.md](DESIGN-aux.md).
+
 ## Purpose / non-goals
 
 The JEPA loop (SPEC §4.3–4.5, §5.1): a U-Net context encoder, an EMA target encoder, one
@@ -10,9 +13,12 @@ predictor head per horizon, and the latent loss with a variance guard.
 
 All of it is trained by `jepa_world/train.py`, with the §5.5 stage schedule.
 
+The U-Net decoder path lives in the pixel decoder (`pixel.py`, M5). `train.py` builds
+`world.WorldModel`, a `JEPA` subclass that adds the goal head and pixel decoder for the `goal` /
+`pixel` stages. This file's units are unchanged by it, apart from two generic hooks:
+`extra_levels` and `grad_levels` (DESIGN-aux.md).
+
 Not here yet:
-- the U-Net decoder path, which exists only for the pixel decoder (M5);
-- the goal head and pixel decoder (M5);
 - top-down prediction (SPEC §9.2);
 - checkpoint resume.
 

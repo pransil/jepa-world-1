@@ -32,8 +32,9 @@ A, displacement in world metres. It is observable, and it makes the persistence 
   (B, K, 2) target from a per-frame `ball_pos` aligned with `frames`. The head itself is
   frame-agnostic: it outputs a 2-D Gaussian.
 - M2 must carry `ball_pos: (B, C + k_max, 2)`, world metres, on the batch's frame axis (index
-  C−1 = t). This was sent to the orchestrator on 2026-11-17. M2 stores it as float64, and
-  `displacement_targets` subtracts at that precision and returns float32.
+  C−1 = t). This was sent to the orchestrator on 2026-11-17. M2's batches carry it as float32
+  (PR #13; rounding < 2e-6 m). `displacement_targets` subtracts at the input's precision and
+  returns float32.
 - SPEC.md is not edited. This file records how §4.6 is read.
 - M6: position error for horizon k is |Δ̂ − Δ|, and persistence error is |Δ|.
 - Revisit if the goal head becomes a planning target that needs absolute positions (then predict

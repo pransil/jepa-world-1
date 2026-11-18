@@ -1,27 +1,20 @@
 # models/: auxiliary heads (M5): goal head and pixel decoder
 
-This is a separate note from `DESIGN.md`, which covers the JEPA core, so the two lanes didn't
-collide. The wiring PR links it from there.
+This note is the companion to [`DESIGN.md`](DESIGN.md), which covers the JEPA core.
 
 ## Purpose / non-goals
 
-SPEC §4.6, §4.7, §5.2 and §5.3, as **standalone modules**:
+SPEC §4.6, §4.7 and §5.2–§5.5:
 - `GoalHead`: pooled encoder levels → a diagonal 2-D Gaussian over the ball's displacement, for
   each horizon;
-- `PixelDecoder`: the U-Net decoder path → the RGB frame at t+1.
+- `PixelDecoder`: the U-Net decoder path → the RGB frame at t+1;
+- `WorldModel` (`world.py`): the JEPA core plus these two heads, built for the `goal` / `pixel`
+  stages of `train.stages`;
+- `compute_world_losses`: the JEPA terms plus the goal and pixel terms.
 
-Both take every size as a constructor argument. Neither reads a config.
-
-The following are not here yet; they belong to the wiring PR, after M2 and M4 merge:
-- calling these modules from `JEPA` / `compute_losses`;
-- the `loss.w_goal`, `loss.w_pix` and `model.goal_*` / `model.pix_*` keys in `base.yaml`;
-- the `goal` and `pixel` stages of §5.5;
-- SPEC M5's **"pixel term does not dominate the logged total"** test, which needs the train loop.
+`goal.py` and `pixel.py` take every size as a constructor argument. `world.py` reads the config.
 
 Out of scope for v1: an action input for the goal head, and full covariance.
-
-Also out of scope: the `model.unet_skips` config key. The `PixelDecoder(skips=...)` switch is
-here, and the key goes into `base.yaml` in the wiring PR.
 
 ## Data flow and shapes (SPEC sizes; the tests use tiny ones)
 
@@ -32,13 +25,31 @@ here, and the key goes into `base.yaml` in the wiring PR.
 | `goal_nll(mean, logvar, target)` | (B, K, 2) ×3 | (K,): NLL per horizon |
 | `PixelDecoder(levels, widths, …, skips=True)` | [L1 (B,64,64,64), L2 (B,128,32,32), L3 (B,256,8,8)] | (B, 3, 64, 64) in [0, 1] |
 | `pixel_l1(pred, target)` | (B,3,S,S) ×2; target = `frames[:, C]` | scalar |
+| `WorldModel.forward(frames, action, active, aux_active)` | frames (B, C+k_max, 3, S, S) | JEPA's dict + `"goal"`: (μ, logvar) + `"pixel"`: (B,3,S,S) |
+| `compute_world_losses(model, batch, loss_cfg, …)` | frames tensor, or `{"frames", "ball_pos" (B, C+k_max, 2)}` | every term (below), 0-d each |
 
 ```
 L3 ─ avgpool ─┐
 L2 ─ avgpool ─┴ cat ─ ×K, cat k_embed[j] ─ Linear─GN─SiLU ─ Linear─GN─SiLU ─ Linear(4) ─► μ (2), logvar = b·tanh(raw/b) (2)
 
 L3 ─ up ─ cat L2 ─ ConvBlock×2 ─ up ─ cat L1 ─ ConvBlock×2 ─ 1×1 conv ─ sigmoid ─► frame t+1
+
+batch ─┬─ frames ─► WorldModel ─► JEPA.forward (context L1..L3, heads, targets) ─┬─► JEPA terms (losses_from_output)
+       │                          ├─ goal head  (context L3 [, L2]) ─► μ, logvar ─┼─► loss/goal/k, goalerr/k, goalratio/k, loss/goal
+       │                          └─ pixel dec. (context L1, L2, L3) ─► frame ────┼─► loss/pix  vs frames[:, C] (t+1)
+       └─ ball_pos (a label, never a model input) ─► displacement_targets ───────┘
+loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/pix [pixel stage started]
 ```
+
+### Logged terms (every step, for every BUILT aux head)
+
+| Key | Meaning |
+|---|---|
+| `loss/goal/k<k>` | goal NLL of the displacement at horizon k (world m) |
+| `goalerr/k<k>` | mean ‖μ − Δ‖ in metres (detached) |
+| `goalratio/k<k>` | goalerr / mean ‖Δ‖: error relative to persistence, which predicts Δ = 0; < 1 beats it (SPEC §7.2, §11) |
+| `loss/goal` | Σ_k `loss/goal/k<k>`, the term weighted by `loss.w_goal` |
+| `loss/pix` | mean \|frame − frame t+1\|, the term weighted by `loss.w_pix` |
 
 ## Key decisions
 
@@ -59,10 +70,11 @@ L3 ─ up ─ cat L2 ─ ConvBlock×2 ─ up ─ cat L1 ─ ConvBlock×2 ─ 1×
 - **Diagonal variance, with logvar = b·tanh(raw/b)**: M4's far-head bound. The variance stays
   positive and finite, and the gradient never vanishes. SPEC allows diagonal for v1. A full 2×2
   covariance (Cholesky) would be the next step if the (x, z) errors turn out correlated.
-- **`goal_nll` is local** and has the same formula as M4's `gaussian_nll` (including ½·log 2π, so
-  it is a true NLL that can go negative). It sums over (x, z), averages over the batch, and returns
-  one value per horizon, so the train loop can log `loss/goal/k<k>`. Importing it from `jepa.py`
-  lost: it would tie the auxiliary heads to the JEPA core (SPEC §10), and M4 was still changing it.
+- **One NLL formula, in `losses.py`** (`gaussian_nll_terms`, including ½·log 2π, so it is a true
+  NLL that can go negative). The far heads' `gaussian_nll` and `goal_nll` both use it, each with
+  its own reduction. `goal_nll` sums over (x, z), averages over the batch, and returns one value
+  per horizon, so the train loop can log `loss/goal/k<k>`. Importing it from `jepa.py` lost: that
+  would tie the auxiliary heads to the JEPA core (SPEC §10).
 - **The pixel decoder owns the U-Net decoder path.** SPEC §4.3 says the decoder path exists only
   for the pixel decoder. Keeping it here leaves `unet.py`'s encoder untouched. Its last stage reads
   L1 (the skip) plus the upsampled decoder features, as §4.7 asks.
@@ -72,31 +84,48 @@ L3 ─ up ─ cat L2 ─ ConvBlock×2 ─ up ─ cat L1 ─ ConvBlock×2 ─ 1×
   at `w_pix = 0`. [skip-connections-meaning](../../docs/decisions/2026-11-17-skip-connections-meaning.md)
   (user decision, option A: the decoder skips, not FPN laterals)
 - **`displacement_targets` subtracts at the input's precision, then returns float32.** M2's
-  `EpisodeSet.ball_pos` is float64. Subtracting first keeps the precision of a difference between
-  two large world coordinates, and the cast gives the model's fp32 (MPS has no float64).
+  batches already carry float32 (rounding < 2e-6 m, held by an m2 test to 1e-5 m of the float64
+  truth). A float64 caller still keeps full precision for the difference, and the cast gives the
+  model's fp32 (MPS has no float64).
 - **Nearest upsample + 3×3 conv**, not ConvTranspose, which produces checkerboard artefacts.
   Upsampling goes straight to the next level's size (8 → 32 in one step).
 - **Sigmoid output**, so the prediction is in [0, 1], the same range as the target. A clamp lost
   because it has no gradient outside the range.
 - **`pixel_l1` is the mean over every element**: mean absolute error in [0, 1] intensity units. So
-  w_pix · L_pix ≤ w_pix (0.05 at the SPEC weight), which helps the "does not dominate" requirement.
-  It is the wiring PR's job to test that.
-
-## Deferred to the wiring PR
-
-- **One NLL formula.** `goal_nll` and M4's `gaussian_nll` (not yet on main) share the formula but
-  not the code. Once M4 merges, move the formula into one shared function (a small `losses`
-  module, or have `goal.py` import it) and keep `goal_nll`'s (B, K, 2) → (K,) reduction as a thin
-  wrapper. Each copy is tested against the closed form, and `goal_nll` against
-  `F.gaussian_nll_loss`, so they can't silently drift before then.
-- **The first Linear runs K times on the same pooled vector.** Splitting it into W_g·g (once per
-  sample) plus W_e·k_embed (once per horizon) would save (l3_ch + l2_ch)·hidden·(K−1) MACs per
-  sample, about 150k at SPEC sizes with hidden = 64. That is noise next to the encoder's
+  w_pix · L_pix ≤ w_pix (0.05 at the SPEC weight). `test_pixel_term_does_not_dominate_the_logged_total`
+  holds it under 10% of `loss/total` over a short run.
+- **The goal head's first Linear runs K times on the same pooled vector.** Splitting it into W_g·g
+  (once per sample) plus W_e·k_embed (once per horizon) would save (l3_ch + l2_ch)·hidden·(K−1)
+  MACs per sample, about 300k at the base sizes. That is noise next to the encoder's
   convolutions, so one plain `nn.Linear` is kept for clarity.
-- **SPEC M5's "pixel term does not dominate the logged total"** needs the train loop and
-  `loss.w_pix`.
-- The config keys (`loss.w_goal`, `loss.w_pix`, `model.goal_*`, `model.pix_*`,
-  `model.unet_skips`) and the §5.5 `goal` / `pixel` stages.
+
+### Wiring (M5)
+
+- **`WorldModel` subclasses `JEPA` instead of wrapping it.** So the core's `state_dict` keys are
+  unchanged, and pre-M5 checkpoints (e.g. the first real run's) load strictly. The aux heads add
+  only `goal.*` and `pixel.*` keys. A wrapper lost: it would prefix every key with `jepa.` and
+  break those checkpoints. `jepa.py` still never imports the aux heads (SPEC §10). It gains two
+  generic hooks: `extra_levels` (levels to always encode) and `grad_levels` (levels an active
+  outside consumer trains on).
+- **The aux heads read the CONTEXT levels only.** That means frames t−C+1 … t, never the target
+  encoder's output. So the pixel decoder predicts t+1 from the past, and the goal head never sees
+  the future. `ball_pos` is a label: `compute_world_losses` passes only the frames tensor to
+  `forward`. Tests hold both (`test_aux_heads_read_only_the_context_frames`,
+  `test_the_model_never_receives_ground_truth`).
+- **Stages.** `goal` and `pixel` follow the same within-run schedule as near and far
+  ([stage-schedule](../../docs/decisions/2026-11-17-stage-schedule-within-run.md)). A built aux
+  head runs and is logged every step. Before its `stage_start`, it runs under `no_grad` and stays
+  out of `loss/total`. Once active, its levels keep autograd even if no active horizon head reads
+  them. For example, the goal head trains the L3 encoder stage while only near heads are active.
+  The start steps and the head sizes are **proposed placeholders**:
+  [m5-stage-starts-and-aux-sizes](../../docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md).
+- **`loss/goal` sums the per-horizon NLLs** (Σ_k, like the latent terms). The variance guard and
+  `emb_std` still cover only the levels horizon heads read: the guard protects the latent
+  targets from collapse, which the aux heads don't affect.
+- **Batches.** The goal stage switches the loader to `with_gt=True` (`train._with_gt`). Train
+  keeps only `frames` and `ball_pos`. A batch reaches `max(model horizons, goal horizons)` past t
+  (`train.batch_k_max`). The synthetic source's `ball_pos` is in frame units (x = u/S, z = 1 −
+  v/S), and is for smoke runs only.
 
 ## Seams
 
@@ -104,6 +133,8 @@ L3 ─ up ─ cat L2 ─ ConvBlock×2 ─ up ─ cat L1 ─ ConvBlock×2 ─ 1×
 |---|---|---|---|
 | `goal.GoalHead`, `goal_nll`, `displacement_targets` | yes | — | `tests/test_goal.py` (CPU; SPEC-shape test at B=2; `@mps` forward/backward) |
 | `pixel.PixelDecoder`, `pixel_l1` | yes | — | `tests/test_pixel.py` (same) |
+| `world.WorldModel`, `compute_world_losses` | yes | — | `tests/test_world.py` (CPU, tiny) |
+| `train` goal/pixel stages, `batch_k_max`, `active_aux`, dict batches | mutates model + optimizer | device, run dir | `tests/test_train.py` (incl. the SPEC M5 dominance test, `@mps` all-stages step), `tests/test_train_episodes.py` |
 
 ## Files
 
@@ -111,3 +142,5 @@ L3 ─ up ─ cat L2 ─ ConvBlock×2 ─ up ─ cat L1 ─ ConvBlock×2 ─ 1×
 |---|---|
 | `goal.py` | `GoalHead`, `goal_nll`, `displacement_targets` |
 | `pixel.py` | `PixelDecoder` (U-Net decoder path → RGB), `pixel_l1` |
+| `world.py` | `WorldModel` (JEPA + aux heads), `compute_world_losses`, `split_batch` |
+| `losses.py` | `gaussian_nll_terms`: the one diagonal-Gaussian NLL formula |

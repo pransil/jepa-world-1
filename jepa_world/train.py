@@ -1,4 +1,5 @@
-"""Training entry point. Built in M3 (near heads), extended in M4 and M5. See SPEC §5-§6.
+"""Training entry point. Built in M3 (near heads), extended in M4 (far) and M5 (goal, pixel).
+See SPEC §5-§6.
 
 Contract every version of this script keeps (the /experiment skill relies on it):
   uv run python -m jepa_world.train --config configs/<x>.yaml [--set key=value ...] [--name NAME]
@@ -14,7 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import torch
@@ -24,15 +25,17 @@ from jepa_world.data.dataset import batches as episode_batches
 from jepa_world.data.dataset import load_split, require_split
 from jepa_world.data.splits import TRAINABLE, LeakageError
 from jepa_world.data.synthetic import moving_disc_batch
-from jepa_world.models.jepa import JEPA, compute_losses
+from jepa_world.models.world import AUX_STAGES, WorldModel, compute_world_losses
 from jepa_world.utils.config import load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
 from jepa_world.utils.paths import new_run_dir
 from jepa_world.utils.repro import run_metadata, seed_everything
 
-BUILT_STAGES = ("near", "far")
-LATER_STAGES = {"goal": "M5", "pixel": "M5"}
+HORIZON_STAGES = ("near", "far")  # stages that own predictor horizons
+STAGES = (*HORIZON_STAGES, *AUX_STAGES)  # SPEC §5.5 order: near, far, goal, pixel
+
+Batch = torch.Tensor | dict[str, torch.Tensor]  # frames (M3 layout), or a with_gt dict
 
 
 def _stage_of(cfg: dict, k: int) -> str:
@@ -40,14 +43,12 @@ def _stage_of(cfg: dict, k: int) -> str:
 
 
 def model_horizons(cfg: dict) -> list[int]:
-    """The horizons that get heads under train.stages: near ones for 'near', far ones for 'far'."""
+    """The horizons that get heads under train.stages: near ones for 'near', far ones for 'far'.
+    'goal' and 'pixel' own no horizon: they add the aux heads (models/world.py)."""
     stages = cfg["train"]["stages"]
-    later = [s for s in stages if s not in BUILT_STAGES]
-    if later:
-        built_in = ", ".join(f"{s} in {LATER_STAGES.get(s, '?')}" for s in later)
-        raise NotImplementedError(
-            f"train.stages {later} are not built yet ({built_in}); use a subset of {list(BUILT_STAGES)}"
-        )
+    unknown = [s for s in stages if s not in STAGES]
+    if unknown:
+        raise ValueError(f"train.stages {unknown}: unknown stage (have {list(STAGES)})")
     horizons = [k for k in cfg["model"]["horizons"] if _stage_of(cfg, k) in stages]
     if not horizons:
         raise ValueError(
@@ -61,8 +62,9 @@ def _check_stage_start(cfg: dict, horizons: list[int]) -> None:
     """stage_start.<s> = the number of steps completed before stage s joins the loss.
 
     Every stage in train.stages needs an int >= 0 (a YAML bool is not a step). Among the stages
-    that own a built horizon, one must start at 0 (or step 1 would have nothing to train), and
-    each must start before train.steps (or it would be built and logged but never trained)."""
+    that own a built horizon, one must start at 0 (or step 1 would have nothing to train). Every
+    stage that builds something (a horizon stage with a horizon, or an aux stage) must start
+    before train.steps, or it would be built and logged but never trained."""
     t = cfg["train"]
     stages, start, steps = t["stages"], t["stage_start"], t["steps"]
     for s in stages:
@@ -75,7 +77,8 @@ def _check_stage_start(cfg: dict, horizons: list[int]) -> None:
             f"train.stage_start {start}: one of the stages that own a horizon ({owned}) must "
             "start at 0"
         )
-    late = [s for s in owned if start[s] >= steps]
+    builds = owned + [s for s in stages if s in AUX_STAGES]
+    late = [s for s in builds if start[s] >= steps]
     if late:
         raise ValueError(
             f"train.stage_start {start}: {late} would never train in train.steps={steps}"
@@ -91,6 +94,29 @@ def active_horizons(cfg: dict, horizons: list[int], step: int | None) -> list[in
         return list(horizons)
     start = cfg["train"]["stage_start"]
     return [k for k in horizons if step >= start[_stage_of(cfg, k)]]
+
+
+def active_aux(cfg: dict, step: int | None) -> list[str]:
+    """The aux stages in train.stages that have started once `step` steps are complete (same
+    convention as active_horizons). step=None: all of them."""
+    stages = [s for s in AUX_STAGES if s in cfg["train"]["stages"]]
+    if step is None:
+        return stages
+    start = cfg["train"]["stage_start"]
+    return [s for s in stages if step >= start[s]]
+
+
+def batch_k_max(cfg: dict, horizons: list[int]) -> int:
+    """How far past t a batch must reach: the largest model horizon, or goal horizon if the goal
+    stage is on (its labels are ball_pos[t+k]). The pixel target, t+1, is always inside."""
+    ks = list(horizons)
+    if "goal" in cfg["train"]["stages"]:
+        ks += list(cfg["model"]["goal_horizons"])
+    return max(ks)
+
+
+def _with_gt(cfg: dict) -> bool:
+    return "goal" in cfg["train"]["stages"]  # only the goal loss needs a label beyond the frames
 
 
 def _require_built_source(cfg: dict) -> None:
@@ -109,20 +135,31 @@ def _require_built_source(cfg: dict) -> None:
         raise ValueError(f"data.source={source!r}: expected 'episodes' or 'synthetic'")
 
 
-def _episode_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
+def _episode_batches(cfg: dict, horizons: list[int]) -> Iterator[Batch]:
     """The M2 loader on data.split, in the same layout as the synthetic source. Loads the split
     now, not on the first next(), so main() can do it before taking the GPU lock."""
     es = load_split(cfg, cfg["data"]["split"])
-    c = cfg["model"]["context_frames"]
-    return episode_batches(es, cfg["train"]["batch_size"], c, max(horizons), cfg["seed"])
+    c, k_max = cfg["model"]["context_frames"], batch_k_max(cfg, horizons)
+    with_gt = _with_gt(cfg)
+    batches = episode_batches(es, cfg["train"]["batch_size"], c, k_max, cfg["seed"], with_gt)
+    # with_gt carries every GT_KEYS field; the goal loss reads only ball_pos.
+    return (
+        ({"frames": b["frames"], "ball_pos": b["ball_pos"]} for b in batches)
+        if with_gt
+        else batches
+    )
 
 
-def _synthetic_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
+def _synthetic_batches(cfg: dict, horizons: list[int]) -> Iterator[Batch]:
     g = torch.Generator().manual_seed(cfg["seed"])
-    n = cfg["model"]["context_frames"] + max(horizons)
+    n = cfg["model"]["context_frames"] + batch_k_max(cfg, horizons)
     while True:
         yield moving_disc_batch(
-            cfg["train"]["batch_size"], n, cfg["sim"]["frame_size"], generator=g
+            cfg["train"]["batch_size"],
+            n,
+            cfg["sim"]["frame_size"],
+            generator=g,
+            with_gt=_with_gt(cfg),
         )
 
 
@@ -142,11 +179,13 @@ def check_config(cfg: dict) -> list[int]:
     return horizons
 
 
-def build_model(cfg: dict) -> JEPA:
-    return JEPA(cfg, model_horizons(cfg))
+def build_model(cfg: dict) -> WorldModel:
+    """The JEPA core, plus the goal head / pixel decoder when train.stages has goal / pixel."""
+    stages = cfg["train"]["stages"]
+    return WorldModel(cfg, model_horizons(cfg), goal="goal" in stages, pixel="pixel" in stages)
 
 
-def build_optimizer(model: JEPA, cfg: dict) -> torch.optim.Optimizer:
+def build_optimizer(model: WorldModel, cfg: dict) -> torch.optim.Optimizer:
     t = cfg["train"]
     return torch.optim.AdamW(
         model.trainable_parameters(), lr=t["lr"], weight_decay=t["weight_decay"]
@@ -154,19 +193,21 @@ def build_optimizer(model: JEPA, cfg: dict) -> torch.optim.Optimizer:
 
 
 def train_step(
-    model: JEPA,
+    model: WorldModel,
     opt: torch.optim.Optimizer,
-    frames: torch.Tensor,
+    batch: Batch,
     cfg: dict,
     step: int | None = None,
 ) -> dict[str, torch.Tensor]:
     """One step: losses -> backward -> optimizer step -> EMA update (in that order).
-    `step` (steps completed before this one) selects the active stages via train.stage_start;
-    None means every built stage.
+    `batch` is a frames tensor, or a with_gt dict ({"frames", "ball_pos", ...}; the goal stage
+    needs it). `step` (steps completed before this one) selects the active stages via
+    train.stage_start; None means every built stage.
     Returns every term detached, still on the device (no host sync here)."""
     model.train()
     active = active_horizons(cfg, model.horizons, step)
-    losses = compute_losses(model, frames, cfg["loss"], active=active)
+    aux = [s for s in active_aux(cfg, step) if s in model.aux_stages]
+    losses = compute_world_losses(model, batch, cfg["loss"], active=active, aux_active=aux)
     opt.zero_grad(set_to_none=True)
     losses["loss/total"].backward()
     opt.step()
@@ -174,8 +215,9 @@ def train_step(
     return {k: v.detach() for k, v in losses.items()}
 
 
-def make_batches(cfg: dict, horizons: list[int]) -> Iterator[torch.Tensor]:
-    """Endless CPU batches in the M3 layout (B, C + k_max, 3, S, S), seeded from cfg['seed']."""
+def make_batches(cfg: dict, horizons: list[int]) -> Iterator[Batch]:
+    """Endless CPU batches, seeded from cfg['seed']: frames (B, C + k_max, 3, S, S) in the M3
+    layout, or, when train.stages has goal, {"frames", "ball_pos" (B, C + k_max, 2)}."""
     _require_built_source(cfg)
     if cfg["data"]["source"] == "episodes":
         return _episode_batches(cfg, horizons)
@@ -195,7 +237,15 @@ def _flush(rows: list[tuple[int, torch.Tensor]], keys: list[str], f, writer) -> 
     rows.clear()
 
 
-def save_checkpoint(path: Path, model: JEPA, opt: torch.optim.Optimizer, step: int, cfg: dict):
+def to_device(batch: Batch, device: torch.device) -> Batch:
+    if isinstance(batch, Mapping):
+        return {k: v.to(device) for k, v in batch.items()}
+    return batch.to(device)
+
+
+def save_checkpoint(
+    path: Path, model: WorldModel, opt: torch.optim.Optimizer, step: int, cfg: dict
+):
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {"model": model.state_dict(), "optimizer": opt.state_dict(), "step": step, "config": cfg},
@@ -206,7 +256,7 @@ def save_checkpoint(path: Path, model: JEPA, opt: torch.optim.Optimizer, step: i
 def run(
     cfg: dict,
     run_dir: Path,
-    batches: Iterator[torch.Tensor] | None = None,
+    batches: Iterator[Batch] | None = None,
     device: torch.device | None = None,
 ) -> dict[str, float]:
     """Train for cfg['train']['steps'] steps, logging every term of every step to
@@ -233,7 +283,8 @@ def run(
         with open(run_dir / "metrics.jsonl", "a") as f:
             try:
                 for step in range(1, steps + 1):
-                    losses = train_step(model, opt, next(batches).to(device), cfg, step=step - 1)
+                    batch = to_device(next(batches), device)
+                    losses = train_step(model, opt, batch, cfg, step=step - 1)
                     keys = keys or list(losses)
                     last = torch.stack([losses[k] for k in keys])
                     rows.append((step, last))

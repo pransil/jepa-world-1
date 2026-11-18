@@ -117,7 +117,7 @@ def test_sampling_reaches_every_window(train_set):
 def test_window_frames_refuses_starts_outside_the_episode(train_set, t):
     """A negative index would silently wrap to the episode's END: future frames in the context."""
     with pytest.raises(IndexError):
-        window_frames(train_set.frames, np.array([0]), np.array([t]), C, K_MAX)
+        window_frames(train_set, np.array([0]), np.array([t]), C, K_MAX)
 
 
 def test_same_seed_same_batches(train_set):

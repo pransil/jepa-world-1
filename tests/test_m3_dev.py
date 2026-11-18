@@ -38,8 +38,9 @@ def test_near_latent_loss_decreases_on_the_dev_set(tmp_path):
     build.build_split(cfg, "dev")  # real rendering, into this test's tmp artifact root
     horizons = train.check_config(cfg)
     assert horizons == [1, 2, 3, 4, 5]
-    torch.manual_seed(cfg["seed"])
-    train.run(cfg, tmp_path, batches=train.make_batches(cfg, horizons), device=torch.device("cpu"))
+    # train.run seeds itself from cfg["seed"], and the loader's sampler is seeded from it too.
+    batches = train.make_batches(cfg, horizons)
+    train.run(cfg, tmp_path, batches=batches, device=torch.device("cpu"))
 
     rows = [json.loads(s) for s in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert [r["step"] for r in rows] == list(range(1, cfg["train"]["steps"] + 1))

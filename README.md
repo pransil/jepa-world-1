@@ -192,7 +192,7 @@ pyyaml 6.0.3 · tensorboard 2.21.0 · pytest 9.2.0 · ruff 0.17.5.
 
 ```
 SPEC.md            design + milestones          CLAUDE.md / AGENTS.md   agent rules
-jepa_world/        sim/ data/ models/ utils/ train.py eval.py baselines.py metrics.py probes.py
+jepa_world/        sim/ data/ models/ utils/ train.py eval.py baselines.py metrics.py probes.py bench.py
 configs/           base.yaml (SPEC defaults) + one yaml per experiment
 tests/             fast tier by default; slow / render / mps markers
 experiments/       one note per experiment     docs/decisions/   one file per SPEC §9 decision

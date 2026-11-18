@@ -54,8 +54,10 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
     manifest's terrain and ball seeds against its split. It also checks terrain seeds, terrain
     hashes, and train/test ball seeds across every built split's manifest, so the same terrain
     under two seeds would still be caught;
-  - the batch: `window_frames` refuses any index outside [0, T). A negative index would otherwise
-    wrap silently to the end of the episode, putting future frames in the context.
+  - the batch: one shared index check (`_window_index`, used by `window_frames`, `window_gt` and
+    `batches`) refuses any frame index outside [0, T) and any episode index outside [0, N). A
+    negative index would otherwise wrap silently: to the end of the episode, putting future
+    frames in the context, or to another episode.
 - **Training never reads test.** `train.check_config` refuses `data.split: test` with
   `LeakageError`, and only `dev` and `train` are trainable (`splits.TRAINABLE`).
 - **Not checked here: leakage across configs.** The on-disk check sees only the splits of the

@@ -13,7 +13,7 @@ from tiny import BASE
 
 from jepa_world import metrics
 from jepa_world.data import build
-from jepa_world.data.dataset import GT_KEYS, batches, load_dir, window_gt
+from jepa_world.data.dataset import GT_KEYS, batches, load_dir, window_frames, window_gt
 from jepa_world.models.goal import displacement_targets
 from jepa_world.sim.io import load_episode
 from jepa_world.utils.config import load_config
@@ -36,11 +36,11 @@ def patterned(sim_cfg, ts, bs, **_):
     )
 
 
-def _build(tmp_path_factory, *overrides):
+def _build(tmp_path_factory, *overrides, simulate=patterned):
     cfg = load_config(BASE, [*SHORT, *overrides])
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("JEPA_ARTIFACTS", str(tmp_path_factory.mktemp("artifacts")))
-        path = build.build_split(cfg, "train", simulate=Recorder(patterned))
+        path = build.build_split(cfg, "train", simulate=Recorder(simulate))
     episodes = {}
     for f in path.glob("*.npz"):
         ep = load_episode(f)
@@ -125,6 +125,30 @@ def test_window_gt_refuses_starts_outside_the_episode(short, t):
     es, _ = short
     with pytest.raises(IndexError):
         window_gt(es, np.array([0]), np.array([t]), C, K_MAX)
+
+
+@pytest.mark.parametrize("ep", [-1, 6])
+def test_windows_refuse_an_episode_index_outside_the_set(short, ep):
+    """numpy and torch wrap -1 to the last episode: GT and frames from the wrong episode."""
+    es, _ = short
+    for fn in (window_gt, window_frames):
+        with pytest.raises(IndexError, match="episode index"):
+            fn(es, np.array([ep]), np.array([C - 1]), C, K_MAX)
+
+
+def test_loader_refuses_gt_of_the_wrong_kind(tmp_path_factory):
+    """Flags must be bool and positions floating, in every file, not just the first."""
+
+    def int_flags(sim_cfg, ts, bs, **_):
+        ep = patterned(sim_cfg, ts, bs)
+        return (
+            ep
+            if (ts, bs) == (1000, 0)
+            else dataclasses.replace(ep, out_of_view=ep.out_of_view.astype(np.uint8))
+        )
+
+    with pytest.raises(ValueError, match="out_of_view is uint8"):
+        _build(tmp_path_factory, simulate=int_flags)
 
 
 def test_m5_and_m6_consumers_accept_gt_batches(short):

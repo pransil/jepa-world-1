@@ -26,8 +26,11 @@ tools/gpu-status.sh                     # who holds the MPS lock, which jobs are
    lane holds a file you need, ask the user which lane takes it. Overwriting another lane's
    *uncommitted* change leaves no conflict marker and nothing to recover.
 4. **Small PRs into `main`; CI must be green; the lane merges its own PR**
-   (`gh pr merge --merge --delete-branch`). Rebase on `origin/main` if the PR is behind. Never
-   force-push `main` (branch protection forbids it anyway).
+   (`gh pr merge --merge --delete-branch`). If the PR is behind, **merge** `origin/main` into the
+   branch: `git fetch && git merge origin/main`, then `./test` and a plain `git push`. Or run
+   `gh pr update-branch <n>` (it merges by default) and then `git pull`. Don't rebase a pushed lane
+   branch. That needs a force-push, auto mode denies it, and force-pushing a lane branch is never
+   needed. Never force-push `main` (branch protection forbids it anyway).
 5. **Data and runs live outside git, under `$JEPA_ARTIFACTS`** (default
    `~/devel/jepa/artifacts/world-1`), shared by every worktree:
    - datasets come only from `paths.build_dataset_once(cfg, build)`. They are hash-keyed and

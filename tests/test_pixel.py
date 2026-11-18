@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn.functional as F
+
 from jepa_world.models.pixel import PixelDecoder, pixel_l1
 
 # tiny: (channels, size), fine -> coarse, with a 4x step at the end like SPEC's 32 -> 8
@@ -62,6 +63,25 @@ def test_l1_skip_reaches_the_output_directly():
     assert not torch.equal(dec(feats)[:, :, 8, 8], base[:, :, 8, 8])
 
 
+def test_skips_off_reads_the_coarsest_level_only():
+    """M7 ablation (docs/decisions/2026-11-17-skip-connections-meaning.md, option A): with skips
+    off, L1 and L2 are not consumed, so nothing but L3 reaches the frame."""
+    dec = _dec(skips=False)
+    feats = _feats(grad=True)
+    pred = dec(feats)
+    assert pred.shape == (2, 3, 16, 16)
+    pixel_l1(pred, torch.rand_like(pred)).backward()
+    assert feats[0].grad is None and feats[1].grad is None
+    assert feats[2].grad is not None and feats[2].grad.abs().sum() > 0
+    other = [torch.randn_like(feats[0]), torch.randn_like(feats[1]), feats[2].detach()]
+    torch.testing.assert_close(dec(other), pred.detach(), rtol=0, atol=0)
+
+
+def test_skips_on_is_the_default_and_reads_every_level():
+    assert _dec().skips is True
+    assert _dec(skips=False).skips is False
+
+
 def test_samples_are_independent():
     dec = _dec()
     a = _feats()
@@ -81,6 +101,10 @@ def test_bad_inputs_raise():
     bad = _feats()
     bad[2] = torch.randn(2, 8, 4, 4)
     with pytest.raises(ValueError, match="level 2"):
+        dec(bad)
+    bad = _feats()
+    bad[0] = torch.tensor(0.0)
+    with pytest.raises(ValueError, match="level 0"):
         dec(bad)
 
 

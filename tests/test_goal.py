@@ -64,6 +64,10 @@ def test_bad_config_raises():
         _head(horizons=[])
     with pytest.raises(ValueError, match="horizons"):
         _head(horizons=[1, 1])
+    with pytest.raises(ValueError, match="horizons"):
+        _head(horizons=[-1, 2])
+    with pytest.raises(ValueError, match="embed_dim"):
+        _head(embed_dim=0)  # every horizon would get the same input
     with pytest.raises(ValueError, match="GroupNorm"):
         _head(hidden=6, norm_groups=4)
     with pytest.raises(ValueError, match="GroupNorm"):
@@ -144,6 +148,8 @@ def test_nll_detaches_the_target():
 def test_nll_shape_mismatch_raises():
     with pytest.raises(ValueError, match="shape"):
         goal_nll(torch.zeros(2, 3, 2), torch.zeros(2, 3, 2), torch.zeros(2, 4, 2))
+    with pytest.raises(ValueError, match="shape"):
+        goal_nll(*[torch.zeros(2, 3, 4)] * 3)  # matching, but not (x, z)
 
 
 # ---------------------------------------------------------------- gradients and horizons
@@ -191,6 +197,25 @@ def test_displacement_targets_hand_indexed():
 def test_displacement_targets_zero_horizon_is_zero():
     ball_pos = torch.randn(2, 9, 2)
     assert torch.equal(displacement_targets(ball_pos, 4, [0])[:, 0], torch.zeros(2, 2))
+
+
+def test_displacement_targets_float64_in_float32_out():
+    """M2 stores ball_pos as float64: subtract at full precision, return the model's fp32."""
+    ball_pos = torch.randn(2, 9, 2, dtype=torch.float64) + 1e6
+    tgt = displacement_targets(ball_pos, 4, [1, 5])
+    assert tgt.dtype == torch.float32
+    expect = (ball_pos[:, [4, 8]] - ball_pos[:, 3:4]).float()
+    torch.testing.assert_close(tgt, expect, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("context_frames", "horizons", "match"),
+    [(4, [], "horizons"), (4, [-1, 2], "horizons"), (0, [1], "context_frames")],
+)
+def test_displacement_targets_bad_args_raise(context_frames, horizons, match):
+    """Negative indices would silently wrap to the end of the episode."""
+    with pytest.raises(ValueError, match=match):
+        displacement_targets(torch.randn(2, 30, 2), context_frames, horizons)
 
 
 def test_displacement_targets_too_short_raises():

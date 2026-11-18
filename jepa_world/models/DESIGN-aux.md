@@ -18,16 +18,19 @@ The following are not here yet; they belong to the wiring PR, after M2 and M4 me
 - the `goal` and `pixel` stages of §5.5;
 - SPEC M5's **"pixel term does not dominate the logged total"** test, which needs the train loop.
 
-Out of scope for v1: an action input for the goal head, full covariance, and skip on/off for M7.
+Out of scope for v1: an action input for the goal head, and full covariance.
+
+Also out of scope: the `model.unet_skips` config key. The `PixelDecoder(skips=...)` switch is
+here, and the key goes into `base.yaml` in the wiring PR.
 
 ## Data flow and shapes (SPEC sizes; the tests use tiny ones)
 
 | Unit | In | Out |
 |---|---|---|
 | `GoalHead(l3_ch, horizons, …, l2_ch=0)` | L3 (B,256,8,8) [, L2 (B,128,32,32)] | mean, logvar: (B, K, 2) each; K = len(horizons) |
-| `displacement_targets(ball_pos, C, horizons)` | ball_pos (B, C+k_max, 2), world m | (B, K, 2): ball_pos[:, C−1+k] − ball_pos[:, C−1] |
+| `displacement_targets(ball_pos, C, horizons)` | ball_pos (B, C+k_max, 2), world m, any float dtype | (B, K, 2) float32: ball_pos[:, C−1+k] − ball_pos[:, C−1] |
 | `goal_nll(mean, logvar, target)` | (B, K, 2) ×3 | (K,): NLL per horizon |
-| `PixelDecoder(levels, widths, …)` | [L1 (B,64,64,64), L2 (B,128,32,32), L3 (B,256,8,8)] | (B, 3, 64, 64) in [0, 1] |
+| `PixelDecoder(levels, widths, …, skips=True)` | [L1 (B,64,64,64), L2 (B,128,32,32), L3 (B,256,8,8)] | (B, 3, 64, 64) in [0, 1] |
 | `pixel_l1(pred, target)` | (B,3,S,S) ×2; target = `frames[:, C]` | scalar |
 
 ```
@@ -63,6 +66,14 @@ L3 ─ up ─ cat L2 ─ ConvBlock×2 ─ up ─ cat L1 ─ ConvBlock×2 ─ 1×
 - **The pixel decoder owns the U-Net decoder path.** SPEC §4.3 says the decoder path exists only
   for the pixel decoder. Keeping it here leaves `unet.py`'s encoder untouched. Its last stage reads
   L1 (the skip) plus the upsampled decoder features, as §4.7 asks.
+- **`skips` switch (M7 ablation):** `skips=False` drops the L2/L1 concatenations, so the frame is
+  decoded from L3 alone. `forward` still takes and checks all three levels, so callers don't
+  branch, but L1 and L2 get no gradient. It acts only through the pixel loss, so it does nothing
+  at `w_pix = 0`. [skip-connections-meaning](../../docs/decisions/2026-11-17-skip-connections-meaning.md)
+  (user decision, option A: the decoder skips, not FPN laterals)
+- **`displacement_targets` subtracts at the input's precision, then returns float32.** M2's
+  `EpisodeSet.ball_pos` is float64. Subtracting first keeps the precision of a difference between
+  two large world coordinates, and the cast gives the model's fp32 (MPS has no float64).
 - **Nearest upsample + 3×3 conv**, not ConvTranspose, which produces checkerboard artefacts.
   Upsampling goes straight to the next level's size (8 → 32 in one step).
 - **Sigmoid output**, so the prediction is in [0, 1], the same range as the target. A clamp lost
@@ -70,6 +81,22 @@ L3 ─ up ─ cat L2 ─ ConvBlock×2 ─ up ─ cat L1 ─ ConvBlock×2 ─ 1×
 - **`pixel_l1` is the mean over every element**: mean absolute error in [0, 1] intensity units. So
   w_pix · L_pix ≤ w_pix (0.05 at the SPEC weight), which helps the "does not dominate" requirement.
   It is the wiring PR's job to test that.
+
+## Deferred to the wiring PR
+
+- **One NLL formula.** `goal_nll` and M4's `gaussian_nll` (not yet on main) share the formula but
+  not the code. Once M4 merges, move the formula into one shared function (a small `losses`
+  module, or have `goal.py` import it) and keep `goal_nll`'s (B, K, 2) → (K,) reduction as a thin
+  wrapper. Each copy is tested against the closed form, and `goal_nll` against
+  `F.gaussian_nll_loss`, so they can't silently drift before then.
+- **The first Linear runs K times on the same pooled vector.** Splitting it into W_g·g (once per
+  sample) plus W_e·k_embed (once per horizon) would save (l3_ch + l2_ch)·hidden·(K−1) MACs per
+  sample, about 150k at SPEC sizes with hidden = 64. That is noise next to the encoder's
+  convolutions, so one plain `nn.Linear` is kept for clarity.
+- **SPEC M5's "pixel term does not dominate the logged total"** needs the train loop and
+  `loss.w_pix`.
+- The config keys (`loss.w_goal`, `loss.w_pix`, `model.goal_*`, `model.pix_*`,
+  `model.unet_skips`) and the §5.5 `goal` / `pixel` stages.
 
 ## Seams
 

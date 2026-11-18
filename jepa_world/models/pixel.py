@@ -33,6 +33,10 @@ class PixelDecoder(nn.Module):
     Decoder path: x = Ln, then for each finer level: nearest-upsample to its size, concatenate that
     level's encoder features (the skip), two 3x3 ConvBlocks. The last stage therefore reads L1 plus
     the decoder path (SPEC §4.7). A 1x1 conv and a sigmoid give the frame.
+
+    skips=False is the M7 ablation (docs/decisions/2026-11-17-skip-connections-meaning.md): no
+    concatenation, so the frame is decoded from Ln alone. forward still takes (and checks) every
+    level, so callers don't branch, but only Ln is consumed.
     """
 
     def __init__(
@@ -42,6 +46,7 @@ class PixelDecoder(nn.Module):
         widths: Sequence[int],
         norm_groups: int,
         out_ch: int = 3,
+        skips: bool = True,
     ):
         super().__init__()
         levels = [(int(c), int(s)) for c, s in levels]
@@ -57,12 +62,13 @@ class PixelDecoder(nn.Module):
                     f"level sizes must shrink by an integer factor fine -> coarse, got {levels}"
                 )
         self.levels = levels
+        self.skips = bool(skips)
         self.stages = nn.ModuleList()
         c_prev = levels[-1][0]
         for (c_skip, _), w in zip(reversed(levels[:-1]), widths, strict=True):
             self.stages.append(
                 nn.Sequential(
-                    ConvBlock(c_prev + c_skip, w, groups=norm_groups),
+                    ConvBlock(c_prev + (c_skip if self.skips else 0), w, groups=norm_groups),
                     ConvBlock(w, w, groups=norm_groups),
                 )
             )
@@ -74,12 +80,14 @@ class PixelDecoder(nn.Module):
             raise ValueError(
                 f"expected {len(self.levels)} levels (fine -> coarse), got {len(feats)}"
             )
-        b = feats[0].shape[0]
+        b = feats[0].shape[0] if feats[0].ndim == 4 else None
         for i, (f, (c, s)) in enumerate(zip(feats, self.levels, strict=True)):
-            if f.ndim != 4 or f.shape[0] != b or f.shape[1:] != (c, s, s):
-                raise ValueError(f"level {i}: expected ({b}, {c}, {s}, {s}), got {tuple(f.shape)}")
+            if b is None or f.ndim != 4 or f.shape[0] != b or f.shape[1:] != (c, s, s):
+                raise ValueError(f"level {i}: expected (B, {c}, {s}, {s}), got {tuple(f.shape)}")
         x = feats[-1]
-        for skip, stage in zip(reversed(feats[:-1]), self.stages, strict=True):
-            x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
-            x = stage(torch.cat([x, skip], dim=1))
+        for skip, (_, s), stage in zip(
+            reversed(feats[:-1]), reversed(self.levels[:-1]), self.stages, strict=True
+        ):
+            x = F.interpolate(x, size=(s, s), mode="nearest")
+            x = stage(torch.cat([x, skip], dim=1) if self.skips else x)
         return torch.sigmoid(self.out(x))

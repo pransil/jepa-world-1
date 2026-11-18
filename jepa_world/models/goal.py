@@ -21,9 +21,16 @@ def displacement_targets(
     ball_pos: torch.Tensor, context_frames: int, horizons: Sequence[int]
 ) -> torch.Tensor:
     """ball_pos (B, T, 2) world (x, z), on the batch's frame axis (index C-1 is time t)
-    -> (B, K, 2): ball_pos[:, C-1+k] - ball_pos[:, C-1], in `horizons` order."""
+    -> (B, K, 2) float32: ball_pos[:, C-1+k] - ball_pos[:, C-1], in `horizons` order.
+
+    The subtraction runs at the input's precision (M2 stores float64), then casts to fp32."""
     if ball_pos.ndim != 3 or ball_pos.shape[-1] != 2:
         raise ValueError(f"ball_pos must be (B, T, 2), got {tuple(ball_pos.shape)}")
+    if not horizons or min(horizons) < 0:
+        # A negative index would silently wrap to the end of the episode.
+        raise ValueError(f"horizons must be non-empty and >= 0, got {list(horizons)}")
+    if context_frames < 1:
+        raise ValueError(f"context_frames must be >= 1, got {context_frames}")
     need = context_frames + max(horizons)
     if ball_pos.shape[1] < need:
         raise ValueError(
@@ -32,7 +39,7 @@ def displacement_targets(
         )
     t = context_frames - 1
     idx = torch.tensor([t + k for k in horizons], device=ball_pos.device)
-    return ball_pos[:, idx] - ball_pos[:, t : t + 1]
+    return (ball_pos[:, idx] - ball_pos[:, t : t + 1]).to(torch.float32)
 
 
 def goal_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -42,7 +49,7 @@ def goal_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> 
 
     The same formula as the far heads' gaussian_nll (models/DESIGN.md), so it is a true NLL."""
     shapes = {"mean": mean.shape, "logvar": logvar.shape, "target": target.shape}
-    if len(set(shapes.values())) != 1 or mean.ndim != 3:
+    if len(set(shapes.values())) != 1 or mean.ndim != 3 or mean.shape[-1] != 2:
         raise ValueError(f"shape mismatch, expected (B, K, 2) each: {shapes}")
     err2 = (target.detach() - mean).square()
     return (0.5 * (err2 * torch.exp(-logvar) + logvar + LOG_2PI)).sum(dim=-1).mean(dim=0)
@@ -69,8 +76,10 @@ class GoalHead(nn.Module):
     ):
         super().__init__()
         horizons = tuple(int(k) for k in horizons)
-        if not horizons or len(set(horizons)) != len(horizons):
-            raise ValueError(f"horizons must be non-empty and distinct, got {list(horizons)}")
+        if not horizons or len(set(horizons)) != len(horizons) or min(horizons) < 0:
+            raise ValueError(f"horizons must be non-empty, distinct and >= 0, got {list(horizons)}")
+        if embed_dim < 1:
+            raise ValueError(f"embed_dim must be >= 1 (it tells horizons apart), got {embed_dim}")
         if logvar_bound <= 0:
             raise ValueError(f"logvar_bound must be > 0, got {logvar_bound}")
         if hidden // check_groups(norm_groups, hidden) < 2:

@@ -1,0 +1,13 @@
+# M4 far-collapse comparison on REAL episodes (M2's dev split: debugging only, SPEC §3.5).
+# Near-only for 200 steps, then far joins. Variants pass the switches with --set
+# (see experiments/2026-11-17-m4-far-collapse.md for the exact commands).
+base: base.yaml
+
+data:
+  source: episodes
+  split: dev
+
+train:
+  stages: [near, far]
+  stage_start: {near: 0, far: 200}
+  steps: 600

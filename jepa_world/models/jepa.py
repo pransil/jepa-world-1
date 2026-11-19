@@ -52,6 +52,36 @@ def _check_same_shape(**tensors: torch.Tensor) -> None:
 # The one place each loss is defined. latent_loss / gaussian_nll (public) and compute_losses
 # (training) both go through these, so the two can never drift apart.
 
+LATENT_REDUCE = ("sum", "mean")  # loss.latent_reduce
+
+
+def check_latent_reduce(loss_cfg: dict) -> str:
+    """loss.latent_reduce: 'sum' (absent in configs from before 2026-11-19) or 'mean'. 'mean'
+    needs the guard averaged over channels too (var_reduce: mean): with a summed guard, every
+    level's guard would outweigh its latent terms C-fold
+    (docs/decisions/2026-11-19-latent-loss-normalization.md)."""
+    reduce = loss_cfg.get("latent_reduce", "sum")
+    if reduce not in LATENT_REDUCE:
+        raise ValueError(f"loss.latent_reduce={reduce!r}: expected 'sum' or 'mean'")
+    if reduce == "mean" and loss_cfg["collapse_guard"] and loss_cfg["var_reduce"] != "mean":
+        raise ValueError(
+            f"loss.latent_reduce='mean' with loss.var_reduce={loss_cfg['var_reduce']!r}: the "
+            "guard must be reduced over channels as the latent losses are (var_reduce: mean), so "
+            "each level keeps its guard-to-latent ratio "
+            "(docs/decisions/2026-11-17-far-collapse-guard-sum.md)"
+        )
+    return reduce
+
+
+def _over_channels(x: torch.Tensor, channels: int, reduce: str) -> torch.Tensor:
+    """A channel-summed term as it is ('sum'), or per channel ('mean': divided by `channels`).
+    'sum' returns `x` itself, so the default path is bitwise what it was before the switch."""
+    if reduce == "sum":
+        return x
+    if reduce == "mean":
+        return x / channels
+    raise ValueError(f"loss.latent_reduce={reduce!r}: expected 'sum' or 'mean'")
+
 
 def _err2(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     _check_same_shape(pred=pred, target=target)
@@ -73,20 +103,24 @@ def _relerr_from_sq(sq: torch.Tensor, target: torch.Tensor, eps: float) -> torch
     return sq.detach() / spread.clamp_min(eps)
 
 
-def latent_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """mean over (batch, positions) of ||pred - sg(target)||^2 over channels (SPEC §5.1)."""
-    return _sq_from_err2(_err2(pred, target))
+def latent_loss(pred: torch.Tensor, target: torch.Tensor, reduce: str = "sum") -> torch.Tensor:
+    """mean over (batch, positions) of ||pred - sg(target)||^2 over channels (SPEC §5.1);
+    reduce='mean' divides by the channel count (loss.latent_reduce)."""
+    return _over_channels(_sq_from_err2(_err2(pred, target)), pred.shape[1], reduce)
 
 
-def gaussian_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def gaussian_nll(
+    mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor, reduce: str = "sum"
+) -> torch.Tensor:
     """Diagonal-Gaussian NLL of sg(target), summed over channels and averaged over
     (batch, positions), the same reduction as latent_loss (SPEC §5.1, far heads):
 
         mean_{b,h,w} sum_c 0.5 * [(t - mu)^2 * exp(-logvar) + logvar + log(2 pi)]
 
-    The log(2 pi) term makes it a true NLL. With logvar = 0 it is 0.5 * latent_loss + const."""
+    The log(2 pi) term makes it a true NLL. With logvar = 0 it is 0.5 * latent_loss + const.
+    reduce='mean' divides by the channel count, as latent_loss does."""
     _check_same_shape(mean=mean, logvar=logvar)
-    return _nll_from_err2(_err2(mean, target), logvar)
+    return _over_channels(_nll_from_err2(_err2(mean, target), logvar), mean.shape[1], reduce)
 
 
 def relative_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
@@ -357,7 +391,9 @@ def compute_losses(
     active: Collection[int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Every term as a 0-d tensor, for EVERY built horizon (SPEC §5.4):
-      loss/k<k>    squared L2 (near) or Gaussian NLL (far), against the (normalized) target
+      loss/k<k>    squared L2 (near) or Gaussian NLL (far), against the (normalized) target.
+                   Summed over channels, or, with loss.latent_reduce: mean, averaged over them;
+                   so are sqerr/k, loss/td/k, sqerr/td/k and (via var_reduce: mean) the guard
       relerr/k<k>  scale-free error of the mean (relative_error), detached
       sqerr/k<k>   far only: the mean's squared L2, detached (is the prediction itself improving?)
       logvar/k<k>  far only: mean predicted log-variance, detached
@@ -377,6 +413,7 @@ def compute_losses(
 
 
 def check_loss_cfg(model: JEPA, loss_cfg: dict) -> None:
+    check_latent_reduce(loss_cfg)
     if loss_cfg["latent_distance"] != "mse":
         raise ValueError(
             f"loss.latent_distance={loss_cfg['latent_distance']!r}: only 'mse' (squared L2) "
@@ -392,16 +429,23 @@ def check_loss_cfg(model: JEPA, loss_cfg: dict) -> None:
 
 
 def _gaussian_terms(
-    losses: dict, tag: str, pred: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor
+    losses: dict,
+    tag: str,
+    pred: torch.Tensor,
+    logvar: torch.Tensor,
+    target: torch.Tensor,
+    reduce: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """One Gaussian head's NLL against its detached target (= gaussian_nll), and its detached
     diagnostics sqerr/<tag> and logvar/<tag>. The far heads and the top-down branches both go
-    through it, so their terms can't drift apart. Returns (nll, sqerr)."""
+    through it, so their terms can't drift apart. Returns (nll, the CHANNEL-SUMMED sqerr, which
+    relerr divides by a channel-summed spread whatever the reduction)."""
     err2 = _err2(pred, target)  # computed once, shared by the loss and the diagnostics
     sqerr = _sq_from_err2(err2)  # = latent_loss(pred, target)
-    losses[f"sqerr/{tag}"] = sqerr.detach()
+    channels = target.shape[1]
+    losses[f"sqerr/{tag}"] = _over_channels(sqerr, channels, reduce).detach()
     losses[f"logvar/{tag}"] = logvar.detach().mean()
-    return _nll_from_err2(err2, logvar), sqerr
+    return _over_channels(_nll_from_err2(err2, logvar), channels, reduce), sqerr
 
 
 def losses_from_output(
@@ -412,21 +456,24 @@ def losses_from_output(
     The caller validates first, before its forward: check_loss_cfg, and `active` from
     model.check_active (compute_losses and world.compute_world_losses both do)."""
     losses: dict[str, torch.Tensor] = {}
+    reduce = loss_cfg.get("latent_reduce", "sum")  # validated by check_latent_reduce
     total = out["context"][model.level_names[0]].new_zeros(())
     for k in model.horizons:
         pred, target = out["pred"][k], out["target"][k]  # target: detached, already normalized
         if k in model.far_horizons:
-            lk, sqerr = _gaussian_terms(losses, f"k{k}", pred, out["logvar"][k], target)
+            lk, sqerr = _gaussian_terms(losses, f"k{k}", pred, out["logvar"][k], target, reduce)
         else:
             sqerr = _sq_from_err2(_err2(pred, target))  # = latent_loss(pred, target)
-            lk = sqerr
+            lk = _over_channels(sqerr, target.shape[1], reduce)
         losses[f"loss/k{k}"] = lk
         losses[f"relerr/k{k}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
             total = total + loss_cfg["w_k"] * lk
     for k in model.td_level:  # empty unless model.top_down
         tag, target = f"td/k{k}", out["td_target"][k]
-        ltd, sqerr = _gaussian_terms(losses, tag, out["td_pred"][k], out["td_logvar"][k], target)
+        ltd, sqerr = _gaussian_terms(
+            losses, tag, out["td_pred"][k], out["td_logvar"][k], target, reduce
+        )
         losses[f"loss/{tag}"] = ltd
         losses[f"relerr/{tag}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:

@@ -1,0 +1,11 @@
+# Collapse check for loss.latent_reduce: mean (docs/decisions/2026-11-19-latent-loss-normalization.md).
+# configs/exp_first_real_run.yaml (near + far, 8000 steps, far joins after 2000, train split) is the
+# sum x25 arm of experiments/2026-11-18-guard-comparison.md. This file changes only the two channel
+# reductions: every latent term and every level's guard become per-channel means, and w_var stays 25,
+# so each level keeps its guard-to-latent ratio. Seeds 0 (this file) and 1 (--set seed=1).
+# experiments/2026-11-19-latent-mean-collapse-check.md
+base: exp_first_real_run.yaml
+
+loss:
+  latent_reduce: mean
+  var_reduce: mean

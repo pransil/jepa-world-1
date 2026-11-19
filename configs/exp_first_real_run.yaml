@@ -2,9 +2,16 @@
 # episodes / train). Far joins after base.yaml's stage_start.far = 2000 steps. Loss defaults are
 # M4's (guard summed over channels, w_var 25). Seeds: 0 (this file) and 1 (--set seed=1).
 # experiments/2026-11-17-first-real-run.md
+# The loss reductions are pinned (sum over channels, guard sum x25): this is the sum x25 arm of the
+# guard comparison and of the latent-mean collapse check, whatever base.yaml defaults to.
 base: base.yaml
 
 train:
   stages: [near, far]
   steps: 8000
   ckpt_every: 2000
+
+loss:
+  latent_reduce: sum
+  var_reduce: sum
+  w_var: 25.0

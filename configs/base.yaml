@@ -96,6 +96,8 @@ model:                        # SPEC §4
 
 loss:                         # SPEC §5
   latent_distance: mse        # squared L2, summed over channels, mean over positions (docs/decisions/2026-11-17-latent-distance-sq-l2.md)
+  latent_reduce: sum          # sum | mean over each level's channels, for every latent term (near, far, top-down). mean needs
+                              # var_reduce: mean, so each level keeps its guard-to-latent ratio (docs/decisions/2026-11-19-latent-loss-normalization.md)
   target_norm: none           # none | layernorm (per position, over channels): raw kept (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
   collapse_guard: true        # VICReg-style variance floor (docs/decisions/2026-11-17-collapse-guard-on.md)
   var_gamma: 1.0              # target batch std per (channel, position)

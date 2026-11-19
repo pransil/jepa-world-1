@@ -109,6 +109,20 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
   switches remain for ablations.
   [far-collapse-guard-sum](../../docs/decisions/2026-11-17-far-collapse-guard-sum.md),
   [experiment](../../experiments/2026-11-17-m4-far-collapse.md)
+- **Channel reduction: `loss.latent_reduce: sum | mean`** (2026-11-19; `sum` until the collapse
+  check passes).
+  - `mean` divides every latent term by the channel count of the level it is scored on: `loss/k`,
+    `sqerr/k`, and for top-down `loss/td/k` and `sqerr/td/k`. `_over_channels` does it in one place.
+  - **`sum` returns the same tensor**, so it is bitwise the old path, and so is a config with no
+    key (`test_sum_is_bitwise_the_channel_sum_formulas`, `test_a_config_without_the_key_is_bitwise_sum`).
+  - `mean` requires `var_reduce: mean` at the same `w_var`, so each level's guard-to-latent ratio,
+    M4's collapse fix, is unchanged. `check_latent_reduce` refuses the mix, both in
+    `train.check_config` and before the forward.
+  - `relerr` is computed from the channel sums before any division, so it is bitwise identical
+    under either setting. `loss/total`, `loss/k` and `var/L` differ by the level's channel count.
+  - With Adam, `mean` on one level is a uniform rescale, a no-op up to ε. What it changes is the
+    balance between levels and against the aux terms, which is why `w_goal` moves with it.
+  [latent-loss-normalization](../../docs/decisions/2026-11-19-latent-loss-normalization.md)
 - **The target encoder runs once per level group:** the stacks of all heads reading a level are
   concatenated along the batch and encoded `upto` that level. Near stacks stop at L1, and only the
   two far stacks pay for L2/L3. GroupNorm is per sample, so grouping can't change a result.

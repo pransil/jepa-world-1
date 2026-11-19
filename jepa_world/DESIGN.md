@@ -84,7 +84,7 @@ split ─► EpisodeSet ─► windows (ep, t): t ∈ valid_starts(T, C, max(mod
   metrics all run outside `gpu_lock`. Only the forward passes run inside it, and only when
   `eval.device` is MPS. The model is moved to the device inside the lock and back to the CPU
   before it is released.
-- **Simulator params.** They come from `eval.sim_params`, the proposed `["true", "mean"]`.
+- **Simulator params.** They come from `eval.sim_params`, the accepted `["true", "mean"]`.
   `--sim-params` replaces them, and with no values it turns the simulator off.
 - **Validation first.** `check_eval_block` validates the whole `eval:` block before any model,
   data or lock. That covers sim params (an unquoted YAML `true` is a bool), coverage levels,
@@ -198,10 +198,10 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 - **The simulator baseline's ball parameters are an argument.** The three choices are `true`
   (the episode's own, an oracle), `mean` (`sim.ball.mean_ball`, each range's midpoint) and
   `true_radius` (the visible radius with mean friction and restitution). It is opt-in:
-  `eval --baselines` stays M2's quick closed-form report unless `--sim-params` is given. Which
-  one is the headline bar is the user's call. The
-  [proposed decision](../docs/decisions/2026-11-17-simulator-baseline-params.md) recommends
-  reporting `true` and `mean` (`PROPOSED_SIM_PARAMS`), with `mean` as the bar.
+  `eval --baselines` stays M2's quick closed-form report unless `--sim-params` is given. The
+  user [decided](../docs/decisions/2026-11-17-simulator-baseline-params.md) on 2026-11-18:
+  report `true` and `mean` (`PROPOSED_SIM_PARAMS`, a name from before the decision), with
+  `mean` as the headline bar and `true` as the oracle ceiling.
 - **A different radius at the true state** (`match_clearance`). On the test split (run
   `20261118T065246Z-…-baselines-test-590f46`, `baselines.json` → `simulator`):
   - the true ball itself starts inside the terrain at 2648 of 7400 windows, down to −3.4 cm, in

@@ -105,6 +105,8 @@ loss:                         # SPEC §5
   w_k: 1.0
   w_goal: 0.5                 # x loss/goal = sum over goal_horizons of the goal NLL (SPEC §5.4)
   w_pix: 0.05                 # x loss/pix = mean |pred - frame t+1| in [0, 1] units, so <= w_pix
+  pix_share: null             # null: fixed w_pix. A share s in (0, 1): replaces w_pix by s * |rest of loss/total| / loss/pix
+                              # (detached), holding the pixel term at share s (docs/decisions/2026-11-18-pixel-ablation-target-share.md)
   w_td: 0.5                   # x each loss/td/k (top-down NLL), only with model.top_down (same decision)
 
 train:                        # SPEC §6

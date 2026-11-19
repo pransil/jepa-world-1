@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--checkpoint", default=None)
     p.add_argument("--device", default="cpu")
     args = p.parse_args(argv)
+    meta = run_metadata()  # at start: the code that ran, even if the tree changes mid-run
     device = pick_device(args.device)
     run = load_run(args.run, args.checkpoint, device)
     lock = gpu_lock(f"latent_relerr {args.run.name}") if device.type == "mps" else None
@@ -100,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         "batch_size": run.cfg["train"]["batch_size"],
         "seed": args.seed,
         "device": str(device),
-        "meta": run_metadata(),
+        "meta": meta,
         "terms": terms,
     }
     suffix = f"_{Path(args.checkpoint).stem}" if args.checkpoint else ""

@@ -2,7 +2,11 @@
 
 - **Date:** 2026-11-18   **Lane/branch:** worktree-wt-exp-guard
 - **Commits** (all clean):
-  - mean ×1 training, and every dev score and readout below: c54bcef;
+  - mean ×1 training, and every dev score and readout below: c54bcef. The exceptions are mean ×1
+    seed 1's dev score and readout, run at 8f2e4f8, whose only change from c54bcef is this note.
+    Their first run was flagged dirty: its metadata was recorded while an uncommitted draft of
+    this note sat in the tree. The clean re-run gives identical numbers. `latent_relerr.py` now
+    records its metadata at the start of a run, as `probe_readout.py` does;
   - the sum ×25 runs: e95576c, from the first real run, reused (see Reproducibility);
   - the reproducibility check: 5151179.
 - **Configs:** sum ×25 arm `configs/exp_first_real_run.yaml`; mean ×1 arm `configs/exp_guard_mean.yaml`.
@@ -78,7 +82,15 @@ wasn't re-run; it is the same code with a different seed.
 `experiments/latent_relerr.py`, 200 dev batches of 32 (seed 0, the same windows for every run), CPU.
 The ± is the per-batch standard deviation.
 
-DEV_TABLE
+| arm | seed | relerr k1 | k2 | k3 | k4 | **k5** | k10 | k20 | far logvar k10 / k20 | emb std L1 / L2 / L3 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| sum ×25 | 0 | 0.075 | 0.142 | 0.206 | 0.258 | **0.302** ± 0.054 | 0.467 | 0.666 | −0.53 / +0.09 | 1.64 / 1.46 / 1.40 |
+| sum ×25 | 1 | 0.067 | 0.133 | 0.196 | 0.245 | **0.291** ± 0.051 | 0.462 | 0.672 | −0.51 / −0.17 | 1.68 / 1.49 / 1.38 |
+| mean ×1 | 0 | 0.188 | 0.299 | 0.395 | 0.472 | **0.536** ± 0.054 | 0.742 | 0.746 | −3.89 / −3.54 | 0.31 / 0.31 / 0.34 |
+| mean ×1 | 1 | 0.180 | 0.289 | 0.395 | 0.484 | **0.555** ± 0.054 | 0.728 | 0.725 | −3.60 / −3.65 | 0.31 / 0.34 / 0.33 |
+
+**mean ×1 is worse at every horizon, near and far, in both seeds.** k5: 0.536 / 0.555 against
+0.302 / 0.291, about 1.8×.
 
 The script is checked against training's own numbers. Scored on **train** batches instead, the
 sum ×25 seed 0 checkpoint gives k1 / k5 / k20 relerr 0.082 / 0.315 / 0.628, against 0.079 / 0.318 /
@@ -87,7 +99,29 @@ as c54bcef, run just before committing it).
 
 ### Training (train batches, from `metrics.jsonl`)
 
-TRAIN_TABLE
+Window means. "2001–2010" is the first 10 steps after far joins.
+
+| arm | seed | steps | relerr k1 | k5 | k10 | k20 | far logvar k10 / k20 | emb std L1 / L2 / L3 | loss/var |
+|---|---|---|---|---|---|---|---|---|---|
+| sum ×25 | 0 | 1501–2000, near only | 0.047 | 0.199 | (inactive) | (inactive) | ≈0 / ≈0 | 1.28 / 0.39 / 0.38 | 0.18 |
+| | | 2001–2010 | 0.186 | 0.320 | 1.438 | 1.480 | −0.18 / −0.35 | 1.19 / 0.55 / 0.56 | 186 |
+| | | 3501–4000 | 0.065 | 0.263 | 0.476 | 0.685 | −0.77 / −0.10 | 1.47 / 1.27 / 1.25 | 0.81 |
+| | | 7501–8000 | 0.079 | 0.318 | 0.486 | 0.637 | −0.46 / −0.03 | 1.62 / 1.45 / 1.40 | 0.17 |
+| sum ×25 | 1 | 1501–2000, near only | 0.047 | 0.195 | (inactive) | (inactive) | ≈0 / ≈0 | 1.28 / 0.41 / 0.39 | 0.18 |
+| | | 2001–2010 | 0.115 | 0.218 | 1.396 | 1.408 | −0.11 / −0.30 | 1.23 / 0.55 / 0.55 | 184 |
+| | | 3501–4000 | 0.048 | 0.222 | 0.541 | 0.746 | −0.68 / +0.01 | 1.48 / 1.29 / 1.27 | 1.01 |
+| | | 7501–8000 | 0.069 | 0.291 | 0.479 | 0.664 | −0.42 / +0.03 | 1.66 / 1.48 / 1.38 | 0.24 |
+| mean ×1 | 0 | 1501–2000, near only | 0.170 | 0.483 | (inactive) | (inactive) | ≈0 / ≈0 | 0.44 / 0.37 / 0.39 | 0.58 |
+| | | 2001–2010 | 0.174 | 0.506 | 1.578 | 1.507 | −0.22 / −0.40 | 0.44 / 0.24 / 0.14 | 2.21 |
+| | | 3501–4000 | 0.185 | 0.528 | 0.669 | 0.694 | −3.61 / −3.54 | 0.36 / 0.33 / 0.34 | 2.03 |
+| | | 7501–8000 | 0.188 | 0.540 | 0.732 | 0.679 | −3.85 / −3.63 | 0.31 / 0.32 / 0.35 | 2.06 |
+| mean ×1 | 1 | 1501–2000, near only | 0.182 | 0.498 | (inactive) | (inactive) | ≈0 / ≈0 | 0.43 / 0.41 / 0.40 | 0.59 |
+| | | 2001–2010 | 0.192 | 0.492 | 1.457 | 1.454 | −0.11 / −0.35 | 0.42 / 0.27 / 0.12 | 2.22 |
+| | | 3501–4000 | 0.186 | 0.547 | 0.735 | 0.645 | −3.35 / −3.81 | 0.36 / 0.35 / 0.31 | 2.03 |
+| | | 7501–8000 | 0.181 | 0.555 | 0.733 | 0.653 | −3.61 / −3.74 | 0.32 / 0.35 / 0.34 | 2.04 |
+
+Before step 2001 the far heads exist and are logged, but they don't train, so their numbers there
+are left out ("inactive").
 
 k5 relerr through each run (mean of the last 250 steps of each 1000):
 
@@ -100,8 +134,10 @@ k5 relerr through each run (mean of the last 250 steps of each 1000):
 
 Sanity, all four runs:
 - Every term is finite at every step.
-- **sum ×25:** no collapse. L2/L3 std never drops below its step-2000 value; L1 dips to 0.71–0.75 of
-  it when far joins, then grows to 1.6–1.7. Far log-variance stays in −1.8…+0.1.
+- **sum ×25:** no collapse.
+  - L2/L3 std stays at or above 0.98 of its step-2000 value.
+  - L1 dips to 0.71–0.75 of its step-2000 value when far joins, then grows to 1.6–1.7.
+  - Far log-variance stays in −1.8…+0.1.
 - **mean ×1: M4's collapse comes back, then recovers.**
   - Within 10 steps of far joining, L3's std falls from 0.39–0.40 to 0.065 (seed 0, 17%) and
     0.036 (seed 1, **9%**), and L2's to 44–48%.
@@ -119,10 +155,107 @@ Sanity, all four runs:
 The random-init floors are that addendum's, reused. They depend only on the architecture and the
 run's seed, which both arms share.
 
-READOUT_TABLES
+Each row is the pooled probe (L1–L3) for g1, g2 and g4, and the single level for g8.
+
+**vel** (the ball's world velocity)
+
+| encoder | seed | g1 | g2 | **g4** | g8 L1 | g8 L2 |
+|---|---|---|---|---|---|---|
+| sum ×25 | 0 | 0.63 (0.63) | 0.73 (0.75) | **0.77** (0.79) | 0.76 (0.78) | 0.72 (0.72) |
+| sum ×25 | 1 | 0.63 (0.61) | 0.73 (0.74) | **0.77** (0.79) | 0.77 (0.78) | 0.73 (0.72) |
+| mean ×1 | 0 | 0.75 (0.78) | 0.81 (0.82) | **0.81** (0.83) | 0.79 (0.82) | 0.78 (0.80) |
+| mean ×1 | 1 | 0.75 (0.78) | 0.80 (0.82) | **0.81** (0.83) | 0.79 (0.82) | 0.79 (0.81) |
+| random init | 0 | 0.72 (0.72) | 0.79 (0.81) | **0.79** (0.81) | 0.79 (0.81) | 0.76 (0.79) |
+| random init | 1 | 0.72 (0.73) | 0.78 (0.80) | **0.79** (0.80) | 0.78 (0.80) | 0.77 (0.79) |
+
+**vel_rel** (the ball's velocity relative to the camera, i.e. its motion in the image)
+
+| encoder | seed | g1 | g2 | g4 | g8 L1 | g8 L2 |
+|---|---|---|---|---|---|---|
+| sum ×25 | 0 | 0.48 (0.50) | 0.60 (0.62) | 0.64 (0.68) | 0.61 (0.67) | 0.56 (0.60) |
+| sum ×25 | 1 | 0.49 (0.50) | 0.58 (0.62) | 0.63 (0.67) | 0.61 (0.65) | 0.55 (0.58) |
+| mean ×1 | 0 | 0.58 (0.64) | 0.67 (0.71) | 0.69 (0.73) | 0.66 (0.71) | 0.63 (0.67) |
+| mean ×1 | 1 | 0.56 (0.62) | 0.66 (0.69) | 0.67 (0.71) | 0.65 (0.70) | 0.63 (0.68) |
+| random init | 0 | 0.60 (0.64) | 0.66 (0.69) | 0.65 (0.69) | 0.65 (0.71) | 0.61 (0.67) |
+| random init | 1 | 0.59 (0.63) | 0.65 (0.70) | 0.65 (0.69) | 0.63 (0.70) | 0.62 (0.68) |
+
+**cam_vel** (the camera's velocity: the background scroll)
+
+| encoder | seed | g1 | g2 | g4 | g8 L1 | g8 L2 |
+|---|---|---|---|---|---|---|
+| sum ×25 | 0 | 0.80 (0.77) | 0.90 (0.89) | 0.92 (0.92) | 0.91 (0.91) | 0.91 (0.89) |
+| sum ×25 | 1 | 0.79 (0.74) | 0.89 (0.88) | 0.92 (0.92) | 0.91 (0.91) | 0.90 (0.89) |
+| mean ×1 | 0 | 0.91 (0.93) | 0.94 (0.96) | 0.95 (0.97) | 0.94 (0.95) | 0.95 (0.95) |
+| mean ×1 | 1 | 0.91 (0.92) | 0.94 (0.96) | 0.95 (0.97) | 0.94 (0.95) | 0.95 (0.96) |
+| random init | 0 | 0.87 (0.85) | 0.94 (0.95) | 0.94 (0.95) | 0.94 (0.95) | 0.94 (0.95) |
+| random init | 1 | 0.87 (0.85) | 0.93 (0.94) | 0.94 (0.95) | 0.93 (0.94) | 0.93 (0.94) |
+
+**pos** (world position) stays unreadable for every encoder: dev R² ≤ 0.12 at every grid. mean ×1
+overfits the training terrains more at g4: test −0.26 in both seeds, against −0.07…−0.09 under
+sum ×25.
+
+**The readouts reverse the deciding metric.**
+- mean ×1's embeddings carry *more* linearly readable motion than sum ×25's, for every motion
+  target, at every grid, in both seeds.
+- mean ×1 matches or beats the random-init floor in every cell, where sum ×25 never reached it.
+  The clearest margins:
+  - g1: velocity 0.75 against 0.72, cam_vel 0.91 against 0.87;
+  - g4: velocity 0.81 against 0.79, vel_rel 0.67–0.69 against 0.65.
+- At finer grids the margin shrinks to 0.00–0.02 (cam_vel g8: 0.94 against 0.93–0.94). So "beats
+  random" is a small effect, though it holds in both seeds and on test.
 
 ## Conclusion
-(filled in after the runs)
+**Refuted, on the deciding metric.** With the guard at mean ×1, near-head k5 relerr on dev at step
+8000 is 0.536 / 0.555, against 0.302 / 0.291 under sum ×25. It is worse, not better, in both seeds,
+and at every other horizon too.
 
-## Next
-(filled in after the runs)
+The guard is still involved in the near-head slip, just not the way the hypothesis said:
+- **The slip after far joins is smaller under mean ×1.** On train batches, k5 rises 0.49–0.50 →
+  0.54–0.56 from step 2000 to 8000 (+10–12%), against 0.19–0.20 → 0.29–0.32 under sum ×25
+  (+53–60%).
+- **But mean ×1 starts far worse.** Its near-only phase already ends at k5 0.48–0.50, against
+  0.20, and it is already rising before far joins (0.43–0.45 at step 1000).
+- So the strong guard makes the near heads much better in the near-only phase, and part of that
+  advantage erodes once far joins. It doesn't create the slip from nothing.
+
+**relerr doesn't compare representations.** It measures each arm's predictions against its own
+embedding's batch mean. sum ×25's embeddings are 4–5× wider (std 1.4–1.7 against 0.31–0.35),
+and every channel is pushed to vary. mean ×1's narrower embeddings may hold variation that is
+harder to predict. The readouts are the representation-independent comparison, and they point the
+other way:
+- mean ×1's embeddings hold more linearly readable motion than sum ×25's: velocity R² (dev, g4)
+  0.81 against 0.77, and 0.75 against 0.63 at g1.
+- They reach or pass the random-init floor (0.79 at g4, 0.72 at g1), which sum ×25's never did in
+  the [first real run](2026-11-17-first-real-run.md). That is consistent with that note's
+  suspicion that the guard pushes trained features toward whatever varies most across samples
+  (appearance more than motion). It doesn't prove it.
+
+**mean ×1 brings back M4's far-head problem.**
+- L3's spread fell to 9–17% of its near-only value within 10 steps of far joining. It recovered
+  within about 1000–1400 steps.
+- The far log-variance runs to about −3.7 and stays there, and far relerr is worse: k10
+  0.73–0.74 against 0.46–0.47.
+- That is the behaviour the [guard decision](../docs/decisions/2026-11-17-far-collapse-guard-sum.md)
+  was made to stop, and SPEC §7.2 calibrates those variances.
+
+Net: neither guard setting is good at everything.
+- sum ×25: good latent prediction and healthy far heads, but poorer linear readouts.
+- mean ×1: better readouts, but worse latent prediction and the far collapse symptoms.
+
+The default stays sum ×25. That is the user's decision; nothing here changes it.
+
+## Next (proposals for the user; none run)
+1. **Judge the guard by the goal head, not by relerr or probes.**
+   - The question is whether mean ×1's more readable embeddings give better world-coordinate
+     predictions.
+   - Setup: the headline config at mean ×1, 24k steps, 2 seeds (about 2.1 GPU-h). Compare with
+     the 24k headline on the k = 20 test ratio to persistence (0.430).
+2. **An intermediate guard:** sum ×1, or mean ×25, at the near + far 8000-step budget, 2 seeds
+   (about 1 GPU-h for one setting).
+   - Is there a strength that keeps the far heads healthy (no L3 dip, log-variance near −1) and
+     still reaches the random floor on readouts?
+3. **Check the far heads' calibration under mean ×1.**
+   - Its log-variance (−3.7) is far below sum ×25's (−0.5). Whether those variances are well
+     calibrated in latent space isn't measured.
+   - `experiments/latent_relerr.py` could add the z-score coverage of the far heads on dev. That
+     is a small script change, with no new run.

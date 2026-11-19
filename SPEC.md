@@ -141,7 +141,8 @@ L_k = mean over positions of ‖ predictor_k(z_ctx) − stop_grad(z_tgt,k) ‖²
 
 - Use the same distance for all horizons. Normalize the embeddings per level if needed.
 - Since 2026-11-19 the default averages each level's latent terms (and its collapse guard) over channels instead of
-  summing them (`loss.latent_reduce: mean`; docs/decisions/2026-11-19-latent-loss-normalization.md).
+  summing them, and the fixed aux weights stay relative to L3's latent terms (`loss.latent_reduce: mean`;
+  docs/decisions/2026-11-19-latent-loss-normalization.md).
 - Cosine distance is an alternative. Pick one and report it.
 - Far heads: replace the squared distance with the Gaussian NLL of the target under the predicted distribution.
 - **Collapse guard (optional, on by default in tests):** a VICReg-style variance term on the context embeddings, penalizing any dimension whose batch standard deviation falls below a threshold.
@@ -161,8 +162,7 @@ L = Σ_k w_k · L_k + w_goal · L_goal + w_pix · L_pix
 Starting weights (placeholders, tune with ablations):
 
 - w_k = 1.0 for all horizons.
-- w_goal = 0.5. With the per-channel latent losses (§5.1, 2026-11-19) the default is 0.5 / 256, the same ratio
-  to the L3 latent terms (same decision).
+- w_goal = 0.5.
 - w_pix = 0.05. Since 2026-11-19 the default instead sets w_pix each step so that w_pix · L_pix is 10% of
   the rest of L (`loss.pix_share`; docs/decisions/2026-11-19-pixel-share-default.md).
 

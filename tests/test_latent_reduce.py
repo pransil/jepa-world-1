@@ -60,15 +60,14 @@ def _grads(cfg, frames):
 # ---------------------------------------------------------------- sum: exactly as before
 
 
-def test_base_defaults_to_mean_with_the_goal_weight_moved_with_l3():
+def test_base_defaults_to_mean_with_spec_weights():
     """Flipped 2026-11-19 after experiments/2026-11-19-latent-mean-collapse-check.md passed. The
-    guard stays sum x25 relative to the latent terms, and w_goal = 0.5 / C(L3) keeps SPEC's
-    goal-to-L3 ratio."""
-    cfg = load_config(CONFIGS / "base.yaml")
-    loss = cfg["loss"]
+    guard stays sum x25 relative to the latent terms, and the aux weights stay SPEC's, read
+    relative to L3's latent terms (test_fixed_aux_weights_move_with_l3)."""
+    loss = load_config(CONFIGS / "base.yaml")["loss"]
     assert loss["latent_reduce"] == "mean"
     assert (loss["var_reduce"], loss["w_var"]) == ("sum", 25.0)
-    assert loss["w_goal"] == 0.5 / cfg["model"]["levels"]["L3"]["channels"]
+    assert (loss["w_goal"], loss["w_pix"], loss["pix_share"]) == (0.5, 0.05, 0.10)
 
 
 @pytest.mark.parametrize(
@@ -89,19 +88,19 @@ def test_base_defaults_to_mean_with_the_goal_weight_moved_with_l3():
     ],
 )
 def test_configs_with_recorded_sum_runs_keep_sum(name):
-    """Their runs trained with channel-summed latents (and, with a goal head, w_goal 0.5)."""
+    """Their runs trained with channel-summed latents, at w_goal 0.5 where there is a goal head."""
     cfg = load_config(CONFIGS / f"{name}.yaml")
     assert cfg["loss"]["latent_reduce"] == "sum"
-    if "goal" in cfg["train"]["stages"]:
-        assert cfg["loss"]["w_goal"] == 0.5
+    assert cfg["loss"]["w_goal"] == 0.5
 
 
 @pytest.mark.parametrize("name", ["exp_headline", "exp_headline_48k", "m7_obstacles"])
 def test_the_m7_reference_chain_inherits_the_new_default(name):
-    """docs/decisions/2026-11-19-m7-ablations-at-48k.md: re-run at base.yaml's defaults."""
+    """docs/decisions/2026-11-19-m7-ablations-at-48k.md: re-run at base.yaml's defaults. The whole
+    loss block, so no key of it can be pinned away from them; test_base_defaults_to_mean_with_spec_
+    weights pins what those defaults are."""
     base = load_config(CONFIGS / "base.yaml")["loss"]
-    loss = load_config(CONFIGS / f"{name}.yaml")["loss"]
-    assert (loss["latent_reduce"], loss["w_goal"]) == (base["latent_reduce"], base["w_goal"])
+    assert load_config(CONFIGS / f"{name}.yaml")["loss"] == base
 
 
 def test_sum_is_bitwise_the_channel_sum_formulas():
@@ -217,6 +216,23 @@ def test_goal_and_pixel_terms_do_not_depend_on_it():
     for x in (s, m):
         assert x["pix_share"].item() == pytest.approx(0.10, rel=1e-5)
     assert m["w_pix_eff"] < s["w_pix_eff"]  # |rest| shrank, so the share's weight did too
+
+
+@pytest.mark.parametrize("reduce", ["sum", "mean"])
+def test_fixed_aux_weights_move_with_l3(reduce):
+    """Both aux heads read L3, so w_goal and a fixed w_pix are relative to L3's latent terms: under
+    mean they are divided by C(L3), as those terms are. SPEC's 0.5 / 0.05 keep their meaning, and
+    the M7 reference can't drift by --set loss.latent_reduce alone."""
+    cfg = tiny_aux_cfg(f"loss.latent_reduce={reduce}", "loss.pix_share=null")
+    model = _model(cfg)
+    batch = random_batch(cfg)
+    on = compute_world_losses(model, batch, cfg["loss"])
+    off = compute_world_losses(model, batch, cfg["loss"], aux_active=())
+    scale = 1 / CH["L3"] if reduce == "mean" else 1.0
+    w = cfg["loss"]
+    want = scale * (w["w_goal"] * on["loss/goal"] + w["w_pix"] * on["loss/pix"])
+    torch.testing.assert_close(on["loss/total"] - off["loss/total"], want, **REL)
+    torch.testing.assert_close(on["w_pix_eff"], torch.tensor(scale * w["w_pix"]))
 
 
 def test_public_helpers_take_the_reduction():

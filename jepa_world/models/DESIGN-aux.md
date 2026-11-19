@@ -39,6 +39,7 @@ batch ─┬─ frames ─► WorldModel ─► JEPA.forward (context L1..L3, he
        │                          └─ pixel dec. (context L1, L2, L3) ─► frame ────┼─► loss/pix  vs frames[:, C] (t+1)
        └─ ball_pos (a label, never a model input) ─► displacement_targets ───────┘
 loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix_eff·loss/pix [pixel stage started]
+             (w_goal and a fixed w_pix ÷ C(L3) under loss.latent_reduce: mean, like L3's latent terms)
 ```
 
 ### Logged terms (every step, for every BUILT aux head)

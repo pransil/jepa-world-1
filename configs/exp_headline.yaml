@@ -7,7 +7,7 @@
 # share on 2026-11-19 (docs/decisions/2026-11-19-pixel-share-default.md), and this file inherits it, as the M7 reference
 # exp_headline_48k.yaml must (docs/decisions/2026-11-19-m7-ablations-at-48k.md). It also inherits the
 # per-channel latent losses (docs/decisions/2026-11-19-latent-loss-normalization.md). To reproduce those runs, check out their
-# commit, or add --set loss.pix_share=null --set loss.latent_reduce=sum --set loss.w_goal=0.5.
+# commit, or add --set loss.pix_share=null --set loss.latent_reduce=sum.
 base: base.yaml
 
 train:

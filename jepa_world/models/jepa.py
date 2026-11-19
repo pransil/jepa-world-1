@@ -68,9 +68,10 @@ def latent_reduce(loss_cfg: dict) -> str:
     return _checked_reduce(loss_cfg.get("latent_reduce", "sum"))
 
 
-def _over_channels(x: torch.Tensor, channels: int, reduce: str) -> torch.Tensor:
-    """A channel-summed term as it is ('sum'), or per channel ('mean': divided by `channels`).
-    'sum' returns `x` itself, so the default path is bitwise what it was before the switch."""
+def over_channels(x: torch.Tensor | float, channels: int, reduce: str) -> torch.Tensor | float:
+    """A channel-summed term (or a weight on one) as it is ('sum'), or per channel ('mean':
+    divided by `channels`). 'sum' returns `x` itself, so the sum path is bitwise what it was
+    before the switch. world.py applies it to the fixed aux weights too."""
     return x if _checked_reduce(reduce) == "sum" else x / channels
 
 
@@ -97,7 +98,7 @@ def _relerr_from_sq(sq: torch.Tensor, target: torch.Tensor, eps: float) -> torch
 def latent_loss(pred: torch.Tensor, target: torch.Tensor, reduce: str = "sum") -> torch.Tensor:
     """mean over (batch, positions) of ||pred - sg(target)||^2 over channels (SPEC §5.1);
     reduce='mean' divides by the channel count (loss.latent_reduce)."""
-    return _over_channels(_sq_from_err2(_err2(pred, target)), pred.shape[1], reduce)
+    return over_channels(_sq_from_err2(_err2(pred, target)), pred.shape[1], reduce)
 
 
 def gaussian_nll(
@@ -111,7 +112,7 @@ def gaussian_nll(
     The log(2 pi) term makes it a true NLL. With logvar = 0 it is 0.5 * latent_loss + const.
     reduce='mean' divides by the channel count, as latent_loss does."""
     _check_same_shape(mean=mean, logvar=logvar)
-    return _over_channels(_nll_from_err2(_err2(mean, target), logvar), mean.shape[1], reduce)
+    return over_channels(_nll_from_err2(_err2(mean, target), logvar), mean.shape[1], reduce)
 
 
 def relative_error(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
@@ -435,9 +436,9 @@ def _gaussian_terms(
     err2 = _err2(pred, target)  # computed once, shared by the loss and the diagnostics
     sqerr = _sq_from_err2(err2)  # = latent_loss(pred, target)
     channels = target.shape[1]
-    losses[f"sqerr/{tag}"] = _over_channels(sqerr, channels, reduce).detach()
+    losses[f"sqerr/{tag}"] = over_channels(sqerr, channels, reduce).detach()
     losses[f"logvar/{tag}"] = logvar.detach().mean()
-    return _over_channels(_nll_from_err2(err2, logvar), channels, reduce), sqerr
+    return over_channels(_nll_from_err2(err2, logvar), channels, reduce), sqerr
 
 
 def losses_from_output(
@@ -456,7 +457,7 @@ def losses_from_output(
             lk, sqerr = _gaussian_terms(losses, f"k{k}", pred, out["logvar"][k], target, reduce)
         else:
             sqerr = _sq_from_err2(_err2(pred, target))  # = latent_loss(pred, target)
-            lk = _over_channels(sqerr, target.shape[1], reduce)
+            lk = over_channels(sqerr, target.shape[1], reduce)
         losses[f"loss/k{k}"] = lk
         losses[f"relerr/k{k}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
@@ -479,7 +480,7 @@ def losses_from_output(
             # var_reduce is relative to the latent terms' channel reduction ('sum': their scale),
             # so under either latent_reduce, w_var and var_reduce alone set each level's
             # guard-to-latent ratio (M4's collapse fix: far-collapse-guard-sum decision)
-            g = _over_channels(
+            g = over_channels(
                 _guard_from_var(
                     var, loss_cfg["var_gamma"], loss_cfg["var_eps"], loss_cfg["var_reduce"]
                 ),

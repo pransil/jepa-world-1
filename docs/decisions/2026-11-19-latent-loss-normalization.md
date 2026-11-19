@@ -52,10 +52,14 @@ goal head grows confident.
 
    **`sum` is the existing code path, bitwise.** `test_sum_is_bitwise_the_channel_sum_formulas`
    pins it. `uv run python experiments/latent_reduce_bitwise.py --ref origin/main` trains a tiny
-   model for 6 steps through main's `jepa.py` and through this one. It printed BITWISE IDENTICAL:
-   every logged term and parameter matched in 5 setups (near only, far joining mid-run, the mean
-   ×1 guard, top-down, a config with no key). With `mean` it prints DIFFERENT. A config without
-   the key means `sum`, so checkpoints, eval and `latent_relerr.py` reproduce every earlier run.
+   model for 6 steps through main's `jepa.py` and `world.py` and through this branch's. It printed
+   BITWISE IDENTICAL: every logged term and parameter matched in 9 setups.
+   - JEPA: near only, far joining mid-run, the mean ×1 guard, top-down, a config with no key.
+   - World: fixed `w_pix`, the 10% share, all four stages with goal and pixel joining mid-run,
+     a config with no key.
+
+   With `mean` it prints DIFFERENT. A config without the key means `sum`, so checkpoints, eval
+   and `latent_relerr.py` reproduce every earlier run.
 2. **The guard follows `latent_reduce`.** `var_reduce` keeps its M4 meaning, *relative to the
    latent terms*: `sum` is their channel reduction, `mean` is 1/C of it. So each level's balance
    (guard × w_var against that level's latent terms) moves by 1/C on both sides, and is set by
@@ -85,7 +89,9 @@ goal head grows confident.
    ([experiment](../../experiments/2026-11-18-guard-comparison.md)). If the far terms' weight is
    the cause, this rebalancing should reduce that regression. The collapse check's k5 criterion
    measures it.
-4. **Goal: `w_goal` = 0.5 / 256 = 0.001953125**, the same ratio to the L3 latent terms as before.
+4. **Goal (and a fixed pixel weight): the term moves with L3.** `w_goal` stays SPEC's 0.5. Under
+   `mean`, the code divides the weighted goal term by C(L3) (256), the level the goal head reads,
+   as it divides L3's own latent terms. So its ratio to them is what it was before.
    - **Kept at 0.5,** the goal term's weight against the latent terms would jump about C_eff×
      (112–161) in value, and 256× at stage 3, where it enters.
    - On the headline it would reach +75% of the latent loss when it joins, and −83…−93% by 24k.
@@ -93,24 +99,31 @@ goal head grows confident.
      (s·|L_rest| / L_pix) collapses with it.
    - That is a different experiment (supervising the encoder with ground-truth position), not a
      side effect of a normalization. The collapse check (near + far) can't test it either.
-   - **0.5 / 256 makes the goal term move with L3,** the level it reads, so its ratio to the k20
-     NLL and the L3 guard is what it was in every run so far. Its value share stays near zero, as
-     before (× C_eff / 256, about half).
+   - **Moving with L3,** the level it reads, keeps the goal term's ratio to the k20 NLL and the L3
+     guard what it was in every run so far. Its value share stays near zero, as before (× C_eff /
+     256, about half).
+   - **The same rule covers a fixed `w_pix`** (`pix_share: null`). The pixel decoder reads L3 too
+     (and L1 and L2). `pix_share` is relative to the rest of the loss already, so it is untouched.
+   - **In code, not as a config value** (`WorldModel.aux_channels`, `over_channels`). The first
+     version set `w_goal: 0.001953125` in base.yaml, and review rejected it: that is a second key
+     that has to agree with `latent_reduce`. `--set loss.latent_reduce=sum` on the M7 reference
+     would then have trained the goal head 256× too weak, with no warning. Now SPEC's weights
+     keep their meaning under either setting. Under `sum` nothing is divided: the aux path is
+     bitwise main's (`latent_reduce_bitwise.py`, world setups).
    - **Alternatives:**
+     - The hard-coded `w_goal: 0.5 / 256`, rejected above.
      - 0.5 / C_eff ≈ 0.004, to preserve the value share. C_eff drifts from 112 to 161 within a
        run and depends on which terms are active, so this has no mechanistic anchor.
      - A target share for the goal, like `pix_share`. That is a new mechanism, and a proposal
        below.
-   - **Under `sum`, `w_goal` stays 0.5.** This value is tied to `mean`, and the configs that keep
-     `sum` pin both.
-   - **Not enforced in code.** `latent_reduce: mean` with `w_goal: 0.5`, or with a fixed `w_pix`
-     (`pix_share: null`), trains a different objective: goal or pixel term about C_eff× heavier.
-     It is a legitimate experiment (the SPEC §5.4 weights on per-channel latents), so it isn't
-     refused. base.yaml's comment on `w_goal` states the pairing.
+   - **SPEC's weights on the per-channel latents, without the rescale,** would be a different
+     objective: the goal term about C_eff× heavier. It stays expressible as `w_goal: 128`
+     (0.5 × 256).
 5. **Pixel:** `pix_share` holds the pixel term at 10% of |L_rest| at any scale
    (`test_goal_and_pixel_terms_do_not_depend_on_it`). `w_pix_eff` will be about C_eff× smaller.
-   With `w_goal` as above, L_rest stays positive: the latent total under `mean` is 4–8 on the
-   headline.
+   With the goal term moving with L3, L_rest stays positive: the latent total under `mean` is 4–8
+   on the headline. A fixed `w_pix` is divided by C(L3) (item 4), and `w_pix_eff` logs it
+   (`test_fixed_aux_weights_move_with_l3`).
 6. **Top-down (`w_td` 0.5, off by default):** each branch's NLL is divided by its target level's
    channel count, like that level's own terms, so its ratio to them is unchanged. A branch reads
    the coarser level, though. So at the stage it enters, it gains 2× against that level's own far
@@ -144,23 +157,24 @@ worse than sum ×25's.
   The other horizons overlap across seeds.
 
 ## Consequences
-- **base.yaml:** `latent_reduce: mean` and `w_goal: 0.001953125` (0.5 / 256). `var_reduce: sum`
-  and `w_var: 25` don't change.
-- **Configs with recorded `sum` runs pin `sum`**, with `w_goal: 0.5` where there is a goal
-  head: `exp_first_real_run` (the comparison arm), `exp_guard_mean`, `m3_*`, `m4_*` and
-  `m7_pixel_share*` (`test_configs_with_recorded_sum_runs_keep_sum`).
+- **base.yaml:** `latent_reduce: mean`. `w_goal` 0.5, `w_pix` 0.05, `var_reduce: sum` and `w_var: 25`
+  don't change. The guard and the fixed aux weights follow the reduction in code (items 2 and 4).
+- **Configs with recorded `sum` runs pin `latent_reduce: sum`:** `exp_first_real_run` (the
+  comparison arm), `exp_guard_mean`, `m3_*`, `m4_*` and `m7_pixel_share*`
+  (`test_configs_with_recorded_sum_runs_keep_sum`).
 - **The M7 reference chain inherits `mean`:** `exp_headline`, `exp_headline_48k` and
   `m7_obstacles`, as [m7-ablations-at-48k](2026-11-19-m7-ablations-at-48k.md) requires. To
   reproduce an earlier headline run, use its commit, or `--set loss.pix_share=null --set
-  loss.latent_reduce=sum --set loss.w_goal=0.5`.
-- **SPEC:** §5.1 points here, and §5.4's `w_goal` line gives 0.5 / 256 under `mean`.
+  loss.latent_reduce=sum`.
+- **SPEC:** a one-line pointer in §5.1, as pre-registered. §5.4's weights are unchanged.
   [far-collapse-guard-sum](2026-11-17-far-collapse-guard-sum.md) has a dated note.
 - **Logged scales:** `experiments/latent_relerr.py` records the run's `latent_reduce` in its
   output, because its `loss/k`, `sqerr/k` and `var/L` scale with it.
 - **Untested by the check:** the goal and pixel terms under `mean` (it was near + far only). The
   48k M7 reference re-run will be the first full-model run at the new defaults, so read its goal
-  metrics against the old 48k runs knowing that the latents, the pixel share and `w_goal` all
-  changed.
+  metrics against the old 48k runs knowing that the latents, the pixel share and the effective
+  goal weight all changed. The goal weight's ratio to L3 is the old one, but its ratio to
+  L1 and L2 is 2–4× smaller.
 - **Revisit if** that re-run's k20 metrics (latent relerr, or the goal head's ratio to
   persistence) lose more than the +2.6% latent k20 cost seen here.
 - **Proposals, not built:**

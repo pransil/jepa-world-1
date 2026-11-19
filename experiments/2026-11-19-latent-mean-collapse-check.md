@@ -3,6 +3,10 @@
 - **Date:** 2026-11-19   **Lane/branch:** worktree-wt-latent-reduce   **Commits** (all clean, per each
   run's `meta.json`): the mean runs 00a4e78; the re-run bc2b819. The two differ only in `experiments/`,
   with the same model, training and config code.
+  Later commits on the branch changed only the aux heads' weights (goal and pixel), which a near +
+  far run doesn't have. Six `mean` near + far training steps through 00a4e78's `jepa.py`/`world.py` and
+  through the final ones are bitwise equal: every logged term and parameter (`latent_reduce_bitwise.py`'s
+  `compare`, with `--ref 00a4e78`'s modules).
 - **Run dirs:** mean `20261119T162336Z-worktree-wt-latent-reduce-latent-mean-s0-e82d5b` (s0) and `20261119T163737Z-worktree-wt-latent-reduce-latent-mean-s1-de9b34` (s1). Each holds `latent_dev.json`. The sum ×25
   re-run is `20261119T162037Z-worktree-wt-latent-reduce-latent-sum-repro-s0-3a0441`.
 - **Config:** `configs/exp_latent_mean.yaml`, which is `configs/exp_first_real_run.yaml` (near + far,
@@ -64,8 +68,9 @@ comparison's windows.
 
 ### The sum ×25 arm reproduces at this commit
 The 2100-step re-run of `configs/exp_first_real_run.yaml` (seed 0, bc2b819) matches the first real
-run's seed 0 `metrics.jsonl` exactly: 2100 rows × 27 keys, 0 differing values, including the 100
-steps after far joins. So the first real run's two seeds are the sum ×25 arm, unchanged.
+run's seed 0 `metrics.jsonl` exactly, including the 100 steps after far joins:
+`experiments/compare_metrics.py --run <re-run> --ref <first-real-s0>` printed "2100 rows x 27 keys
+compared; differing values: 0; max abs diff 0.0". So the first real run's two seeds are the sum ×25 arm, unchanged.
 
 ### Pass rule: **PASS**, all three rules, both seeds
 
@@ -102,14 +107,16 @@ steps after far joins. So the first real run's two seeds are the sum ×25 arm, u
 - **`loss/total` is about 64× smaller in the near-only phase and about 135× smaller at the end**
   (1.03–1.05 vs 66–68 over steps 1501–2000; 5.2 vs 704 over the last 500). These are the
   predicted 64× and C_eff.
-- **Steps 1–2000 (near only, mean = sum ÷ 64): close, not bitwise.**
+- **Steps 1–2000 (near only, mean = sum ÷ 64): close, not bitwise.** These numbers are printed by
+  `latent_mean_check.py` ("steps 1-2000, mean vs sum").
   - The windowed means agree: k5 relerr 0.197 vs 0.199, and 0.194 vs 0.195, over steps 1501–2000.
   - Per step, relerr differs by a median 1.3–2.9%. The largest differences are early, up to 76%
     while relerr is still large and moving fast.
   - `emb_std/L1` differs by a median 0.1%, at most 1–3.6%.
-  - Adam's ε (1e-8, against gradients 64× smaller) is the only difference, and it is enough to
-    send the trajectories apart. Statistically they are the same run, which supports "a uniform
-    scale barely matters".
+  - In code, the only difference in this phase is the uniform ÷ 64, and Adam cancels a uniform
+    scale except through ε (1e-8). So ε is the likely source of the drift. That is inferred from
+    the code, not measured; a run with ε × 64 would test it. Either way the windowed statistics
+    match, which supports "a uniform scale barely matters".
 
 ## Conclusion
 **Passed.** Averaging the latent losses over channels, with the guard following them (sum ×25's
@@ -121,8 +128,9 @@ ratio at every level), trains near + far without collapse:
 
 The cost is a small loss at k = 20: dev relerr 0.693 / 0.680 against 0.666 / 0.672 (+2.6%).
 
-As pre-registered, base.yaml's default becomes `latent_reduce: mean`, with `w_goal` 0.5 / 256, in
-the same PR ([decision](../docs/decisions/2026-11-19-latent-loss-normalization.md), now accepted).
+As pre-registered, base.yaml's default becomes `latent_reduce: mean` in the same PR
+([decision](../docs/decisions/2026-11-19-latent-loss-normalization.md), now accepted). The goal
+and fixed pixel weights keep SPEC's values, read relative to L3's latent terms.
 
 ## Next
 - The 48k M7 reference re-run (the user's call on GPU time) is the first full-model run at the new

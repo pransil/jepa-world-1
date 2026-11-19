@@ -237,7 +237,9 @@ def test_pixel_term_does_not_dominate_the_logged_total(share):
     - null, the fixed w_pix 0.05 (the headline configs): pixel_l1 <= 1 bounds the term by w_pix
       outright, and it stays under 10% of loss/total. A sum reduction (x3 channels x every pixel)
       would break both. (pixel_l1's mean reduction itself: test_pixel.py.)"""
-    sets = ["train.stages=[near, pixel]"] + (["loss.pix_share=null"] if share == "null" else [])
+    # null: the headline configs' fixed weight, with their channel-summed latents
+    null = ["loss.pix_share=null", "loss.latent_reduce=sum"]
+    sets = ["train.stages=[near, pixel]"] + (null if share == "null" else [])
     cfg = tiny_aux_cfg(*sets)
     assert cfg["loss"]["w_pix"] == 0.05  # base.yaml's values, not ones picked for the test
     assert cfg["loss"]["pix_share"] == (0.10 if share == "base" else None)

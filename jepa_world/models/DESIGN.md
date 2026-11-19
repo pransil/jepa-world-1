@@ -59,14 +59,15 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
   [target-input-stack](../../docs/decisions/2026-11-17-target-input-stack.md)
 - **Downsampling: 3×3 stride-2 conv** per 2× step, not pooling. L2→L3 (32→8) is two steps, with
   an unexposed 16×16 stage. [downsample-stride2](../../docs/decisions/2026-11-17-downsample-stride2.md)
-- **Latent distance: squared L2 on raw embeddings**, summed over channels and averaged over
-  positions (SPEC §5.1), not cosine or normalized targets.
+- **Latent distance: squared L2 on raw embeddings**, reduced over channels (summed until
+  2026-11-19, averaged since: `loss.latent_reduce`, below) and averaged over positions (SPEC §5.1),
+  not cosine or normalized targets.
   [latent-distance-sq-l2](../../docs/decisions/2026-11-17-latent-distance-sq-l2.md)
 - **Far heads read only their own level** (k = 10 → L2, k = 20 → L3; SPEC §9.6). They do not get
   pooled finer levels or a global summary.
   [far-heads-read-their-level](../../docs/decisions/2026-11-17-far-heads-read-their-level.md)
-- **Far loss: the full diagonal Gaussian NLL**, including ½·log 2π, summed over channels and
-  averaged over positions. That is the same reduction as the near loss: with logvar = 0 it is
+- **Far loss: the full diagonal Gaussian NLL**, including ½·log 2π, reduced over channels like
+  the near loss and averaged over positions. That is the same reduction as the near loss: with logvar = 0 it is
   ½·(the near loss) + a constant. Including the constant makes the logged value a true NLL (it
   can go negative). `torch.nn.functional.gaussian_nll_loss` lost because it takes a variance,
   clamps it with an eps, and averages over channels rather than summing.
@@ -101,7 +102,8 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
   the context levels only they read, run under `no_grad` (`UNetEncoder(x, after=...)` finishes
   the encoding without a graph), so a stage that hasn't started costs no backward memory.
   [stage-schedule-within-run](../../docs/decisions/2026-11-17-stage-schedule-within-run.md)
-- **Guard summed over channels, at w_var = 25** (`loss.var_reduce: sum`). With raw targets, the
+- **Guard summed over channels, at w_var = 25** (`loss.var_reduce: sum`; since 2026-11-19 "summed"
+  means "at the latent terms' channel reduction", below). With raw targets, the
   far NLL rewards shrinking L2/L3 (smaller error → smaller predicted variance → more negative
   NLL). The mean-reduced guard at w_var = 1 was too weak to resist that: L3 collapsed, and the
   log-variance ran to the floor. The summed guard prevented both on synthetic and real dev data.
@@ -126,7 +128,12 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
   - `relerr` is computed from the channel sums before any division, so it is bitwise identical
     under either setting. `loss/total`, `loss/k` and `var/L` differ by the level's channel count.
   - With Adam, `mean` on one level is a uniform rescale, a no-op up to ε. What it changes is the
-    balance between levels and against the aux terms, which is why `w_goal` moves with it.
+    balance between levels.
+  - **The fixed aux weights follow it too** (`models/world.py`). Under `mean`, `w_goal` and a fixed
+    `w_pix` are divided by L3's channel count (`WorldModel.aux_channels`), because both heads read
+    L3. Each keeps its ratio to L3's latent terms, and SPEC's `w_goal = 0.5` keeps its meaning. A
+    hard-coded 0.5 / 256 lost: it was a second key that had to agree with `latent_reduce`.
+    `pix_share` is already relative to the rest of the loss, so it is untouched.
   [latent-loss-normalization](../../docs/decisions/2026-11-19-latent-loss-normalization.md)
 - **The target encoder runs once per level group:** the stacks of all heads reading a level are
   concatenated along the batch and encoded `upto` that level. Near stacks stop at L1, and only the

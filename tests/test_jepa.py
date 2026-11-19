@@ -28,7 +28,8 @@ REDUCE = tiny_cfg()["loss"]["latent_reduce"]
 
 
 def _per_level(x: torch.Tensor, level: str) -> torch.Tensor:
-    """A channel-summed value (variance_guard) in the loss's reduction: / C under mean."""
+    """A channel-summed value (variance_guard) in the loss's reduction: / C under mean. Written
+    out here on purpose, not jepa.over_channels: the test's oracle stays independent of the code."""
     return x / TINY_SHAPE[level][0] if REDUCE == "mean" else x
 
 

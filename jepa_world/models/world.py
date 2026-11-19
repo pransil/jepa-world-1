@@ -15,7 +15,13 @@ import torch
 from torch import nn
 
 from jepa_world.models.goal import GoalHead, displacement_targets, goal_nll
-from jepa_world.models.jepa import JEPA, check_loss_cfg, losses_from_output
+from jepa_world.models.jepa import (
+    JEPA,
+    check_loss_cfg,
+    latent_reduce,
+    losses_from_output,
+    over_channels,
+)
 from jepa_world.models.pixel import PixelDecoder, pixel_l1
 
 AUX_STAGES = ("goal", "pixel")
@@ -66,6 +72,10 @@ class WorldModel(JEPA):
         super().__init__(cfg, horizons, extra_levels=[*goal_levels, *pixel_levels])
         self.goal_levels, self.pixel_levels = goal_levels, pixel_levels  # L3 [, L2]; L1..L3
         ch = {name: lv["channels"] for name, lv in m["levels"].items()}
+        # Both aux heads read the coarsest level (L3). Their fixed weights are relative to its
+        # latent terms, so under loss.latent_reduce: mean they are divided by its channel count
+        # (docs/decisions/2026-11-19-latent-loss-normalization.md).
+        self.aux_channels = ch[levels[-1]]
         self.goal = (
             GoalHead(
                 ch[levels[-1]],
@@ -162,9 +172,12 @@ def compute_world_losses(
     loss/total adds w_goal * loss/goal and w_pix * loss/pix only for stages in `aux_active`
     (default: every built one). With loss.pix_share = s, the pixel weight is instead
     pix_share_weight(s, rest, loss/pix), so the term is s * |rest| every step.
+    Under loss.latent_reduce: mean, w_goal and a fixed w_pix are divided by the channel count
+    of L3, the level both heads read, like L3's own latent terms: each keeps its ratio to them.
     The model gets the frames only; ball_pos is a label."""
     frames, ball_pos = split_batch(batch)
     check_loss_cfg(model, loss_cfg)  # every check before the forward, so bad input fails fast
+    reduce = latent_reduce(loss_cfg)
     share = check_pix_share(loss_cfg)
     if model.goal is not None and ball_pos is None:
         raise ValueError(
@@ -189,15 +202,17 @@ def compute_world_losses(
             losses[f"goalratio/k{k}"] = err[j] / persist[j]
         losses["loss/goal"] = nll.sum()
         if "goal" in aux_active:
-            total = total + loss_cfg["w_goal"] * losses["loss/goal"]
+            w_goal = over_channels(loss_cfg["w_goal"], model.aux_channels, reduce)
+            total = total + w_goal * losses["loss/goal"]
     if model.pixel is not None:
         pix = losses["loss/pix"] = pixel_l1(out["pixel"], frames[:, model.context_frames])  # t+1
         rest = total.detach()
         if "pixel" not in aux_active:
             w = pix.new_zeros(())
-        elif share is None:
-            total = total + loss_cfg["w_pix"] * pix  # the fixed weight, exactly as before
-            w = pix.new_full((), loss_cfg["w_pix"])  # filled on device: no host copy
+        elif share is None:  # the fixed weight: under sum, exactly as before
+            w_pix = over_channels(loss_cfg["w_pix"], model.aux_channels, reduce)
+            total = total + w_pix * pix
+            w = pix.new_full((), w_pix)  # filled on device: no host copy
         else:
             w = pix_share_weight(share, rest, pix)
             total = total + w * pix

@@ -93,14 +93,18 @@ def test_inactive_aux_terms_are_logged_but_left_out_of_the_total():
     off = _losses(model, batch, cfg, aux_active=())
     assert {"loss/goal", "loss/pix"} <= set(off)
     w = cfg["loss"]
+    # w_goal is relative to L3's latent terms: / C(L3) under base.yaml's latent_reduce: mean
+    # (docs/decisions/2026-11-19-latent-loss-normalization.md)
+    c3 = cfg["model"]["levels"]["L3"]["channels"]
+    w_goal = w["w_goal"] / c3 if w["latent_reduce"] == "mean" else w["w_goal"]
     assert off["w_pix_eff"] == 0
     torch.testing.assert_close(  # w_pix_eff: base.yaml's 10% share weight (or w_pix if null)
         on["loss/total"] - off["loss/total"],
-        w["w_goal"] * on["loss/goal"] + on["w_pix_eff"] * on["loss/pix"],
+        w_goal * on["loss/goal"] + on["w_pix_eff"] * on["loss/pix"],
     )
     goal_only = _losses(model, batch, cfg, aux_active=["goal"])
     torch.testing.assert_close(
-        goal_only["loss/total"] - off["loss/total"], w["w_goal"] * on["loss/goal"]
+        goal_only["loss/total"] - off["loss/total"], w_goal * on["loss/goal"]
     )
 
 
@@ -309,10 +313,14 @@ def _share_cfg(share="0.01", *more):
 def test_pix_share_null_is_bitwise_the_fixed_weight():
     """Off (null, or a pre-change config with no key): loss/total is exactly the fixed-weight
     sum, and every gradient is bitwise equal."""
-    cfg = tiny_aux_cfg("loss.pix_share=null")  # base.yaml's default is a share since 2026-11-19
+    # base.yaml's defaults since 2026-11-19 are a share and per-channel latents: the pre-change
+    # loss is pix_share null with channel-summed latents (the fixed weights' mean-mode scaling is
+    # tested in test_latent_reduce.py)
+    cfg = tiny_aux_cfg("loss.pix_share=null", "loss.latent_reduce=sum")
     assert cfg["loss"]["pix_share"] is None
     old = tiny_aux_cfg()
-    del old["loss"]["pix_share"]  # saved configs from before this key existed
+    del old["loss"]["pix_share"]  # saved configs from before these keys existed
+    del old["loss"]["latent_reduce"]
     batch = random_batch(cfg)
     grads, totals = [], []
     for c in (cfg, old):
@@ -339,7 +347,7 @@ def test_pix_share_null_is_bitwise_the_fixed_weight():
 
 
 def test_fixed_weight_logs_its_weight_and_share():
-    cfg = tiny_aux_cfg("loss.pix_share=null")
+    cfg = tiny_aux_cfg("loss.pix_share=null", "loss.latent_reduce=sum")  # w_pix as written
     model, batch = _model(cfg), random_batch(cfg)
     on = _losses(model, batch, cfg)
     rest = _losses(model, batch, cfg, aux_active=["goal"])["loss/total"]

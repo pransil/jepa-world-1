@@ -47,10 +47,15 @@ at twice A's cost, and C's extra gain is too small to justify doubling the cost 
   - The config file itself needn't change: it inherits base.yaml, so the commit it runs at
     decides which defaults it has.
   - The orchestrator is asking the user about that GPU time. This decision launches no training.
+  - (Later on 2026-11-19: both defaults landed, in PRs #30 and #31. The re-run is approved and
+    assigned to m5.)
 - **Cost:** about 2 GPU-h per seed. Measured, the 48k runs trained in 1.90–1.95 h (0.143–0.146 s/step),
   and the 24k pixel-share runs at 0.130–0.132 s/step; each eval took about 2 min. The remaining
   ablations come to about 25 GPU-h. The per-ablation table is in
   [M7-plan.md](../milestones/M7-plan.md), "Summary".
+  - (Later on 2026-11-19: the plan now states §1 and §2 relative to the 10% default share. §2
+    needs 2 runs at 10% instead of 4, and §1 at 48k is optional. That brings the required total,
+    reference included, to about 21.5 GPU-h.)
 - **Revisit if** the re-run reference's training `goalratio` has flattened well before 48k (then a
   shorter run would do), or if a 96k run, should the user approve one, shows a large further gain
   between 48k and 96k.

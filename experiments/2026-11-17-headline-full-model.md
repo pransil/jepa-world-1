@@ -31,7 +31,7 @@ terrains, and below constant velocity's at k ≥ 5. It does not reach the simula
 - simulator with mean ball parameters, **the headline physics bar** (accepted by the user on
   2026-11-18;
   [docs/decisions/2026-11-17-simulator-baseline-params.md](../docs/decisions/2026-11-17-simulator-baseline-params.md),
-  whose status m6's docs PR flips): 0.014 / 0.055 / 0.080;
+  recorded as accepted by PR #22): 0.014 / 0.055 / 0.080;
 - simulator with true parameters, **the oracle ceiling** (same decision): 0.000.
 
 **Also reported:**
@@ -45,8 +45,8 @@ terrains, and below constant velocity's at k ≥ 5. It does not reach the simula
 **Budget:** 2 seeds × 24000 steps, B = 32, MPS under the GPU lock, sized to about 75–90 min per
 seed at the measured step time (below).
 
-**Settings this run uses, accepted by the user on 2026-11-18** (relayed by the orchestrator; m6's
-docs PR flips both decision files from proposed):
+**Settings this run uses, accepted by the user on 2026-11-18** (relayed by the orchestrator; recorded in
+both decision files by PR #22):
 - `stage_start` goal 4000 and pixel 6000, `goal_hidden` 128, `pix_widths` [64, 32], and
   `loss/goal` = the sum over 7 horizons
   ([docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md](../docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md));

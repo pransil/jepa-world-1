@@ -95,6 +95,48 @@ split ─► EpisodeSet ─► windows (ep, t): t ∈ valid_starts(T, C, max(mod
   file, and hard-linked into place, so a failure leaves no partial file and an existing name
   is never replaced.
 
+## The pred/actual viewer (`viewer.py`)
+
+```
+python -m jepa_world.viewer --model "24k headline=<run dir>@24000" --model "48k=<run dir>" \
+                            [--split test] [--episodes 24] [--device cpu] [--out <file.html>]
+```
+
+It writes one self-contained HTML page that plays held-out episodes frame by frame, one model at
+a time. **Not here:** new metrics. The page shows what the model outputs, plus the run's own
+`eval/*.json` numbers when one exists for exactly that checkpoint.
+
+```
+each --model ─► load_run(run, checkpoint) on the CPU ─► check_eval_split(run cfg, base.yaml, split)
+first model's cfg ─► load_split(split) (every model must name the same dataset dir)
+pick_episodes: evenly spaced over the manifest, never chosen by model output
+per episode: model_outputs(windows t = C−1 .. T−1, goal + pixel), context frames only
+   goal  ─► goal_track: pred (W,K,2) = pos[t] + mean,  std (W,K,2) = exp(logvar / 2)
+   pixel ─► (W,S,S,3) uint8 ─► one PNG strip; MAE vs real frame t+1, and copy-last-frame's MAE
+episode files ─► terrain profile, cam_pos, ball_px, events (bounce, contact, out_of_view, occluded)
+payload (JSON) ─► viewer_template.html ─► $JEPA_ARTIFACTS/viewers/<UTC>-<split>-<hex>.html (≤ 16 MB)
+```
+
+- **"Predicted position" is the goal head's output, and nothing else.** pred_k = ball_pos[t] +
+  mean_k, with each axis's σ from logvar_k: the numbers `eval --run` scores. The 50% and 90%
+  regions are the joint χ²(2) ellipses that `metrics.coverage` counts. The alternative, a linear
+  probe over the latent heads' predicted embeddings, lost for two reasons. It would be a second
+  model fit on training data, so its error would mix predictor and probe. And world position is
+  barely decodable from these embeddings: probe R² 0.06 on test for `headline48k-s0` at 48k,
+  because the camera tracks the ball. The latent heads are therefore not drawn.
+- **Camera overlays use frame t's camera.** Predicted and true positions at t+k are projected
+  with `sim.camera.project(·, cam_pos[t])`. The camera is orthographic, so this is exact and σ
+  scales by `px_per_m`. Points off the frame are drawn on a margin around it.
+- **Every t ≥ C−1 gets a prediction.** Truth exists only where t+k ≤ T−1. The windows `eval`
+  scores (t = 3..39) are flagged, and per-episode errors use only those.
+- **Held-out data only.** The split must be dev or test, checked with `eval.check_eval_split`
+  for every model against base.yaml's seeds. The page names the split on every panel.
+- **CPU by default.** All three models on 24 episodes take seconds on the CPU, and the GPU is
+  shared, so `--device mps` is opt-in and runs under `gpu_lock`.
+- **One file, data inline.** Frames go in as PNG strips (data URIs, lossless), with no script or
+  stylesheet from the network. The size is checked against 16 MB before anything is written, and
+  the default output is under the artifact root, never in git.
+
 ## Data flow and shapes
 
 M is the number of scored windows (episode, t), the same set at every horizon k. N is the number
@@ -248,6 +290,8 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `eval.goal_positions`, `check_eval_split` | yes | none | `tests/test_eval.py` |
 | `eval.load_run`, `model_outputs` | torch, device | the run dir (read) | fast: tiny CPU model, checkpoint in the tmp artifact root |
 | `eval.evaluate_run` / `--run` | no | GPU lock on MPS, run dir (writes `eval/*.json`) | fast end to end on tiny fake datasets (CPU, simulator off) |
+| `viewer.goal_track`, `pick_episodes`, `png_strip`, `eval_summary`, `render_html` | yes (eval_summary reads a run's eval/) | none | `tests/test_viewer.py` |
+| `viewer.export` / CLI | no | artifact root (reads datasets and runs, writes `viewers/`), GPU lock only with `--device mps` | fast end to end on tiny fake datasets (CPU) |
 
 ## Files
 
@@ -257,3 +301,5 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `probes.py` | `pool`, `ProbeData`, `fit_probes`, `score_probes`, `run_probes` |
 | `baselines.py` | closed-form baselines (`predict`), `sim_ball`, `match_clearance`, `simulator_predict`, `evaluate` (with `extra` precomputed predictions) |
 | `eval.py` | `--baselines`: every baseline on a split, written to a new run dir. `--run`: a trained run's goal head, visibility, events, probes and baselines on held-out splits, written to `<run>/eval/` |
+| `viewer.py` | the pred/actual viewer: models' goal and pixel outputs on held-out episodes, as one HTML file |
+| `viewer_template.html` | the page: camera view, side view, pixel decoder, controls. `viewer.py` fills in its data |

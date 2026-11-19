@@ -49,7 +49,9 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
 | `goalerr/k<k>` | mean ‖μ − Δ‖ in metres (detached) |
 | `goalratio/k<k>` | goalerr / mean ‖Δ‖: error relative to persistence, which predicts Δ = 0; < 1 beats it (SPEC §7.2, §11) |
 | `loss/goal` | Σ_k `loss/goal/k<k>`, the term weighted by `loss.w_goal` |
-| `loss/pix` | mean \|frame − frame t+1\|, the term weighted by `loss.w_pix` |
+| `loss/pix` | mean \|frame − frame t+1\|, the term weighted by `loss.w_pix` (or by `loss.pix_share`) |
+| `w_pix_eff` | the pixel weight used this step: `w_pix`, or the share weight; 0 before the pixel stage starts |
+| `pix_share` | `w_pix_eff·loss/pix / \|loss/total without it\|`: the pixel term's achieved share |
 
 ## Key decisions
 
@@ -94,6 +96,32 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
 - **`pixel_l1` is the mean over every element**: mean absolute error in [0, 1] intensity units. So
   w_pix · L_pix ≤ w_pix (0.05 at the SPEC weight). `test_pixel_term_does_not_dominate_the_logged_total`
   holds it under 10% of `loss/total` over a short run.
+- **Pixel weight: fixed, or a target share** (`loss.pix_share`, M7).
+  [pixel-ablation-target-share](../../docs/decisions/2026-11-18-pixel-ablation-target-share.md)
+  - **null** (the default) keeps `w_pix`, through exactly the old expression. It is bitwise the
+    pre-2026-11-18 loss and gradients (`test_pix_share_null_is_bitwise_the_fixed_weight`).
+  - **A share s** sets `w_eff = s·|L_rest| / max(L_pix, 1e-6)` (`pix_share_weight`), where
+    L_rest is `loss/total` without the pixel term.
+  - **Both sides are detached**, so the gradient flows only through L_pix, and the rest keeps its
+    own gradient, unscaled. A non-detached L_pix would cancel the decoder's gradient outright,
+    because w·L_pix = s|L_rest|.
+  - **|L_rest|**, because the far and goal NLLs can push the rest small or negative.
+  - **The 1e-6 floor** is the divide-by-zero guard. It can only make the share fall short of s,
+    never exceed it.
+  - **Per step and stateless: no EMA, no clamp on w_eff.** In both headline runs, over the 18k
+    steps after the pixel stage joins:
+    - L_rest stayed within 431–1640 and was never negative.
+    - |L_rest|/L_pix moved about 11% step to step (median; p95 33%).
+    - It drifted about 250× over the run (1.6e3 → 4.5e5). That drift is what the share is meant
+      to follow.
+
+    An EMA would smooth only the 11%, but would add cross-step state that checkpoints don't carry.
+    The stateless weight is exact every step and is reproducible from the step alone.
+  - The share is of the loss **value**, not of the gradient norm. Adam rescales per parameter, so
+    the pixel decoder's own parameters barely notice w_eff. The share matters where the pixel
+    gradient meets the latent gradients, in the shared encoder.
+  - Every run with a pixel decoder logs `w_pix_eff` (0 before the stage starts) and the achieved
+    `pix_share`, so the ≈0 level is measurable in any run.
 - **The goal head's first Linear runs K times on the same pooled vector.** Splitting it into W_g·g
   (once per sample) plus W_e·k_embed (once per horizon) would save (l3_ch + l2_ch)·hidden·(K−1)
   MACs per sample, about 300k at the base sizes. That is noise next to the encoder's

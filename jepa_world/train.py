@@ -25,7 +25,12 @@ from jepa_world.data.dataset import batches as episode_batches
 from jepa_world.data.dataset import load_split, require_split
 from jepa_world.data.splits import TRAINABLE, LeakageError
 from jepa_world.data.synthetic import moving_disc_batch
-from jepa_world.models.world import AUX_STAGES, WorldModel, compute_world_losses
+from jepa_world.models.world import (
+    AUX_STAGES,
+    WorldModel,
+    check_pix_share,
+    compute_world_losses,
+)
 from jepa_world.utils.config import load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
@@ -176,6 +181,7 @@ def check_config(cfg: dict) -> list[int]:
             "lower-precision path must be built and tested explicitly first (SPEC §6)"
         )
     _check_stage_start(cfg, horizons)
+    check_pix_share(cfg["loss"])
     return horizons
 
 

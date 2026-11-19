@@ -94,9 +94,10 @@ def test_inactive_aux_terms_are_logged_but_left_out_of_the_total():
     assert {"loss/goal", "loss/pix"} <= set(off)
     w = cfg["loss"]
     # w_goal is relative to L3's latent terms: / C(L3) under base.yaml's latent_reduce: mean
-    # (docs/decisions/2026-11-19-latent-loss-normalization.md)
+    # (docs/decisions/2026-11-19-latent-loss-normalization.md), and logged as w_goal_eff
     c3 = cfg["model"]["levels"]["L3"]["channels"]
     w_goal = w["w_goal"] / c3 if w["latent_reduce"] == "mean" else w["w_goal"]
+    assert on["w_goal_eff"].item() == pytest.approx(w_goal) and off["w_goal_eff"] == 0
     assert off["w_pix_eff"] == 0
     torch.testing.assert_close(  # w_pix_eff: base.yaml's 10% share weight (or w_pix if null)
         on["loss/total"] - off["loss/total"],

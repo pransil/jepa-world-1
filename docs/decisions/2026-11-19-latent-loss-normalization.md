@@ -53,10 +53,12 @@ goal head grows confident.
    **`sum` is the existing code path, bitwise.** `test_sum_is_bitwise_the_channel_sum_formulas`
    pins it. `uv run python experiments/latent_reduce_bitwise.py --ref origin/main` trains a tiny
    model for 6 steps through main's `jepa.py` and `world.py` and through this branch's. It printed
-   BITWISE IDENTICAL: every logged term and parameter matched in 9 setups.
+   BITWISE IDENTICAL: every logged term and parameter matched in 10 setups. The one new log key,
+   `w_goal_eff`, is reported, not compared.
    - JEPA: near only, far joining mid-run, the mean ×1 guard, top-down, a config with no key.
-   - World: fixed `w_pix`, the 10% share, all four stages with goal and pixel joining mid-run,
-     a config with no key.
+   - World: near + far with no aux head; with goal and pixel, the fixed `w_pix`, the 10% share,
+     all four stages with goal and pixel joining mid-run, and a config with no key. The old
+     `world.py` runs against the current `jepa.py`, so these check `world.py` alone.
 
    With `mean` it prints DIFFERENT. A config without the key means `sum`, so checkpoints, eval
    and `latent_relerr.py` reproduce every earlier run.
@@ -89,9 +91,10 @@ goal head grows confident.
    ([experiment](../../experiments/2026-11-18-guard-comparison.md)). If the far terms' weight is
    the cause, this rebalancing should reduce that regression. The collapse check's k5 criterion
    measures it.
-4. **Goal (and a fixed pixel weight): the term moves with L3.** `w_goal` stays SPEC's 0.5. Under
-   `mean`, the code divides the weighted goal term by C(L3) (256), the level the goal head reads,
-   as it divides L3's own latent terms. So its ratio to them is what it was before.
+4. **Each fixed aux weight moves with the level its head reads.**
+   - **Goal:** `w_goal` stays SPEC's 0.5. Under `mean`, the code divides it by C(L3) (256),
+     because the goal head reads pooled L3 (§4.6). L3's own latent terms are divided the same way,
+     so the goal's ratio to them is what it was before.
    - **Kept at 0.5,** the goal term's weight against the latent terms would jump about C_eff×
      (112–161) in value, and 256× at stage 3, where it enters.
    - On the headline it would reach +75% of the latent loss when it joins, and −83…−93% by 24k.
@@ -102,9 +105,17 @@ goal head grows confident.
    - **Moving with L3,** the level it reads, keeps the goal term's ratio to the k20 NLL and the L3
      guard what it was in every run so far. Its value share stays near zero, as before (× C_eff /
      256, about half).
-   - **The same rule covers a fixed `w_pix`** (`pix_share: null`). The pixel decoder reads L3 too
-     (and L1 and L2). `pix_share` is relative to the rest of the loss already, so it is untouched.
-   - **In code, not as a config value** (`WorldModel.aux_channels`, `over_channels`). The first
+   - **A fixed `w_pix`** (`pix_share: null`) is divided by C(L1) (64), because SPEC §4.7's pixel
+     decoder "reads L1 plus the skip from the U-Net decoder path". It keeps its ratio to the near
+     terms.
+     - The decoder's gradient reaches L2 and L3 too, so no single anchor preserves every ratio.
+       L1 is SPEC's.
+     - It doesn't depend on `unet_skips`, so M7's skip ablation compares one weight.
+     - An earlier draft used L3 for both heads. Review rejected it: the premise that both heads
+       read only L3 was wrong.
+     - `pix_share`, the default, is relative to the rest of the loss already, so it is untouched.
+   - **In code, not as a config value** (`WorldModel.goal_channels` / `pixel_channels`,
+     `over_channels`), and logged as `w_goal_eff` / `w_pix_eff`. The first
      version set `w_goal: 0.001953125` in base.yaml, and review rejected it: that is a second key
      that has to agree with `latent_reduce`. `--set loss.latent_reduce=sum` on the M7 reference
      would then have trained the goal head 256× too weak, with no warning. Now SPEC's weights
@@ -122,8 +133,8 @@ goal head grows confident.
 5. **Pixel:** `pix_share` holds the pixel term at 10% of |L_rest| at any scale
    (`test_goal_and_pixel_terms_do_not_depend_on_it`). `w_pix_eff` will be about C_eff× smaller.
    With the goal term moving with L3, L_rest stays positive: the latent total under `mean` is 4–8
-   on the headline. A fixed `w_pix` is divided by C(L3) (item 4), and `w_pix_eff` logs it
-   (`test_fixed_aux_weights_move_with_l3`).
+   on the headline. A fixed `w_pix` is divided by C(L1) (item 4), and `w_pix_eff` logs it
+   (`test_fixed_aux_weights_move_with_their_level`).
 6. **Top-down (`w_td` 0.5, off by default):** each branch's NLL is divided by its target level's
    channel count, like that level's own terms, so its ratio to them is unchanged. A branch reads
    the coarser level, though. So at the stage it enters, it gains 2× against that level's own far

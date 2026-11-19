@@ -70,7 +70,9 @@ def table(run: Path) -> list[str]:
                 nf_s.append(near_s / far_s)
                 nf_m.append(near_m / far_m)
             if goal_on:
-                goal = loss["w_goal"] * r["loss/goal"]
+                # as trained: the logged weight if the run has it (w_goal_eff, 2026-11-19 on;
+                # / C(L3) under mean), else the configured one (every earlier run: sum)
+                goal = r.get("w_goal_eff", loss["w_goal"]) * r["loss/goal"]
                 g_s.append(goal / s)
                 g_m.append(goal / mm)
 

@@ -234,10 +234,11 @@ def test_pixel_term_does_not_dominate_the_logged_total(share):
     """SPEC §8 M5, at both pixel weightings, every step of a short run:
     - base.yaml's default (a 10% share, decision 2026-11-19): the logged share of the rest of
       loss/total is the target, 0.10, whatever loss/pix's reduction or size;
-    - null, the fixed w_pix 0.05 (the headline configs): pixel_l1 <= 1 bounds the term by w_pix
+    - null with channel-summed latents (the setting of the headline runs before 2026-11-19): the
+      fixed w_pix 0.05 and pixel_l1 <= 1 bound the term by w_pix
       outright, and it stays under 10% of loss/total. A sum reduction (x3 channels x every pixel)
       would break both. (pixel_l1's mean reduction itself: test_pixel.py.)"""
-    # null: the headline configs' fixed weight, with their channel-summed latents
+    # null: the pre-2026-11-19 headline runs' fixed weight, with their channel-summed latents
     null = ["loss.pix_share=null", "loss.latent_reduce=sum"]
     sets = ["train.stages=[near, pixel]"] + (null if share == "null" else [])
     cfg = tiny_aux_cfg(*sets)
@@ -449,8 +450,8 @@ def test_m7_pixel_share_configs(name, share):
     assert cfg["loss"]["pix_share"] == share
     assert cfg["train"]["steps"] == 24000
     assert cfg["train"]["stages"] == ["near", "far", "goal", "pixel"]
-    # pinned to what ran in PR #28: summed latents, SPEC's w_goal (test_latent_reduce.py)
-    pinned = {"pix_share", "latent_reduce", "w_goal"}
+    # pinned to what ran in PR #28: channel-summed latents (test_latent_reduce.py)
+    pinned = {"pix_share", "latent_reduce"}
     rest = {k: v for k, v in cfg["loss"].items() if k not in pinned}
     assert rest == {k: v for k, v in headline["loss"].items() if k not in pinned}
     assert {k: v for k, v in cfg.items() if k != "loss"} == {

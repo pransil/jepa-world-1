@@ -1,6 +1,7 @@
 """Is loss.latent_reduce: sum (or no key) bitwise the loss code of an earlier commit, in training?
 
   uv run python experiments/latent_reduce_bitwise.py [--ref origin/main] [--steps 6]
+      [--reduce sum|mean] [--match <substring of a setup name>]
 
 Loads jepa_world/models/jepa.py and models/world.py as they were at --ref (git show) beside the
 current ones, and trains the same tiny model on CPU through each for --steps steps (AdamW + EMA, as
@@ -8,9 +9,16 @@ train.train_step does). Compares every logged term at every step and every param
 bitwise:
   - jepa.losses_from_output: near only, far joining mid-run, the mean x1 guard (exp_guard_mean),
     top-down, and a config without the latent_reduce key;
-  - world.compute_world_losses (goal head + pixel decoder): the fixed w_pix and the 10% share,
-    all four stages with the goal and pixel joining mid-run, and a config without the key.
-Prints one line per setup and BITWISE IDENTICAL or DIFFERENT.
+  - world.compute_world_losses: near + far with no aux head (what the collapse check trained), and
+    with the goal head + pixel decoder the fixed w_pix and the 10% share, all four stages with the
+    goal and pixel joining mid-run, and a config without the key.
+--reduce sets loss.latent_reduce in every setup (default sum, the claim that the default path didn't
+move; the no-key setups are skipped under mean). --match keeps the setups whose name contains it,
+e.g. `--ref 00a4e78 --reduce mean --match "near+far"` checks the collapse-check runs' code path
+against a later commit. A log key the current code adds (w_goal_eff, 2026-11-19) is reported, not
+compared; every key of --ref's must match. The old world.py runs against the current jepa.py (its
+imports resolve to the package), so the world setups check world.py alone; the jepa setups check
+jepa.py. Prints one line per setup and BITWISE IDENTICAL or DIFFERENT.
 docs/decisions/2026-11-19-latent-loss-normalization.md.
 """
 
@@ -49,15 +57,22 @@ def module_at(ref: str, rel: str):
     return mod
 
 
-def _sum(cfgs: dict[str, dict], keyless: str) -> dict[str, dict]:
+NEW_KEYS = {"w_goal_eff"}  # logged since 2026-11-19; absent at earlier refs
+
+
+def _with(reduce: str, cfgs: dict[str, dict], keyless: str) -> dict[str, dict]:
     for cfg in cfgs.values():
-        cfg["loss"]["latent_reduce"] = "sum"
-    del cfgs[keyless]["loss"]["latent_reduce"]
+        cfg["loss"]["latent_reduce"] = reduce
+    if reduce == "sum":
+        del cfgs[keyless]["loss"]["latent_reduce"]  # a config from before the key: means sum
+    else:
+        del cfgs[keyless]
     return cfgs
 
 
-def jepa_setups() -> dict[str, dict]:
-    return _sum(
+def jepa_setups(reduce: str) -> dict[str, dict]:
+    return _with(
+        reduce,
         {
             "near only": tiny_cfg(),
             "near+far, far joins at step 3": tiny_far_cfg("train.stage_start={near: 0, far: 3}"),
@@ -69,10 +84,12 @@ def jepa_setups() -> dict[str, dict]:
     )
 
 
-def world_setups() -> dict[str, dict]:
+def world_setups(reduce: str) -> dict[str, dict]:
     four = ["train.stages=[near, far, goal, pixel]"]
-    return _sum(
+    return _with(
+        reduce,
         {
+            "world, near+far (no aux head)": tiny_far_cfg("train.stage_start={near: 0, far: 3}"),
             "world, fixed w_pix": tiny_aux_cfg("loss.pix_share=null"),
             "world, 10% share": tiny_aux_cfg(),
             "world, all four stages, goal/pixel join at 2/4": tiny_aux_cfg(
@@ -125,12 +142,13 @@ def same(a: torch.Tensor, b: torch.Tensor) -> bool:
 def compare(name: str, old_fn, new_fn, cfg: dict, steps: int) -> bool:
     l_old, p_old = trace(old_fn, cfg, steps)
     l_new, p_new = trace(new_fn, cfg, steps)
-    logs = all(a.keys() == b.keys() for a, b in zip(l_old, l_new, strict=True)) and all(
-        same(a[k], b[k]) for a, b in zip(l_old, l_new, strict=True) for k in a
-    )
+    added = set(l_new[0]) - set(l_old[0])
+    keys_ok = all(set(a) <= set(b) and set(b) - set(a) <= NEW_KEYS for a, b in zip(l_old, l_new))
+    logs = keys_ok and all(same(a[k], b[k]) for a, b in zip(l_old, l_new, strict=True) for k in a)
     params = all(torch.equal(a, b) for a, b in zip(p_old, p_new, strict=True))
+    extra = f" (+ new key {', '.join(sorted(added))}, not compared)" if added else ""
     print(
-        f"{name}: {steps} steps, all {len(l_new[0])} logged terms bitwise equal={logs}, "
+        f"{name}: {steps} steps, all {len(l_old[0])} logged terms bitwise equal={logs}{extra}, "
         f"all {len(p_new)} params bitwise equal={params}"
     )
     return logs and params
@@ -140,16 +158,21 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--ref", default="origin/main")
     p.add_argument("--steps", type=int, default=6)
+    p.add_argument("--reduce", choices=["sum", "mean"], default="sum")
+    p.add_argument("--match", default="")
     args = p.parse_args(argv)
     old_jepa = module_at(args.ref, "jepa_world/models/jepa.py")
     old_world = module_at(args.ref, "jepa_world/models/world.py")
     ok = True
-    for name, cfg in jepa_setups().items():
-        old, new = old_jepa.losses_from_output, current_jepa.losses_from_output
-        ok &= compare(name, jepa_step(old), jepa_step(new), cfg, args.steps)
-    for name, cfg in world_setups().items():
-        old, new = old_world.compute_world_losses, current_world.compute_world_losses
-        ok &= compare(name, world_step(old), world_step(new), cfg, args.steps)
+    print(f"--ref {args.ref}, loss.latent_reduce={args.reduce}")
+    for name, cfg in jepa_setups(args.reduce).items():
+        if args.match in name:
+            old, new = old_jepa.losses_from_output, current_jepa.losses_from_output
+            ok &= compare(name, jepa_step(old), jepa_step(new), cfg, args.steps)
+    for name, cfg in world_setups(args.reduce).items():
+        if args.match in name:
+            old, new = old_world.compute_world_losses, current_world.compute_world_losses
+            ok &= compare(name, world_step(old), world_step(new), cfg, args.steps)
     print("BITWISE IDENTICAL" if ok else "DIFFERENT")
     return 0 if ok else 1
 

@@ -4,9 +4,10 @@
   run's `meta.json`): the mean runs 00a4e78; the re-run bc2b819. The two differ only in `experiments/`,
   with the same model, training and config code.
   Later commits on the branch changed only the aux heads' weights (goal and pixel), which a near +
-  far run doesn't have. Six `mean` near + far training steps through 00a4e78's `jepa.py`/`world.py` and
-  through the final ones are bitwise equal: every logged term and parameter (`latent_reduce_bitwise.py`'s
-  `compare`, with `--ref 00a4e78`'s modules).
+  far run doesn't have. `uv run python experiments/latent_reduce_bitwise.py --ref 00a4e78 --reduce mean
+  --match "near+far"` trains 6 `mean` near + far steps through 00a4e78's `jepa.py`/`world.py` and
+  through the final ones. It printed BITWISE IDENTICAL: every logged term and parameter in all 4
+  near + far setups, including the world path with no aux head, which is what these runs trained.
 - **Run dirs:** mean `20261119T162336Z-worktree-wt-latent-reduce-latent-mean-s0-e82d5b` (s0) and `20261119T163737Z-worktree-wt-latent-reduce-latent-mean-s1-de9b34` (s1). Each holds `latent_dev.json`. The sum ×25
   re-run is `20261119T162037Z-worktree-wt-latent-reduce-latent-sum-repro-s0-3a0441`.
 - **Config:** `configs/exp_latent_mean.yaml`, which is `configs/exp_first_real_run.yaml` (near + far,

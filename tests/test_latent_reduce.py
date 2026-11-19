@@ -218,21 +218,28 @@ def test_goal_and_pixel_terms_do_not_depend_on_it():
     assert m["w_pix_eff"] < s["w_pix_eff"]  # |rest| shrank, so the share's weight did too
 
 
+@pytest.mark.parametrize("skips", ["true", "false"])
 @pytest.mark.parametrize("reduce", ["sum", "mean"])
-def test_fixed_aux_weights_move_with_l3(reduce):
-    """Both aux heads read L3, so w_goal and a fixed w_pix are relative to L3's latent terms: under
-    mean they are divided by C(L3), as those terms are. SPEC's 0.5 / 0.05 keep their meaning, and
-    the M7 reference can't drift by --set loss.latent_reduce alone."""
-    cfg = tiny_aux_cfg(f"loss.latent_reduce={reduce}", "loss.pix_share=null")
+def test_fixed_aux_weights_move_with_their_level(reduce, skips):
+    """Each fixed aux weight is relative to the latent terms of the level its head reads: w_goal to
+    L3 (SPEC §4.6), w_pix to L1 (§4.7). Under mean each is divided by that level's channel count, as
+    those terms are, and w_goal_eff / w_pix_eff log it. SPEC's 0.5 / 0.05 keep their meaning, the M7
+    reference can't drift by --set loss.latent_reduce alone, and unet_skips doesn't move the weight."""
+    cfg = tiny_aux_cfg(
+        f"loss.latent_reduce={reduce}", "loss.pix_share=null", f"model.unet_skips={skips}"
+    )
     model = _model(cfg)
     batch = random_batch(cfg)
     on = compute_world_losses(model, batch, cfg["loss"])
     off = compute_world_losses(model, batch, cfg["loss"], aux_active=())
-    scale = 1 / CH["L3"] if reduce == "mean" else 1.0
     w = cfg["loss"]
-    want = scale * (w["w_goal"] * on["loss/goal"] + w["w_pix"] * on["loss/pix"])
+    w_goal = w["w_goal"] / CH["L3"] if reduce == "mean" else w["w_goal"]
+    w_pix = w["w_pix"] / CH["L1"] if reduce == "mean" else w["w_pix"]
+    want = w_goal * on["loss/goal"] + w_pix * on["loss/pix"]
     torch.testing.assert_close(on["loss/total"] - off["loss/total"], want, **REL)
-    torch.testing.assert_close(on["w_pix_eff"], torch.tensor(scale * w["w_pix"]))
+    torch.testing.assert_close(on["w_goal_eff"], torch.tensor(w_goal))
+    torch.testing.assert_close(on["w_pix_eff"], torch.tensor(w_pix))
+    assert off["w_goal_eff"] == 0 and off["w_pix_eff"] == 0
 
 
 def test_public_helpers_take_the_reduction():

@@ -115,7 +115,7 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
   after the near + far collapse check passed ([note](../../experiments/2026-11-19-latent-mean-collapse-check.md)).
   - `mean` divides every per-level term by the channel count of the level it is scored on:
     `loss/k`, `sqerr/k`, each level's guard `var/<L>`, and for top-down `loss/td/k` and
-    `sqerr/td/k`. `_over_channels` does it in one place.
+    `sqerr/td/k`. `over_channels` does it, here and for the aux weights in `world.py`.
   - **`sum` returns the same tensor**, so it is bitwise the old path, and so is a config with no
     key (`test_sum_is_bitwise_the_channel_sum_formulas`, `test_a_config_without_the_key_is_bitwise_sum`,
     and `experiments/latent_reduce_bitwise.py` over 6 training steps against a git ref).
@@ -129,11 +129,15 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
     under either setting. `loss/total`, `loss/k` and `var/L` differ by the level's channel count.
   - With Adam, `mean` on one level is a uniform rescale, a no-op up to ε. What it changes is the
     balance between levels.
-  - **The fixed aux weights follow it too** (`models/world.py`). Under `mean`, `w_goal` and a fixed
-    `w_pix` are divided by L3's channel count (`WorldModel.aux_channels`), because both heads read
-    L3. Each keeps its ratio to L3's latent terms, and SPEC's `w_goal = 0.5` keeps its meaning. A
-    hard-coded 0.5 / 256 lost: it was a second key that had to agree with `latent_reduce`.
-    `pix_share` is already relative to the rest of the loss, so it is untouched.
+  - **The fixed aux weights follow it too** (`models/world.py`). Under `mean`, `w_goal` is
+    divided by C(L3), because the goal head reads pooled L3 (SPEC §4.6). A fixed `w_pix` is divided
+    by C(L1), because the pixel decoder reads L1 plus the decoder path (§4.7). That holds whatever
+    `unet_skips` is, so the skip ablation compares one weight. Each weight keeps its ratio to that
+    level's latent terms, and SPEC's values keep their meaning. `w_goal_eff` and `w_pix_eff` log
+    what was used.
+    - A hard-coded 0.5 / 256 in base.yaml lost: it was a second key that had to agree with
+      `latent_reduce`.
+    - `pix_share` is already relative to the rest of the loss, so it is untouched.
   [latent-loss-normalization](../../docs/decisions/2026-11-19-latent-loss-normalization.md)
 - **The target encoder runs once per level group:** the stacks of all heads reading a level are
   concatenated along the batch and encoded `upto` that level. Near stacks stop at L1, and only the

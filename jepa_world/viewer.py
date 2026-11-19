@@ -17,8 +17,8 @@ import dataclasses
 import io
 import json
 import math
-import os
 import secrets
+import subprocess
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -32,13 +32,13 @@ from jepa_world import eval as eval_cli
 from jepa_world import metrics
 from jepa_world.data.build import split_dir
 from jepa_world.data.dataset import load_split, read_manifest, valid_starts
-from jepa_world.data.splits import SPLITS, terrain_seeds
+from jepa_world.data.splits import terrain_seeds
 from jepa_world.sim import camera
 from jepa_world.sim.io import load_episode
 from jepa_world.utils.config import load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
-from jepa_world.utils.paths import artifacts_root
+from jepa_world.utils.paths import artifacts_root, write_new
 from jepa_world.utils.repro import git_info
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -122,7 +122,11 @@ def png_strip(frames) -> str:
 def eval_summary(run_dir, checkpoint, split: str) -> dict | None:
     """The newest `eval --run` report in run_dir/eval/ for exactly this checkpoint (by file name;
     eval only scores a run's own checkpoints) that scored `split`, reduced to what the page shows.
-    None if there is none: the page then says so instead of showing another checkpoint's numbers."""
+    None if there is none: the page then says so instead of showing another checkpoint's numbers.
+
+    Same test set by construction: `eval --run` and the viewer both refuse an eval config whose
+    split seeds differ from the run's own (eval.check_eval_split). The coverage columns carry the
+    levels that eval used, as their labels, whatever the page's own region levels are."""
     evals = sorted((Path(run_dir) / "eval").glob("*.json"))
     for path in reversed(evals):  # names start with the UTC time: newest first
         doc = json.loads(path.read_text())
@@ -167,7 +171,7 @@ def render_html(payload: dict) -> str:
     """The page: the template with `payload` as JSON in its application/json script. Every '<' is
     escaped (as \\u003c, still valid JSON), so no string in the data can close the script."""
     text = json.dumps(payload, separators=(",", ":"), allow_nan=False).replace("<", "\\u003c")
-    template = TEMPLATE.read_text()
+    template = TEMPLATE.read_text(encoding="utf-8")
     if template.count(PAYLOAD_SLOT) != 1:
         raise ValueError(f"{TEMPLATE} must hold {PAYLOAD_SLOT} exactly once")
     return template.replace(PAYLOAD_SLOT, text)
@@ -261,15 +265,22 @@ def _model_episode(run, es, i: int, t, out: dict, sim: dict, scored_hi: int) -> 
     return e
 
 
-def _write_new(path: Path, text: str) -> None:
-    """All or nothing, and never over an existing file (FileExistsError)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{secrets.token_hex(3)}.tmp"
-    tmp.write_text(text)
+def _in_git_work_tree(path: Path) -> bool:
+    """Whether `path` (which may not exist yet) lies in any git work tree: this repo, the main
+    clone of a lane worktree, or another repository."""
+    if path.resolve().is_relative_to(REPO_ROOT):
+        return True
+    d = path.resolve().parent
+    while not d.exists():
+        d = d.parent
     try:
-        os.link(tmp, path)
-    finally:
-        tmp.unlink()
+        r = subprocess.run(
+            ["git", "-C", str(d), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=10,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return False  # no git to ask: nothing to commit the page into either
+    return r.stdout.strip() == "true"
 
 
 def export(
@@ -285,9 +296,9 @@ def export(
     """Every model's goal-head and pixel-decoder outputs on n_episodes episodes of a held-out
     split, as one HTML page. eval_cfg supplies the canonical split seeds (as for `eval --run`),
     the coverage levels and the batch size. Returns the page's path and its payload."""
-    if split not in SPLITS:
+    if split not in eval_cli.HELD_OUT:  # before any checkpoint is read
         raise ValueError(f"split {split!r}: the viewer shows dev or test (held out) only")
-    if out is not None and Path(out).resolve().is_relative_to(REPO_ROOT):
+    if out is not None and _in_git_work_tree(Path(out)):
         raise ValueError(f"--out {out}: the page holds data, so it goes outside the git work tree")
     if not specs:
         raise ValueError("no --model given")
@@ -299,9 +310,12 @@ def export(
     for s, r in zip(specs, runs, strict=True):
         if r.cfg["data"]["source"] != "episodes":
             raise ValueError(f"{s.run_dir} trained on data.source={r.cfg['data']['source']!r}")
+        if getattr(r.model, "goal", None) is None and getattr(r.model, "pixel", None) is None:
+            raise ValueError(
+                f"{s.run_dir} has neither a goal head nor a pixel decoder: the viewer has nothing "
+                "of this model's to show (train.stages lacks goal and pixel)"
+            )
         eval_cli.check_eval_split(r.cfg, eval_cfg, split)  # LeakageError on the training split
-    if split not in eval_cli.HELD_OUT:
-        raise ValueError(f"split {split!r}: the viewer shows dev or test (held out) only")
     dirs = {str(split_dir(r.cfg, split)) for r in runs}
     if len(dirs) != 1:
         raise ValueError(
@@ -346,6 +360,7 @@ def export(
                     "pixel": has_pixel,
                     "t0": c - 1,
                     "horizons": ks,
+                    "k_eval": int(k_eval),  # sets the scored windows: max latent or goal k
                     "scored": [int(scored[0]), int(scored[-1])],
                     "eval": eval_summary(r.run_dir, r.checkpoint, split),
                     "episodes": per_ep,
@@ -381,9 +396,7 @@ def export(
     if out is None:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         out = artifacts_root() / "viewers" / f"{stamp}-{split}-{secrets.token_hex(3)}.html"
-    out = Path(out)
-    _write_new(out, html)
-    return out, payload
+    return write_new(out, html), payload
 
 
 def main(argv: list[str] | None = None) -> int:

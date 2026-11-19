@@ -333,7 +333,8 @@ function setupControls() {
   $("zoom").onchange = () => { state.zoom = $("zoom").value; render(); };
   $("gain").onchange = () => { state.gain = +$("gain").value; render(); };
   document.addEventListener("keydown", (ev) => {
-    if (ev.target.closest && ev.target.closest("select, input[type=text]")) return;
+    // A focused control handles its own keys: Space activates a button, arrows move the slider.
+    if (ev.target.closest && ev.target.closest("button, select, input, textarea")) return;
     if (ev.key === " ") { ev.preventDefault(); setPlaying(!state.playing); }
     else if (ev.key === "ArrowLeft") { ev.preventDefault(); step(-1); }
     else if (ev.key === "ArrowRight") { ev.preventDefault(); step(1); }
@@ -382,17 +383,18 @@ function step(d) {
   state.t = Math.min(episode().T - 1, Math.max(0, state.t + d));
   render();
 }
-let last = 0, acc = 0;
+let last = 0, acc = 0, raf = 0;  // raf: the pending frame request, so only one loop runs
 function setPlaying(on) {
   state.playing = on;
   $("play").textContent = on ? "Pause" : "Play";
   if (on) {
     if (state.t >= episode().T - 1) state.t = 0;
     last = performance.now(); acc = 0;
-    requestAnimationFrame(tick);
+    if (!raf) raf = requestAnimationFrame(tick);
   }
 }
 function tick(now) {
+  raf = 0;
   if (!state.playing) return;
   acc += (now - last) / 1000 * FPS * state.speed;
   last = now;
@@ -403,7 +405,7 @@ function tick(now) {
     if (state.t >= episode().T - 1) { state.t = episode().T - 1; render(); setPlaying(false); return; }
     render();
   }
-  requestAnimationFrame(tick);
+  raf = requestAnimationFrame(tick);
 }
 function hover(id, ev) {
   const r = $(id).getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
@@ -854,7 +856,7 @@ function fillNotes() {
     ["Data", `${D.split_note}. ${D.picked_by}. Dataset ${D.dataset}. Every model was trained on its own training split, never on these episodes.`],
     [`Frames after t = ${m.scored[1]}`,
       `The model predicts at every t from ${m.t0} on, but eval scores only t = ${m.scored[0]}…${m.scored[1]}, where every ` +
-      `horizon up to k = ${Math.max(...m.horizons, 0) || "max"} still lands inside the episode. Later frames show ground ` +
+      `horizon the model is trained on (up to k = ${m.k_eval}) still lands inside the episode. Later frames show ground ` +
       "truth only for the horizons that still fit."],
     ["Made", `${D.created}, git ${D.git && D.git.sha ? D.git.sha.slice(0, 10) : "?"}${D.git && D.git.dirty ? " (uncommitted changes)" : ""}, by python -m jepa_world.viewer.`],
   ];

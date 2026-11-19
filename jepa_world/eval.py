@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import os
 import secrets
 import sys
 import time
@@ -42,7 +41,7 @@ from jepa_world.sim.io import load_episode
 from jepa_world.utils.config import load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
-from jepa_world.utils.paths import new_run_dir
+from jepa_world.utils.paths import new_run_dir, write_new
 from jepa_world.utils.repro import run_metadata
 
 
@@ -575,12 +574,7 @@ def evaluate_run(
     out_dir.mkdir(exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     name = f"{stamp}-{'-'.join(splits)}-{secrets.token_hex(3)}.json"
-    path, tmp = out_dir / name, out_dir / f".{name}.tmp"
-    tmp.write_text(text)
-    try:
-        os.link(tmp, path)  # all or nothing, and never over an earlier eval (EEXIST)
-    finally:
-        tmp.unlink()
+    path = write_new(out_dir / name, text)  # all or nothing, never over an earlier eval
     return doc, path
 
 

@@ -140,6 +140,16 @@ def test_concurrent_builders_of_same_config_build_once():
     assert len(calls) == 1
 
 
+def test_write_new_writes_once_and_never_replaces_a_file(tmp_path):
+    target = tmp_path / "sub" / "page.html"
+    paths.write_new(target, "first \u2014 \u00d7")
+    assert target.read_text(encoding="utf-8") == "first \u2014 \u00d7"  # UTF-8, whatever the locale
+    with pytest.raises(FileExistsError):
+        paths.write_new(target, "second")
+    assert target.read_text(encoding="utf-8") == "first \u2014 \u00d7"
+    assert sorted(p.name for p in target.parent.iterdir()) == ["page.html"]  # no temp left over
+
+
 def test_run_dirs_are_unique():
     a, b = paths.new_run_dir("exp"), paths.new_run_dir("exp")
     assert a != b and a.is_dir() and b.is_dir()

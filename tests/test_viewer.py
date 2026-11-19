@@ -13,6 +13,7 @@ import io
 import json
 import math
 import re
+import subprocess
 
 import numpy as np
 import pytest
@@ -265,6 +266,7 @@ def test_export_writes_one_page_with_each_models_outputs_on_held_out_episodes(ar
     assert b["step"] == 3 and b["pixel"] is False and b["goal"] is True
     assert a["trained_on"] == "train" and a["t0"] == C - 1 and a["horizons"] == GOAL_KS
     assert a["scored"] == [C - 1, T - 1 - 20]  # eval's windows: k_eval = max(model.horizons)
+    assert a["k_eval"] == 20 and max(a["horizons"]) == 5  # the latent heads set it, not the goal
 
     # The goal head's own output, through the same context-only path eval scores.
     loaded = eval_cli.load_run(run_a, "step_0000002.pt")
@@ -314,15 +316,27 @@ def out_pixel(model, es, i, t):
     return o["pixel"]
 
 
-def test_export_refuses_the_training_split_before_writing_anything(artifacts):
+def test_export_shows_only_held_out_splits_before_loading_anything(artifacts, monkeypatch):
     run, _ = make_run(run_cfg())
     pages = artifacts / "viewers"
     before = sorted(pages.iterdir()) if pages.exists() else []  # the module shares one root
+    loads = []
+    monkeypatch.setattr(viewer.eval_cli, "load_run", lambda *a, **k: loads.append(a))
+    for split in ("train", "val"):
+        with pytest.raises(ValueError, match="dev or test"):
+            viewer.export([viewer.ModelSpec("m", run, None)], split, 2, eval_cfg())
+    assert loads == []  # refused before any checkpoint is read
+    monkeypatch.undo()
+    dev_run, _ = make_run(run_cfg("data.split=dev"), name="trained-on-dev")
     with pytest.raises(LeakageError, match="trained on"):
-        viewer.export([viewer.ModelSpec("m", run, None)], "train", 2, eval_cfg())
-    with pytest.raises(ValueError, match="dev.*test"):
-        viewer.export([viewer.ModelSpec("m", run, None)], "val", 2, eval_cfg())
+        viewer.export([viewer.ModelSpec("m", dev_run, None)], "dev", 2, eval_cfg())
     assert (sorted(pages.iterdir()) if pages.exists() else []) == before
+
+
+def test_export_refuses_a_model_with_nothing_to_show(artifacts):
+    run, _ = make_run(run_cfg("train.stages=[near]"), name="latent-only")
+    with pytest.raises(ValueError, match="neither a goal head nor a pixel decoder"):
+        viewer.export([viewer.ModelSpec("m", run, None)], "test", 2, eval_cfg())
 
 
 def test_export_refuses_models_that_read_different_datasets(artifacts):
@@ -340,6 +354,11 @@ def test_export_refuses_a_page_over_the_size_limit_or_inside_the_repo(artifacts,
         viewer.export(spec, "test", 2, eval_cfg(), max_bytes=1000)
     with pytest.raises(ValueError, match="outside the git"):
         viewer.export(spec, "test", 2, eval_cfg(), out=viewer.REPO_ROOT / "viewer.html")
+    other = tmp_path / "another-clone"  # any git work tree, not just the one running the code
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    with pytest.raises(ValueError, match="outside the git"):
+        viewer.export(spec, "test", 2, eval_cfg(), out=other / "new" / "viewer.html")
+    assert not (other / "new").exists()
     out = tmp_path / "v.html"
     path, _ = viewer.export(spec, "test", 2, eval_cfg(), out=out)
     assert path == out and out.exists()

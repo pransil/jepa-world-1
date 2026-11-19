@@ -229,35 +229,30 @@ def test_run_logs_the_aux_terms_every_step(tmp_path):
     assert any(k.startswith("pixel.") for k in ckpt["model"])
 
 
-def test_pixel_term_does_not_dominate_the_logged_total():
-    """SPEC §8 M5. At base.yaml's default (pix_share 0.10, decision 2026-11-19) the weighted pixel
-    term is 0.10/1.10 of loss/total, under 10%, at every step of a short run."""
-    cfg = tiny_aux_cfg("train.stages=[near, pixel]")
-    assert cfg["loss"]["pix_share"] == 0.10  # the base default, not one picked for the test
+@pytest.mark.parametrize("share", ["base", "null"])
+def test_pixel_term_does_not_dominate_the_logged_total(share):
+    """SPEC §8 M5, at both pixel weightings, every step of a short run:
+    - base.yaml's default (a 10% share, decision 2026-11-19): the logged share of the rest of
+      loss/total is the target, 0.10, whatever loss/pix's reduction or size;
+    - null, the fixed w_pix 0.05 (the headline configs): pixel_l1 <= 1 bounds the term by w_pix
+      outright, and it stays under 10% of loss/total. A sum reduction (x3 channels x every pixel)
+      would break both. (pixel_l1's mean reduction itself: test_pixel.py.)"""
+    sets = ["train.stages=[near, pixel]"] + (["loss.pix_share=null"] if share == "null" else [])
+    cfg = tiny_aux_cfg(*sets)
+    assert cfg["loss"]["w_pix"] == 0.05  # base.yaml's values, not ones picked for the test
+    assert cfg["loss"]["pix_share"] == (0.10 if share == "base" else None)
     model, opt = _built(cfg)
     g = torch.Generator().manual_seed(0)
     for step in range(10):
         frames = moving_disc_batch(2, 9, 16, generator=g)
         losses = train.train_step(model, opt, frames, cfg, step=step)
         pix = losses["w_pix_eff"] * losses["loss/pix"]
-        assert pix < 0.1 * losses["loss/total"], (step, pix.item(), losses["loss/total"].item())
-
-
-def test_fixed_pixel_weight_term_is_bounded_by_w_pix():
-    """pix_share null (e.g. the headline configs): pixel_l1 <= 1 bounds the term by w_pix
-    outright, and at w_pix 0.05 it stays under 10% of loss/total. A sum reduction (x3 channels
-    x every pixel) would break both."""
-    cfg = tiny_aux_cfg("train.stages=[near, pixel]", "loss.pix_share=null")
-    assert cfg["loss"]["w_pix"] == 0.05  # the base weight, not one picked for the test
-    model, opt = _built(cfg)
-    g = torch.Generator().manual_seed(0)
-    for step in range(10):
-        frames = moving_disc_batch(2, 9, 16, generator=g)
-        losses = train.train_step(model, opt, frames, cfg, step=step)
-        pix = cfg["loss"]["w_pix"] * losses["loss/pix"]
-        assert losses["w_pix_eff"] == cfg["loss"]["w_pix"]
-        assert pix <= cfg["loss"]["w_pix"]
-        assert pix < 0.1 * losses["loss/total"], (step, pix.item(), losses["loss/total"].item())
+        if share == "base":
+            assert losses["pix_share"] == pytest.approx(0.10, rel=1e-5), step
+        else:
+            assert losses["w_pix_eff"] == cfg["loss"]["w_pix"]
+            assert pix <= cfg["loss"]["w_pix"]
+            assert pix < 0.1 * losses["loss/total"], (step, pix.item(), losses["loss/total"].item())
 
 
 def test_cli_rejects_bad_config_before_creating_a_run_dir():
@@ -423,10 +418,10 @@ def test_base_default_holds_the_pixel_term_at_ten_percent():
     assert loss["w_pix"] == 0.05
 
 
-@pytest.mark.parametrize("name", ["exp_headline", "exp_headline_48k"])
-def test_configs_with_finished_runs_keep_the_fixed_pixel_weight(name):
-    """Their runs trained at w_pix 0.05 (pixel share <= 3e-5); re-running them must reproduce
-    that, whatever base.yaml defaults to."""
+@pytest.mark.parametrize("name", ["exp_headline", "exp_headline_48k", "m7_obstacles"])
+def test_configs_tied_to_the_fixed_weight_reference_keep_it(name):
+    """The headline runs trained at w_pix 0.05 (pixel share <= 3e-5); re-running them must
+    reproduce that, whatever base.yaml defaults to. M7's obstacles run is compared against them."""
     loss = load_config(CONFIGS / f"{name}.yaml")["loss"]
     assert loss["pix_share"] is None
     assert loss["w_pix"] == 0.05

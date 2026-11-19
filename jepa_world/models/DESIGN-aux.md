@@ -95,8 +95,9 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix_eff·lo
   because it has no gradient outside the range.
 - **`pixel_l1` is the mean over every element**: mean absolute error in [0, 1] intensity units. So
   a fixed weight bounds the term, w_pix · L_pix ≤ w_pix (`test_fixed_pixel_weight_term_is_bounded_by_w_pix`).
-  At base.yaml's 10% share the term is 0.10/1.10 of `loss/total`
-  (`test_pixel_term_does_not_dominate_the_logged_total`).
+  At base.yaml's 10% share the term is 0.10 of |the rest of `loss/total`| by construction (the
+  logged `pix_share`), so 0.10/1.10 of `loss/total` while the rest is positive, as it was
+  throughout the headline and ablation runs (`test_pixel_term_does_not_dominate_the_logged_total`).
 - **Pixel weight: fixed, or a target share** (`loss.pix_share`, M7).
   [pixel-ablation-target-share](../../docs/decisions/2026-11-18-pixel-ablation-target-share.md)
   - **null** keeps `w_pix`, through exactly the old expression. It is bitwise the

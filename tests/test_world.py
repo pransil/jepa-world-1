@@ -224,10 +224,11 @@ def test_aux_heads_read_only_the_context_frames():
         torch.testing.assert_close(x, y, rtol=0, atol=0)
 
 
-def test_the_model_never_receives_ground_truth():
+@pytest.mark.parametrize("share", ["base", "null"])
+def test_the_model_never_receives_ground_truth(share):
     """ball_pos is a label: forward gets the frames tensor only, and changing ball_pos changes
     only the goal terms (data/DESIGN.md: GT after index C-1 is the future)."""
-    cfg = tiny_aux_cfg()
+    cfg = tiny_aux_cfg(*(["loss.pix_share=null"] if share == "null" else []))
     model = _model(cfg)
     seen = []
     model.register_forward_pre_hook(
@@ -243,9 +244,11 @@ def test_the_model_never_receives_ground_truth():
     moved = {**batch, "ball_pos": batch["ball_pos"] + 3.0 * torch.randn_like(batch["ball_pos"])}
     b = _losses(model, moved, cfg)
     goal_terms = {k for k in a if k.startswith(("loss/goal", "goalerr", "goalratio"))}
-    # loss/total includes the goal loss, and so do pix_share (a ratio to the rest of
-    # loss/total) and, under base.yaml's share, w_pix_eff (|rest| / loss/pix)
-    for k in set(a) - goal_terms - {"loss/total", "pix_share", "w_pix_eff"}:
+    # loss/total includes the goal loss, and so does pix_share (a ratio to the rest of
+    # loss/total). Under a share (base.yaml's default) w_pix_eff = s|rest|/loss/pix does too;
+    # under the fixed w_pix it must not move.
+    shared = {"loss/total", "pix_share"} | ({"w_pix_eff"} if share == "base" else set())
+    for k in set(a) - goal_terms - shared:
         torch.testing.assert_close(a[k], b[k], rtol=0, atol=0, msg=k)
     assert not torch.equal(a["loss/goal"], b["loss/goal"])
 

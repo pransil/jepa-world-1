@@ -27,5 +27,7 @@ decoder now, so it needs to know what the switch turns off.
   a later M7 lane adds it through `/builder`.
 - The switch only acts through the pixel loss, so it is a **no-op at `w_pix = 0`**. The ablation
   runs at `w_pix` 0.05 (the base) and 0.5. See §2 of the [M7 plan](../milestones/M7-plan.md).
+  (2026-11-19: base.yaml's default is now a 10% pixel share, not `w_pix` 0.05, so an arm that
+  means "the base" must say which: [pixel-share-default](2026-11-19-pixel-share-default.md).)
 - Deciding metric: the L3 linear-probe ball-position error on the test split (M6 `probes.py`).
 - B stays available as a separate future ablation if the hierarchy results call for it.

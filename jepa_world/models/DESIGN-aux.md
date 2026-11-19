@@ -49,7 +49,9 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
 | `goalerr/k<k>` | mean ‖μ − Δ‖ in metres (detached) |
 | `goalratio/k<k>` | goalerr / mean ‖Δ‖: error relative to persistence, which predicts Δ = 0; < 1 beats it (SPEC §7.2, §11) |
 | `loss/goal` | Σ_k `loss/goal/k<k>`, the term weighted by `loss.w_goal` |
-| `loss/pix` | mean \|frame − frame t+1\|, the term weighted by `loss.w_pix` |
+| `loss/pix` | mean \|frame − frame t+1\|, the term weighted by `loss.w_pix` (or by `loss.pix_share`) |
+| `w_pix_eff` | the pixel weight used this step: `w_pix`, or the share weight; 0 before the pixel stage starts |
+| `pix_share` | `w_pix_eff·loss/pix / \|loss/total without it\|`: the pixel term's achieved share |
 
 ## Key decisions
 
@@ -94,6 +96,39 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
 - **`pixel_l1` is the mean over every element**: mean absolute error in [0, 1] intensity units. So
   w_pix · L_pix ≤ w_pix (0.05 at the SPEC weight). `test_pixel_term_does_not_dominate_the_logged_total`
   holds it under 10% of `loss/total` over a short run.
+- **Pixel weight: fixed, or a target share** (`loss.pix_share`, M7).
+  [pixel-ablation-target-share](../../docs/decisions/2026-11-18-pixel-ablation-target-share.md)
+  - **null** (the default) keeps `w_pix`, through exactly the old expression. It is bitwise the
+    pre-2026-11-18 loss and gradients (`test_pix_share_null_is_bitwise_the_fixed_weight`).
+  - **A share s** sets `w_eff = s·|L_rest| / max(L_pix, 1e-6)` (`pix_share_weight`), where
+    L_rest is `loss/total` without the pixel term.
+  - **Both sides are detached**, so the gradient flows only through L_pix, and the rest keeps its
+    own gradient, unscaled. A non-detached L_pix would cancel the decoder's gradient outright,
+    because w·L_pix = s|L_rest|.
+  - **|L_rest|**, because the far and goal NLLs can push the rest small or negative.
+  - **The 1e-6 floor** is the divide-by-zero guard. It can only make the share fall short of s,
+    never exceed it.
+  - **Per step and stateless: no EMA, no clamp on w_eff.** Evidence: the two headline runs'
+    `metrics.jsonl` (`runs/20261118T231506Z-worktree-wt-exp-headline-headline-s0-32ff77` and `runs/20261119T001708Z-worktree-wt-exp-headline-headline-s1-d2c5c1`), with L_rest = loss/total − 0.05·loss/pix, over steps 6001–24000:
+    - L_rest stayed within 431–1640 and was never negative.
+    - |L_rest|/L_pix moved about 11% step to step from step 6501 on (median; p95 33%).
+    - It rose about 50× in the first 500 pixel steps, as the decoder learned: L_pix fell from about
+      0.4 to about 0.01. After that it rose only about 5× (about 8e4 → 4.5e5).
+    - The smallest L_pix was 0.0012, three orders of magnitude above the 1e-6 floor.
+
+    So w_eff ramps up as the decoder learns, then moves slowly, about 11% per step, since both
+    values are batch means. An EMA would smooth only that 11%, but would add cross-step state that
+    checkpoints don't carry. A cap would silently break "share = s". The stateless weight is exact
+    every step and is reproducible from the step alone.
+  - The share is of the loss **value**, not of the gradient norm. Adam rescales per parameter, so
+    the pixel decoder's own parameters barely notice w_eff. The share matters where the pixel
+    gradient meets the latent gradients, in the shared encoder, and the pixel term's share of that
+    gradient is **not measured**. It is about s × (L_pix's relative gradient / L_rest's), which
+    may be well above or below s. Logging the per-term encoder gradient norm on log steps would
+    measure it; that is a proposed follow-up, not built.
+  - Every run with a pixel decoder logs `w_pix_eff` (0 before the stage starts) and the achieved
+    `pix_share`. Older runs predate these keys; for them, compute the share as
+    w_pix·loss/pix / |loss/total − w_pix·loss/pix|.
 - **The goal head's first Linear runs K times on the same pooled vector.** Splitting it into W_g·g
   (once per sample) plus W_e·k_embed (once per horizon) would save (l3_ch + l2_ch)·hidden·(K−1)
   MACs per sample, about 300k at the base sizes. That is noise next to the encoder's

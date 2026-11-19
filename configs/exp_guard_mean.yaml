@@ -1,0 +1,15 @@
+# Guard comparison, mean x1 arm: configs/exp_first_real_run.yaml (near + far, 8000 steps, far
+# joins after 2000) with the variance guard back at M3's original setting, averaged over
+# channels with weight 1, instead of the default sum x25
+# (docs/decisions/2026-11-17-far-collapse-guard-sum.md). Seeds 0 (this file) and 1 (--set seed=1).
+# The sum x25 arm is exp_first_real_run.yaml itself. experiments/2026-11-18-guard-comparison.md
+base: base.yaml
+
+train:
+  stages: [near, far]
+  steps: 8000
+  ckpt_every: 2000
+
+loss:
+  var_reduce: mean
+  w_var: 1.0

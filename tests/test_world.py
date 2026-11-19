@@ -12,7 +12,7 @@ from jepa_world import train
 from jepa_world.models.goal import displacement_targets, goal_nll
 from jepa_world.models.jepa import JEPA
 from jepa_world.models.pixel import pixel_l1
-from jepa_world.models.world import WorldModel, compute_world_losses
+from jepa_world.models.world import WorldModel, compute_world_losses, pix_share_weight
 
 GOAL_KS = [1, 3, 5]  # tiny_aux_cfg's model.goal_horizons
 
@@ -242,7 +242,8 @@ def test_the_model_never_receives_ground_truth():
     moved = {**batch, "ball_pos": batch["ball_pos"] + 3.0 * torch.randn_like(batch["ball_pos"])}
     b = _losses(model, moved, cfg)
     goal_terms = {k for k in a if k.startswith(("loss/goal", "goalerr", "goalratio"))}
-    for k in set(a) - goal_terms - {"loss/total"}:
+    # loss/total and pix_share (a ratio to the rest of loss/total) include the goal loss
+    for k in set(a) - goal_terms - {"loss/total", "pix_share"}:
         torch.testing.assert_close(a[k], b[k], rtol=0, atol=0, msg=k)
     assert not torch.equal(a["loss/goal"], b["loss/goal"])
 
@@ -290,3 +291,116 @@ def test_a_pre_m5_run_config_still_builds_and_loads_its_checkpoint():
     world = train.build_model(cfg)
     world.load_state_dict(old.state_dict())
     assert world.goal is None and world.pixel is None
+
+
+# ---------------------------------------------------------------- pixel target share (M7)
+# docs/decisions/2026-11-18-pixel-ablation-target-share.md
+
+
+def _share_cfg(share="0.01", *more):
+    return tiny_aux_cfg(f"loss.pix_share={share}", *more)
+
+
+def test_pix_share_null_is_bitwise_the_fixed_weight():
+    """Off (null, or a pre-change config with no key): loss/total is exactly the fixed-weight
+    sum, and every gradient is bitwise equal."""
+    cfg = tiny_aux_cfg()
+    assert cfg["loss"]["pix_share"] is None
+    old = tiny_aux_cfg()
+    del old["loss"]["pix_share"]  # saved configs from before this key existed
+    batch = random_batch(cfg)
+    grads, totals = [], []
+    for c in (cfg, old):
+        model = _model(c)
+        losses = _losses(model, batch, c)
+        rest = _losses(model, batch, c, aux_active=["goal"])["loss/total"]
+        assert torch.equal(losses["loss/total"], rest + c["loss"]["w_pix"] * losses["loss/pix"])
+        model.zero_grad(set_to_none=True)
+        losses["loss/total"].backward()
+        totals.append(losses["loss/total"])
+        grads.append([p.grad for p in model.parameters()])
+    assert torch.equal(totals[0], totals[1])
+    for a, b in zip(*grads, strict=True):
+        assert (a is None and b is None) or torch.equal(a, b)
+    # The decoder's gradients against a hand-built w_pix * L_pix: a change to the pixel term too
+    # small to move loss/total (absorbed by rounding) still scales every decoder gradient. (Only
+    # the decoder: the encoder's gradients would sum two separate forwards in another order.)
+    model = _model(cfg)
+    decoder = {id(p) for p in model.pixel.parameters()}
+    want = [g for p, g in zip(model.parameters(), grads[0], strict=True) if id(p) in decoder]
+    _grads(model, {"loss/total": cfg["loss"]["w_pix"] * _losses(model, batch, cfg)["loss/pix"]})
+    for p, g in zip(model.pixel.parameters(), want, strict=True):
+        assert torch.equal(p.grad, g)
+
+
+def test_fixed_weight_logs_its_weight_and_share():
+    cfg = tiny_aux_cfg()
+    model, batch = _model(cfg), random_batch(cfg)
+    on = _losses(model, batch, cfg)
+    rest = _losses(model, batch, cfg, aux_active=["goal"])["loss/total"]
+    torch.testing.assert_close(on["w_pix_eff"], torch.tensor(cfg["loss"]["w_pix"]))
+    torch.testing.assert_close(on["pix_share"], cfg["loss"]["w_pix"] * on["loss/pix"] / rest.abs())
+
+
+def test_pix_share_holds_the_pixel_term_at_the_target_share():
+    cfg = _share_cfg("0.01")
+    model, batch = _model(cfg), random_batch(cfg)
+    on = _losses(model, batch, cfg)
+    rest = _losses(model, batch, cfg, aux_active=["goal"])["loss/total"]
+    torch.testing.assert_close(on["w_pix_eff"] * on["loss/pix"], 0.01 * rest.abs())
+    torch.testing.assert_close(on["loss/total"], rest + 0.01 * rest.abs())
+    torch.testing.assert_close(on["pix_share"], torch.tensor(0.01))
+    assert on["w_pix_eff"] != cfg["loss"]["w_pix"]  # w_pix is ignored when a share is set
+
+
+def test_pix_share_weight_carries_no_gradient():
+    """w_eff is detached on both sides. If it carried L_pix's gradient, w_eff * L_pix = s|L_rest|
+    would not depend on the decoder at all, and the decoder would get no gradient. If it carried
+    L_rest's, every other parameter's gradient would be scaled by (1 + s)."""
+    cfg = _share_cfg("0.10")
+    model, batch = _model(cfg), random_batch(cfg)
+    _grads(model, _losses(model, batch, cfg))
+    assert all(p.grad is not None and p.grad.abs().sum() > 0 for p in model.pixel.parameters())
+    with_pix = {n: p.grad.clone() for n, p in model.named_parameters() if n.startswith("heads.")}
+    _grads(model, _losses(model, batch, cfg, aux_active=["goal"]))
+    for n, g in with_pix.items():
+        torch.testing.assert_close(model.get_parameter(n).grad, g, rtol=0, atol=0, msg=n)
+
+
+def test_pix_share_adds_nothing_before_the_pixel_stage_starts():
+    cfg = _share_cfg("0.10")
+    model, batch = _model(cfg), random_batch(cfg)
+    off = _losses(model, batch, cfg, aux_active=["goal"])
+    goal_only = _losses(model, batch, tiny_aux_cfg(), aux_active=["goal"])
+    assert torch.equal(off["loss/total"], goal_only["loss/total"])
+    assert off["w_pix_eff"] == 0 and off["pix_share"] == 0
+    assert torch.isfinite(off["loss/pix"])  # still logged
+
+
+@pytest.mark.parametrize(
+    ("rest", "pix"),
+    [(500.0, 0.03), (-40.0, 0.03), (0.0, 0.03), (500.0, 0.0), (500.0, 1e-30), (0.0, 0.0)],
+)
+def test_share_weight_is_finite_and_never_overshoots(rest, pix):
+    """|L_rest| (NLL terms can make it negative), and a floor on L_pix: the share can only fall
+    short of the target, never exceed it."""
+    rest_t, pix_t = torch.tensor(rest), torch.tensor(pix)
+    w = pix_share_weight(0.1, rest_t, pix_t)  # check_pix_share refuses s = 0 upstream
+    assert torch.isfinite(w) and w >= 0
+    assert w * pix_t <= 0.1 * abs(rest) * (1 + 1e-6)
+    if pix >= 1e-6:
+        torch.testing.assert_close(w * pix_t, torch.tensor(0.1 * abs(rest)))
+
+
+def test_share_weight_is_detached():
+    rest = torch.tensor(300.0, requires_grad=True)
+    pix = torch.tensor(0.02, requires_grad=True)
+    assert not pix_share_weight(0.01, rest, pix).requires_grad
+
+
+@pytest.mark.parametrize("bad", ["-0.1", "0", "1.0", "1.5", "true", "'0.01'"])
+def test_bad_pix_share_is_refused(bad):
+    """(0, 1) only. 0 would silently drop the pixel term and ignore w_pix: use w_pix: 0 for that."""
+    cfg = _share_cfg(bad)
+    with pytest.raises(ValueError, match="pix_share"):
+        _losses(_model(cfg), random_batch(cfg), cfg)

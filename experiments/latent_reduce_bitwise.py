@@ -143,7 +143,8 @@ def compare(name: str, old_fn, new_fn, cfg: dict, steps: int) -> bool:
     l_old, p_old = trace(old_fn, cfg, steps)
     l_new, p_new = trace(new_fn, cfg, steps)
     added = set(l_new[0]) - set(l_old[0])
-    keys_ok = all(set(a) <= set(b) and set(b) - set(a) <= NEW_KEYS for a, b in zip(l_old, l_new))
+    pairs = list(zip(l_old, l_new, strict=True))
+    keys_ok = all(set(a) <= set(b) and set(b) - set(a) <= NEW_KEYS for a, b in pairs)
     logs = keys_ok and all(same(a[k], b[k]) for a, b in zip(l_old, l_new, strict=True) for k in a)
     params = all(torch.equal(a, b) for a, b in zip(p_old, p_new, strict=True))
     extra = f" (+ new key {', '.join(sorted(added))}, not compared)" if added else ""

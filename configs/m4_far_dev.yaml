@@ -10,6 +10,7 @@ data:
   split: dev
 
 loss:
+  latent_reduce: sum          # these runs' latent losses (base.yaml: mean since 2026-11-19)
   target_norm: none
   var_reduce: mean
   w_var: 1.0

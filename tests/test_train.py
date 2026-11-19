@@ -447,8 +447,10 @@ def test_m7_pixel_share_configs(name, share):
     assert cfg["loss"]["pix_share"] == share
     assert cfg["train"]["steps"] == 24000
     assert cfg["train"]["stages"] == ["near", "far", "goal", "pixel"]
-    rest = {k: v for k, v in cfg["loss"].items() if k != "pix_share"}
-    assert rest == {k: v for k, v in headline["loss"].items() if k != "pix_share"}
+    # pinned to what ran in PR #28: summed latents, SPEC's w_goal (test_latent_reduce.py)
+    pinned = {"pix_share", "latent_reduce", "w_goal"}
+    rest = {k: v for k, v in cfg["loss"].items() if k not in pinned}
+    assert rest == {k: v for k, v in headline["loss"].items() if k not in pinned}
     assert {k: v for k, v in cfg.items() if k != "loss"} == {
         k: v for k, v in headline.items() if k != "loss"
     }

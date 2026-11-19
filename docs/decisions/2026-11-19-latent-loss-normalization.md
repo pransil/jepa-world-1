@@ -2,8 +2,8 @@
 
 - **Date:** 2026-11-19   **Decided by:** user (the direction, 2026-11-19, relayed by the orchestrator
   session); the design below is the m5 lane's   **SPEC ref:** §5.1, §5.4, §9.3
-- **Status:** proposed. The default stays `sum` until the collapse check passes. If it passes, the
-  default flips in the same PR and this becomes accepted.
+- **Status:** accepted (user 2026-11-19, design by m5). The collapse check passed in both seeds
+  ([note](../../experiments/2026-11-19-latent-mean-collapse-check.md)), so base.yaml's default is `mean` from the PR that added the switch.
 
 ## Question
 Every latent term is a sum over its level's channels, averaged over batch and positions. That covers
@@ -135,22 +135,34 @@ The pass rule, with its exact thresholds, lives in one place: [the note](../../e
 before the runs. In short: no L3 collapse, no runaway far log-variance, and dev k5 relerr no
 worse than sum ×25's.
 
+**Result: passed, all three rules, both seeds.**
+- **L3 std:** its minimum after far joins was 99–101% of its step-2000 value.
+- **Far log-variance:** −0.53…+0.04 over the last 500 steps, minimum −1.74.
+- **Dev k5 relerr:** 0.284 / 0.275, against sum ×25's 0.302 / 0.291.
+- **The trade-off:** dev k20 relerr is 0.693 / 0.680 against 0.666 / 0.672, +2.6% and worse in
+  both seeds. That is the expected price of weighting the far terms less at the shared stages.
+  The other horizons overlap across seeds.
+
 ## Consequences
-- **Now:** `loss.latent_reduce: sum` is in base.yaml, and nothing changes.
-  `configs/exp_first_real_run.yaml` pins its reductions (sum, sum ×25), because it is the
-  comparison arm.
+- **base.yaml:** `latent_reduce: mean` and `w_goal: 0.001953125` (0.5 / 256). `var_reduce: sum`
+  and `w_var: 25` don't change.
+- **Configs with recorded `sum` runs pin `sum`**, with `w_goal: 0.5` where there is a goal
+  head: `exp_first_real_run` (the comparison arm), `exp_guard_mean`, `m3_*`, `m4_*` and
+  `m7_pixel_share*` (`test_configs_with_recorded_sum_runs_keep_sum`).
+- **The M7 reference chain inherits `mean`:** `exp_headline`, `exp_headline_48k` and
+  `m7_obstacles`, as [m7-ablations-at-48k](2026-11-19-m7-ablations-at-48k.md) requires. To
+  reproduce an earlier headline run, use its commit, or `--set loss.pix_share=null --set
+  loss.latent_reduce=sum --set loss.w_goal=0.5`.
+- **SPEC:** §5.1 points here, and §5.4's `w_goal` line gives 0.5 / 256 under `mean`.
+  [far-collapse-guard-sum](2026-11-17-far-collapse-guard-sum.md) has a dated note.
 - **Logged scales:** `experiments/latent_relerr.py` records the run's `latent_reduce` in its
   output, because its `loss/k`, `sqerr/k` and `var/L` scale with it.
-- **If the check passes**, in the same PR:
-  - base.yaml gets `latent_reduce: mean` and `w_goal: 0.001953125` (`var_reduce: sum` and
-    `w_var: 25` don't change);
-  - every config whose recorded runs aren't part of the M7 reference chain pins `sum`
-    (`exp_guard_mean`, `m3_*`, `m4_*`, `m7_pixel_share*`);
-  - the M7 reference (`exp_headline`, `exp_headline_48k`) and `m7_obstacles` inherit the new
-    defaults, as [m7-ablations-at-48k](2026-11-19-m7-ablations-at-48k.md) requires;
-  - SPEC §5.1 gets a one-line pointer here;
-  - this file becomes accepted.
-- **If it fails:** the default stays `sum`, and the experiment note records what happened.
+- **Untested by the check:** the goal and pixel terms under `mean` (it was near + far only). The
+  48k M7 reference re-run will be the first full-model run at the new defaults, so read its goal
+  metrics against the old 48k runs knowing that the latents, the pixel share and `w_goal` all
+  changed.
+- **Revisit if** that re-run's k20 metrics (latent relerr, or the goal head's ratio to
+  persistence) lose more than the +2.6% latent k20 cost seen here.
 - **Proposals, not built:**
   - log each term's encoder-gradient norm, so the relative weights are measured, not inferred
     from values;

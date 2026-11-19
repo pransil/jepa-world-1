@@ -93,7 +93,7 @@ from it is in [`jepa_world/models/DESIGN.md`](jepa_world/models/DESIGN.md).
 | Target encoder | input at t+k | targets at the level each head reads | none: EMA of context encoder, m = 0.996 |
 | Near heads, k = 1…5 | L1 + k-embedding | mean map, L1-shaped | squared distance to stop-grad target |
 | Far heads, k = 10 / 20 | L2 / L3 + k-embedding | mean + log-variance maps | Gaussian NLL of target |
-| Goal head | pooled L3 (+ L2) | ball displacement (x, z) from t: mean + variance per k | Gaussian NLL, w_goal = 0.5 |
+| Goal head | pooled L3 (+ L2) | ball displacement (x, z) from t: mean + variance per k | Gaussian NLL, w_goal = 0.5 / 256 ([per-channel latents](docs/decisions/2026-11-19-latent-loss-normalization.md)) |
 | Pixel decoder | L1 + decoder skip | RGB frame t+1 | L1, held at 10% of the rest of the loss ([decision](docs/decisions/2026-11-19-pixel-share-default.md)) |
 | Collapse guard (optional) | context embeddings | — | VICReg-style variance floor |
 

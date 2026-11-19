@@ -109,8 +109,8 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
   switches remain for ablations.
   [far-collapse-guard-sum](../../docs/decisions/2026-11-17-far-collapse-guard-sum.md),
   [experiment](../../experiments/2026-11-17-m4-far-collapse.md)
-- **Channel reduction: `loss.latent_reduce: sum | mean`** (2026-11-19; `sum` until the collapse
-  check passes).
+- **Channel reduction: `loss.latent_reduce: sum | mean`**, `mean` by default since 2026-11-19,
+  after the near + far collapse check passed ([note](../../experiments/2026-11-19-latent-mean-collapse-check.md)).
   - `mean` divides every per-level term by the channel count of the level it is scored on:
     `loss/k`, `sqerr/k`, each level's guard `var/<L>`, and for top-down `loss/td/k` and
     `sqerr/td/k`. `_over_channels` does it in one place.

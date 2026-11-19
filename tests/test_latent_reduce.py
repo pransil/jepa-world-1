@@ -60,9 +60,48 @@ def _grads(cfg, frames):
 # ---------------------------------------------------------------- sum: exactly as before
 
 
-def test_base_keeps_sum_until_the_collapse_check_passes():
-    loss = load_config(CONFIGS / "base.yaml")["loss"]
-    assert loss["latent_reduce"] == "sum" and loss["var_reduce"] == "sum"
+def test_base_defaults_to_mean_with_the_goal_weight_moved_with_l3():
+    """Flipped 2026-11-19 after experiments/2026-11-19-latent-mean-collapse-check.md passed. The
+    guard stays sum x25 relative to the latent terms, and w_goal = 0.5 / C(L3) keeps SPEC's
+    goal-to-L3 ratio."""
+    cfg = load_config(CONFIGS / "base.yaml")
+    loss = cfg["loss"]
+    assert loss["latent_reduce"] == "mean"
+    assert (loss["var_reduce"], loss["w_var"]) == ("sum", 25.0)
+    assert loss["w_goal"] == 0.5 / cfg["model"]["levels"]["L3"]["channels"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "exp_first_real_run",
+        "exp_guard_mean",
+        "m3_near_dev",
+        "m3_near_synthetic",
+        "m4_far_synthetic",
+        "m4_far_dev",
+        "m4_collapse_baseline",
+        "m4_collapse_both",
+        "m4_collapse_guardsum",
+        "m4_collapse_layernorm",
+        "m7_pixel_share01",
+        "m7_pixel_share10",
+    ],
+)
+def test_configs_with_recorded_sum_runs_keep_sum(name):
+    """Their runs trained with channel-summed latents (and, with a goal head, w_goal 0.5)."""
+    cfg = load_config(CONFIGS / f"{name}.yaml")
+    assert cfg["loss"]["latent_reduce"] == "sum"
+    if "goal" in cfg["train"]["stages"]:
+        assert cfg["loss"]["w_goal"] == 0.5
+
+
+@pytest.mark.parametrize("name", ["exp_headline", "exp_headline_48k", "m7_obstacles"])
+def test_the_m7_reference_chain_inherits_the_new_default(name):
+    """docs/decisions/2026-11-19-m7-ablations-at-48k.md: re-run at base.yaml's defaults."""
+    base = load_config(CONFIGS / "base.yaml")["loss"]
+    loss = load_config(CONFIGS / f"{name}.yaml")["loss"]
+    assert (loss["latent_reduce"], loss["w_goal"]) == (base["latent_reduce"], base["w_goal"])
 
 
 def test_sum_is_bitwise_the_channel_sum_formulas():

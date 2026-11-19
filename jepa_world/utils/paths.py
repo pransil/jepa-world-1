@@ -84,6 +84,20 @@ def build_dataset_once(cfg: dict, build: Callable[[Path], None], name: str = "ds
     return final
 
 
+def write_new(path: str | Path, text: str) -> Path:
+    """Write `text` (UTF-8) to `path`, all or nothing and never over an existing file: it goes to
+    a temp file first, which is hard-linked into place (FileExistsError if `path` exists)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex[:8]}.tmp"
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.link(tmp, path)
+    finally:
+        tmp.unlink()
+    return path
+
+
 def git_branch() -> str:
     try:
         out = subprocess.run(

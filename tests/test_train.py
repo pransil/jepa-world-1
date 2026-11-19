@@ -14,6 +14,7 @@ from tiny import CONFIGS, NEAR, TINY, random_batch, random_frames, tiny_aux_cfg,
 from jepa_world import train
 from jepa_world.data.synthetic import moving_disc_batch
 from jepa_world.utils import paths
+from jepa_world.utils.config import load_config
 
 
 def _built(cfg):
@@ -366,3 +367,47 @@ def test_all_four_stages_on_mps_at_spec_shapes_are_finite_with_no_cpu_fallback()
     assert all(result["finite"].values()), result
     assert {"loss/goal", "loss/pix", "loss/k20"} <= set(result["finite"])
     assert result["fallbacks"] == [], result["fallbacks"]
+
+
+def test_pix_share_is_logged_every_step_and_hits_its_target(tmp_path):
+    cfg = tiny_aux_cfg(
+        "train.steps=4", "train.stage_start={near: 0, goal: 0, pixel: 2}", "loss.pix_share=0.10"
+    )
+    train.check_config(cfg)
+    train.run(cfg, tmp_path, device=torch.device("cpu"))
+    lines = [json.loads(s) for s in (tmp_path / "metrics.jsonl").read_text().splitlines()]
+    assert [r["step"] for r in lines] == [1, 2, 3, 4]
+    for r in lines:  # pixel joins after 2 completed steps: metrics steps 3 and 4
+        if r["step"] <= 2:
+            assert r["w_pix_eff"] == 0 and r["pix_share"] == 0
+        else:
+            assert r["w_pix_eff"] > 0 and r["pix_share"] == pytest.approx(0.10, rel=1e-4)
+
+
+def test_check_config_refuses_a_bad_pix_share():
+    with pytest.raises(ValueError, match="pix_share"):
+        train.check_config(tiny_aux_cfg("loss.pix_share=2.0"))
+
+
+def test_pix_share_without_a_pixel_stage_is_refused():
+    """Otherwise the requested ablation level would silently not happen (no pixel term, no log)."""
+    with pytest.raises(ValueError, match="pix_share.*pixel"):
+        train.check_config(tiny_aux_cfg("loss.pix_share=0.1", "train.stages=[near, goal]"))
+
+
+@pytest.mark.parametrize(
+    ("name", "share"), [("m7_pixel_share01", 0.01), ("m7_pixel_share10", 0.10)]
+)
+def test_m7_pixel_share_configs(name, share):
+    """M7's rescaled pixel ablation: the headline run (24k steps, all four stages, base starts)
+    with the pixel term held at a share of the rest of the loss."""
+    cfg = load_config(CONFIGS / f"{name}.yaml")
+    headline = load_config(CONFIGS / "exp_headline.yaml")
+    assert cfg["loss"]["pix_share"] == share
+    assert cfg["train"]["steps"] == 24000
+    assert cfg["train"]["stages"] == ["near", "far", "goal", "pixel"]
+    rest = {k: v for k, v in cfg["loss"].items() if k != "pix_share"}
+    assert rest == {k: v for k, v in headline["loss"].items() if k != "pix_share"}
+    assert {k: v for k, v in cfg.items() if k != "loss"} == {
+        k: v for k, v in headline.items() if k != "loss"
+    }

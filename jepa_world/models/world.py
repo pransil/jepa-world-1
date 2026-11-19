@@ -20,6 +20,32 @@ from jepa_world.models.pixel import PixelDecoder, pixel_l1
 
 AUX_STAGES = ("goal", "pixel")
 STILL_M = 1e-6  # below this mean displacement (m) the ball did not move: goalratio is undefined
+PIX_FLOOR = 1e-6  # loss.pix_share: L_pix floor (MAE in [0, 1] units), the divide-by-zero guard
+
+
+def check_pix_share(loss_cfg: dict) -> float | None:
+    """loss.pix_share: None (absent in pre-2026-11-18 configs) or a share in (0, 1). Zero is
+    refused: it would silently drop the pixel term and ignore w_pix (use w_pix: 0 for that)."""
+    share = loss_cfg.get("pix_share")
+    if share is None:
+        return None
+    if isinstance(share, bool) or not isinstance(share, int | float) or not 0 < share < 1:
+        raise ValueError(
+            f"loss.pix_share={share!r}: expected null (fixed w_pix) or a share in (0, 1); to turn "
+            "the pixel term off use w_pix: 0 "
+            "(docs/decisions/2026-11-18-pixel-ablation-target-share.md)"
+        )
+    return float(share)
+
+
+def pix_share_weight(share: float, rest: torch.Tensor, pix: torch.Tensor) -> torch.Tensor:
+    """The pixel weight that makes w * pix = share * |rest|, from DETACHED values, so the
+    gradient flows only through pix (and the rest keeps its own gradient, unscaled).
+
+    |rest|: the far-head and goal NLLs can make the rest small or negative. pix is floored at
+    PIX_FLOOR, so the share can only fall short of the target, never exceed it, and the weight is
+    always finite. Stateless (per step): models/DESIGN-aux.md says why there is no EMA."""
+    return share * rest.detach().abs() / pix.detach().clamp_min(PIX_FLOOR)
 
 
 class WorldModel(JEPA):
@@ -131,10 +157,15 @@ def compute_world_losses(
                        NaN when the batch's mean displacement is < STILL_M (k = 0, ball at rest)
       loss/goal        sum of loss/goal/k<k> over the goal horizons (SPEC §5.2)
       loss/pix         mean |pixel decoder - frame t+1| (SPEC §5.3)
+      w_pix_eff        the pixel weight used this step (0 while the pixel stage is inactive)
+      pix_share        w_pix_eff * loss/pix / |loss/total without it|: the pixel term's share
     loss/total adds w_goal * loss/goal and w_pix * loss/pix only for stages in `aux_active`
-    (default: every built one). The model gets the frames only; ball_pos is a label."""
+    (default: every built one). With loss.pix_share = s, the pixel weight is instead
+    pix_share_weight(s, rest, loss/pix), so the term is s * |rest| every step.
+    The model gets the frames only; ball_pos is a label."""
     frames, ball_pos = split_batch(batch)
     check_loss_cfg(model, loss_cfg)  # every check before the forward, so bad input fails fast
+    share = check_pix_share(loss_cfg)
     if model.goal is not None and ball_pos is None:
         raise ValueError(
             "the goal stage needs ball_pos: use batches with_gt=True (train.make_batches does "
@@ -160,8 +191,20 @@ def compute_world_losses(
         if "goal" in aux_active:
             total = total + loss_cfg["w_goal"] * losses["loss/goal"]
     if model.pixel is not None:
-        losses["loss/pix"] = pixel_l1(out["pixel"], frames[:, model.context_frames])  # t+1
-        if "pixel" in aux_active:
-            total = total + loss_cfg["w_pix"] * losses["loss/pix"]
+        pix = losses["loss/pix"] = pixel_l1(out["pixel"], frames[:, model.context_frames])  # t+1
+        rest = total.detach()
+        if "pixel" not in aux_active:
+            w = pix.new_zeros(())
+        elif share is None:
+            total = total + loss_cfg["w_pix"] * pix  # the fixed weight, exactly as before
+            w = pix.new_full((), loss_cfg["w_pix"])  # filled on device: no host copy
+        else:
+            w = pix_share_weight(share, rest, pix)
+            total = total + w * pix
+        losses["w_pix_eff"] = w
+        # the achieved share; |rest| = 0 only if every other term is exactly 0
+        losses["pix_share"] = (w * pix.detach()) / rest.abs().clamp_min(
+            torch.finfo(rest.dtype).tiny
+        )
     losses["loss/total"] = total
     return losses

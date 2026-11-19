@@ -1,0 +1,7 @@
+# M7 pixel ablation, rescaled: the headline run (24k steps, all four stages, base starts) with the
+# pixel term held at 10% of the rest of loss/total once the pixel stage starts (w_pix is then ignored).
+# docs/decisions/2026-11-18-pixel-ablation-target-share.md. Seeds 0 (this file) and 1 (--set seed=1).
+base: exp_headline.yaml
+
+loss:
+  pix_share: 0.10

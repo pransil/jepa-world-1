@@ -91,6 +91,18 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 
 ## 1. Pixel weight: 0, low, high
 
+> **Superseded settings (2026-11-18, user):** a fixed `w_pix` leaves the pixel term at ≤ 3e-5 of the
+> loss, so the levels are now **target shares** via `loss.pix_share`:
+> - ≈ 0: the existing headline runs;
+> - 1%: `configs/m7_pixel_share01.yaml`;
+> - 10%: `configs/m7_pixel_share10.yaml`.
+>
+> Each is 24k steps, seeds 0 and 1. The hypothesis and the deciding metric below carry over, with
+> high = 10% and low = 1%.
+>
+> These are shares of the loss **value**; the gradient share in the encoder is not measured.
+> [pixel-ablation-target-share](../decisions/2026-11-18-pixel-ablation-target-share.md)
+
 - **Question:** does the pixel term help or hurt the latent world model, and from what weight?
 - **Switch:** `loss.w_pix`. The key **exists** in `configs/base.yaml` (0.05). It is consumed by
   `models/pixel.py` and the training loss (M5, lane m5).

@@ -31,7 +31,8 @@ term effectively at zero, and 0 / 0.05 / 0.5 would compare three near-zero setti
 | 10% | `configs/m7_pixel_share10.yaml` (`loss.pix_share: 0.10`) | 0.10 |
 
 ## Consequences
-- `loss.pix_share` exists in `configs/base.yaml`, default null.
+- `loss.pix_share` exists in `configs/base.yaml`, default null. (The default became 0.10 on
+  2026-11-19: [pixel-share-default](2026-11-19-pixel-share-default.md).)
   - **Null is bitwise the old fixed-weight loss.** A test pins it, and the PR records a
     side-by-side check against the previous code.
   - When a share is set, `w_pix` is ignored.

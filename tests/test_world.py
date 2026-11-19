@@ -93,9 +93,10 @@ def test_inactive_aux_terms_are_logged_but_left_out_of_the_total():
     off = _losses(model, batch, cfg, aux_active=())
     assert {"loss/goal", "loss/pix"} <= set(off)
     w = cfg["loss"]
-    torch.testing.assert_close(
+    assert off["w_pix_eff"] == 0
+    torch.testing.assert_close(  # w_pix_eff: base.yaml's 10% share weight (or w_pix if null)
         on["loss/total"] - off["loss/total"],
-        w["w_goal"] * on["loss/goal"] + w["w_pix"] * on["loss/pix"],
+        w["w_goal"] * on["loss/goal"] + on["w_pix_eff"] * on["loss/pix"],
     )
     goal_only = _losses(model, batch, cfg, aux_active=["goal"])
     torch.testing.assert_close(
@@ -223,10 +224,11 @@ def test_aux_heads_read_only_the_context_frames():
         torch.testing.assert_close(x, y, rtol=0, atol=0)
 
 
-def test_the_model_never_receives_ground_truth():
+@pytest.mark.parametrize("share", ["base", "null"])
+def test_the_model_never_receives_ground_truth(share):
     """ball_pos is a label: forward gets the frames tensor only, and changing ball_pos changes
     only the goal terms (data/DESIGN.md: GT after index C-1 is the future)."""
-    cfg = tiny_aux_cfg()
+    cfg = tiny_aux_cfg(*(["loss.pix_share=null"] if share == "null" else []))
     model = _model(cfg)
     seen = []
     model.register_forward_pre_hook(
@@ -242,8 +244,11 @@ def test_the_model_never_receives_ground_truth():
     moved = {**batch, "ball_pos": batch["ball_pos"] + 3.0 * torch.randn_like(batch["ball_pos"])}
     b = _losses(model, moved, cfg)
     goal_terms = {k for k in a if k.startswith(("loss/goal", "goalerr", "goalratio"))}
-    # loss/total and pix_share (a ratio to the rest of loss/total) include the goal loss
-    for k in set(a) - goal_terms - {"loss/total", "pix_share"}:
+    # loss/total includes the goal loss, and so does pix_share (a ratio to the rest of
+    # loss/total). Under a share (base.yaml's default) w_pix_eff = s|rest|/loss/pix does too;
+    # under the fixed w_pix it must not move.
+    shared = {"loss/total", "pix_share"} | ({"w_pix_eff"} if share == "base" else set())
+    for k in set(a) - goal_terms - shared:
         torch.testing.assert_close(a[k], b[k], rtol=0, atol=0, msg=k)
     assert not torch.equal(a["loss/goal"], b["loss/goal"])
 
@@ -304,7 +309,7 @@ def _share_cfg(share="0.01", *more):
 def test_pix_share_null_is_bitwise_the_fixed_weight():
     """Off (null, or a pre-change config with no key): loss/total is exactly the fixed-weight
     sum, and every gradient is bitwise equal."""
-    cfg = tiny_aux_cfg()
+    cfg = tiny_aux_cfg("loss.pix_share=null")  # base.yaml's default is a share since 2026-11-19
     assert cfg["loss"]["pix_share"] is None
     old = tiny_aux_cfg()
     del old["loss"]["pix_share"]  # saved configs from before this key existed
@@ -334,7 +339,7 @@ def test_pix_share_null_is_bitwise_the_fixed_weight():
 
 
 def test_fixed_weight_logs_its_weight_and_share():
-    cfg = tiny_aux_cfg()
+    cfg = tiny_aux_cfg("loss.pix_share=null")
     model, batch = _model(cfg), random_batch(cfg)
     on = _losses(model, batch, cfg)
     rest = _losses(model, batch, cfg, aux_active=["goal"])["loss/total"]

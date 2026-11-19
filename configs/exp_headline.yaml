@@ -3,6 +3,10 @@
 # 2026-11-18, docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md). Only the length is set here:
 # 24000 steps, so the full model trains for 18000 steps after pixel joins.
 # Seeds: 0 (this file) and 1 (--set seed=1). experiments/2026-11-17-headline-full-model.md
+# Its runs (commit ba81066) trained at the fixed w_pix 0.05. base.yaml's default became a 10% pixel
+# share on 2026-11-19 (docs/decisions/2026-11-19-pixel-share-default.md), and this file inherits it, as the M7 reference
+# exp_headline_48k.yaml must (docs/decisions/2026-11-19-m7-ablations-at-48k.md). To reproduce those
+# runs, check out their commit or add --set loss.pix_share=null.
 base: base.yaml
 
 train:

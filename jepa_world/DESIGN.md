@@ -129,13 +129,19 @@ payload (JSON) ─► viewer_template.html ─► $JEPA_ARTIFACTS/viewers/<UTC>-
   scales by `px_per_m`. Points off the frame are drawn on a margin around it.
 - **Every t ≥ C−1 gets a prediction.** Truth exists only where t+k ≤ T−1. The windows `eval`
   scores (t = 3..39) are flagged, and per-episode errors use only those.
-- **Held-out data only.** The split must be dev or test, checked with `eval.check_eval_split`
-  for every model against base.yaml's seeds. The page names the split on every panel.
-- **CPU by default.** All three models on 24 episodes take seconds on the CPU, and the GPU is
-  shared, so `--device mps` is opt-in and runs under `gpu_lock`.
+- **Held-out data only.** The split must be dev or test, which is checked before any checkpoint
+  is read. Then `eval.check_eval_split` runs for every model against base.yaml's seeds, which
+  refuses a model trained on that split. The page names the split on every panel.
+- **Every model must have something to show:** a goal head, a pixel decoder, or both. A
+  latent-only run is refused rather than drawn as an empty page.
+- **CPU by default.** Three models on 24 test episodes took 71 s of wall time on the CPU,
+  including loading the split, and the GPU is shared. So `--device mps` is opt-in and runs under
+  `gpu_lock`.
 - **One file, data inline.** Frames go in as PNG strips (data URIs, lossless), with no script or
-  stylesheet from the network. The size is checked against 16 MB before anything is written, and
-  the default output is under the artifact root, never in git.
+  stylesheet from the network. The size is checked against 16 MB before anything is written. The
+  default output is under the artifact root, and `--out` is refused inside any git work tree (a
+  lane's main clone included). The write is `paths.write_new`'s: all or nothing, never over an
+  existing file.
 
 ## Data flow and shapes
 

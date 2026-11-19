@@ -55,32 +55,23 @@ def _check_same_shape(**tensors: torch.Tensor) -> None:
 LATENT_REDUCE = ("sum", "mean")  # loss.latent_reduce
 
 
-def check_latent_reduce(loss_cfg: dict) -> str:
-    """loss.latent_reduce: 'sum' (absent in configs from before 2026-11-19) or 'mean'. 'mean'
-    needs the guard averaged over channels too (var_reduce: mean): with a summed guard, every
-    level's guard would outweigh its latent terms C-fold
-    (docs/decisions/2026-11-19-latent-loss-normalization.md)."""
-    reduce = loss_cfg.get("latent_reduce", "sum")
+def _checked_reduce(reduce: str) -> str:
     if reduce not in LATENT_REDUCE:
-        raise ValueError(f"loss.latent_reduce={reduce!r}: expected 'sum' or 'mean'")
-    if reduce == "mean" and loss_cfg["collapse_guard"] and loss_cfg["var_reduce"] != "mean":
-        raise ValueError(
-            f"loss.latent_reduce='mean' with loss.var_reduce={loss_cfg['var_reduce']!r}: the "
-            "guard must be reduced over channels as the latent losses are (var_reduce: mean), so "
-            "each level keeps its guard-to-latent ratio "
-            "(docs/decisions/2026-11-17-far-collapse-guard-sum.md)"
-        )
+        raise ValueError(f"loss.latent_reduce={reduce!r}: expected one of {LATENT_REDUCE}")
     return reduce
+
+
+def latent_reduce(loss_cfg: dict) -> str:
+    """loss.latent_reduce, validated: 'sum', or 'mean' (every per-level term divided by its
+    level's channel count: docs/decisions/2026-11-19-latent-loss-normalization.md). A config
+    from before 2026-11-19 has no key, and means 'sum'. The one place that default lives."""
+    return _checked_reduce(loss_cfg.get("latent_reduce", "sum"))
 
 
 def _over_channels(x: torch.Tensor, channels: int, reduce: str) -> torch.Tensor:
     """A channel-summed term as it is ('sum'), or per channel ('mean': divided by `channels`).
     'sum' returns `x` itself, so the default path is bitwise what it was before the switch."""
-    if reduce == "sum":
-        return x
-    if reduce == "mean":
-        return x / channels
-    raise ValueError(f"loss.latent_reduce={reduce!r}: expected 'sum' or 'mean'")
+    return x if _checked_reduce(reduce) == "sum" else x / channels
 
 
 def _err2(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -393,7 +384,8 @@ def compute_losses(
     """Every term as a 0-d tensor, for EVERY built horizon (SPEC §5.4):
       loss/k<k>    squared L2 (near) or Gaussian NLL (far), against the (normalized) target.
                    Summed over channels, or, with loss.latent_reduce: mean, averaged over them;
-                   so are sqerr/k, loss/td/k, sqerr/td/k and (via var_reduce: mean) the guard
+                   so are sqerr/k, loss/td/k, sqerr/td/k and each level's guard (var/<L>), whose
+                   own var_reduce is relative to that scale
       relerr/k<k>  scale-free error of the mean (relative_error), detached
       sqerr/k<k>   far only: the mean's squared L2, detached (is the prediction itself improving?)
       logvar/k<k>  far only: mean predicted log-variance, detached
@@ -413,7 +405,7 @@ def compute_losses(
 
 
 def check_loss_cfg(model: JEPA, loss_cfg: dict) -> None:
-    check_latent_reduce(loss_cfg)
+    latent_reduce(loss_cfg)
     if loss_cfg["latent_distance"] != "mse":
         raise ValueError(
             f"loss.latent_distance={loss_cfg['latent_distance']!r}: only 'mse' (squared L2) "
@@ -456,7 +448,7 @@ def losses_from_output(
     The caller validates first, before its forward: check_loss_cfg, and `active` from
     model.check_active (compute_losses and world.compute_world_losses both do)."""
     losses: dict[str, torch.Tensor] = {}
-    reduce = loss_cfg.get("latent_reduce", "sum")  # validated by check_latent_reduce
+    reduce = latent_reduce(loss_cfg)
     total = out["context"][model.level_names[0]].new_zeros(())
     for k in model.horizons:
         pred, target = out["pred"][k], out["target"][k]  # target: detached, already normalized
@@ -484,8 +476,15 @@ def losses_from_output(
         var = batch_var(out["context"][lv])  # one reduction, used for the guard and the log
         extra[f"emb_std/{lv}"] = var.detach().sqrt().mean()
         if loss_cfg["collapse_guard"]:
-            g = _guard_from_var(
-                var, loss_cfg["var_gamma"], loss_cfg["var_eps"], loss_cfg["var_reduce"]
+            # var_reduce is relative to the latent terms' channel reduction ('sum': their scale),
+            # so under either latent_reduce, w_var and var_reduce alone set each level's
+            # guard-to-latent ratio (M4's collapse fix: far-collapse-guard-sum decision)
+            g = _over_channels(
+                _guard_from_var(
+                    var, loss_cfg["var_gamma"], loss_cfg["var_eps"], loss_cfg["var_reduce"]
+                ),
+                var.shape[0],
+                reduce,
             )
             extra[f"var/{lv}"] = g.detach()
             if lv in active_levels:

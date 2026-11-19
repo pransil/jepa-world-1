@@ -2,8 +2,8 @@
 
 'sum' (the 2026-11-17 decisions, and what a config without the key means): every latent term is
 summed over its level's channels and averaged over (batch, positions). 'mean': the same terms
-divided by their level's channel count, with the variance guard averaged over channels too
-(var_reduce: mean), so every level keeps its guard-to-latent ratio.
+divided by their level's channel count, the variance guard included. var_reduce is relative to that
+scale, so w_var and var_reduce alone set every level's guard-to-latent ratio, under either setting.
 """
 
 from __future__ import annotations
@@ -30,10 +30,10 @@ from jepa_world.models.world import compute_world_losses
 from jepa_world.utils.config import load_config
 
 CH = {lv: shape[0] for lv, shape in TINY_SHAPE.items()}  # L1 8, L2 16, L3 32 channels
-SUM = ("loss.latent_reduce=sum", "loss.var_reduce=sum")
-MEAN = ("loss.latent_reduce=mean", "loss.var_reduce=mean")
+SUM = ("loss.latent_reduce=sum",)
+MEAN = ("loss.latent_reduce=mean",)
 TD = {20: "L2", 10: "L1"}  # top-down: horizon -> the finer level its branch predicts
-REL = {"rtol": 1e-5, "atol": 1e-7}  # x / C against a different reduction order
+REL = {"rtol": 1e-5, "atol": 1e-7}  # ratios and totals: a different rounding order
 
 
 def _model(cfg):
@@ -113,15 +113,18 @@ def test_mean_divides_each_level_term_by_its_channel_count():
     for k in FAR:
         c = CH[LEVEL[k]]
         torch.testing.assert_close(m[f"sqerr/k{k}"], s[f"sqerr/k{k}"] / c, rtol=0, atol=0)
-    for lv, c in CH.items():  # the guard, averaged over channels (var_reduce: mean)
-        torch.testing.assert_close(m[f"var/{lv}"], s[f"var/{lv}"] / c, **REL)
+    for lv, c in CH.items():  # each level's guard moves with its latent terms
+        torch.testing.assert_close(m[f"var/{lv}"], s[f"var/{lv}"] / c, rtol=0, atol=0)
     torch.testing.assert_close(m["loss/var"], m["var/L1"] + m["var/L2"] + m["var/L3"])
 
 
-def test_every_level_keeps_its_guard_to_latent_ratio():
+@pytest.mark.parametrize("var_reduce", ["sum", "mean"])
+def test_every_level_keeps_its_guard_to_latent_ratio(var_reduce):
     """The M4 far-collapse fix is a per-level balance (guard x w_var against that level's latent
-    terms: docs/decisions/2026-11-17-far-collapse-guard-sum.md). Both sides move by 1/C."""
-    s, m = _both()
+    terms: docs/decisions/2026-11-17-far-collapse-guard-sum.md). Both sides move by 1/C, so the
+    ratio is var_reduce's (and w_var's) alone: sum x25 stays sum x25, the mean x1 ablation stays
+    mean x1."""
+    s, m = _both(tiny_far_cfg, f"loss.var_reduce={var_reduce}")
     reads = {lv: [k for k in ALL if LEVEL[k] == lv] for lv in CH}
     for lv, ks in reads.items():
         ratio_s = s[f"var/{lv}"] / sum(s[f"loss/k{k}"] for k in ks)
@@ -217,29 +220,15 @@ def test_an_unknown_reduction_is_refused_before_the_forward():
     assert calls == []
 
 
-def test_mean_refuses_a_channel_summed_guard():
-    """mean latents with a summed guard would weight every level's guard C times its latent terms
-    (C = 64..256 at SPEC sizes): the opposite failure to M4's collapse."""
-    cfg = tiny_far_cfg("loss.latent_reduce=mean", "loss.var_reduce=sum")
-    with pytest.raises(ValueError, match="var_reduce"):
-        train.check_config(cfg)
-    with pytest.raises(ValueError, match="var_reduce"):
-        compute_losses(_model(cfg), random_frames(cfg), cfg["loss"])
-    off = tiny_far_cfg(
-        "loss.latent_reduce=mean", "loss.var_reduce=sum", "loss.collapse_guard=false"
-    )
-    train.check_config(off)  # no guard, no ratio to keep
-
-
-def test_collapse_check_config_is_the_sum_x25_run_with_only_the_reductions_changed():
+def test_collapse_check_config_is_the_sum_x25_run_with_only_the_reduction_changed():
     """configs/exp_latent_mean.yaml against configs/exp_first_real_run.yaml (the sum x25 arm of
     experiments/2026-11-18-guard-comparison.md): near + far, 8000 steps, far after 2000."""
     ref = load_config(CONFIGS / "exp_first_real_run.yaml")
     cfg = load_config(CONFIGS / "exp_latent_mean.yaml")
-    assert (cfg["loss"]["latent_reduce"], cfg["loss"]["var_reduce"]) == ("mean", "mean")
-    assert cfg["loss"]["w_var"] == ref["loss"]["w_var"] == 25.0
-    assert ref["loss"]["latent_reduce"] == "sum" and ref["loss"]["var_reduce"] == "sum"
-    changed = {"latent_reduce", "var_reduce"}
+    assert cfg["loss"]["latent_reduce"] == "mean" and ref["loss"]["latent_reduce"] == "sum"
+    for c in (cfg, ref):  # the guard: sum x25 relative to the latent terms, in both arms
+        assert (c["loss"]["var_reduce"], c["loss"]["w_var"]) == ("sum", 25.0)
+    changed = {"latent_reduce"}
     assert {k: v for k, v in cfg["loss"].items() if k not in changed} == {
         k: v for k, v in ref["loss"].items() if k not in changed
     }

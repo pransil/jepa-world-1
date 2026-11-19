@@ -25,7 +25,7 @@ from jepa_world.data.dataset import batches as episode_batches
 from jepa_world.data.dataset import load_split, require_split
 from jepa_world.data.splits import TRAINABLE, LeakageError
 from jepa_world.data.synthetic import moving_disc_batch
-from jepa_world.models.jepa import check_latent_reduce
+from jepa_world.models.jepa import latent_reduce
 from jepa_world.models.world import (
     AUX_STAGES,
     WorldModel,
@@ -182,7 +182,7 @@ def check_config(cfg: dict) -> list[int]:
             "lower-precision path must be built and tested explicitly first (SPEC §6)"
         )
     _check_stage_start(cfg, horizons)
-    check_latent_reduce(cfg["loss"])
+    latent_reduce(cfg["loss"])  # fails before any run dir; the loss checks again per call
     check_pix_share(cfg["loss"])  # a no-op without a pixel stage, like w_pix: base.yaml sets one
     return horizons
 

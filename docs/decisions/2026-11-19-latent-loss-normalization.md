@@ -27,8 +27,8 @@ So the design has to state what happens to each of these.
 ## Measured: what `mean` would do to the headline runs
 Every logged latent term is a channel sum, so its `mean` value is exactly sum / C. The figures below
 are window means from the two 24k headline runs' `metrics.jsonl`
-(`runs/20261118T231506Z-…-headline-s0-32ff77`, `runs/20261119T001708Z-…-headline-s1-d2c5c1`; script
-in the PR):
+(`runs/20261118T231506Z-…-headline-s0-32ff77`, `runs/20261119T001708Z-…-headline-s1-d2c5c1`),
+printed by `uv run python experiments/latent_reduce_scale.py --run <dir> --run <dir>`:
 
 | steps | latent total, sum | latent total, mean | ratio (C_eff) | near/far, sum | near/far, mean | goal term / latent at w_goal 0.5, sum | same under mean |
 |---|---|---|---|---|---|---|---|
@@ -42,28 +42,33 @@ in the PR):
 goal head grows confident.
 
 ## Design
-1. **`loss.latent_reduce: sum | mean`.** Under `mean`, every latent term is divided by the
-   channel count of the level it is scored on:
+1. **`loss.latent_reduce: sum | mean`, one key.** Under `mean`, every per-level term is divided
+   by the channel count of the level it is scored on:
    - `loss/k` for k = 1–5 by L1's count;
    - each far head's `loss/k` by its own level's count;
    - `loss/td/k` (top-down) by its target level's count;
+   - each level's guard (`var/<L>`) by that level's count (item 2);
    - the logged `sqerr` the same way.
 
    **`sum` is the existing code path, bitwise.** `test_sum_is_bitwise_the_channel_sum_formulas`
-   pins it. In a side-by-side check against main's `jepa.py`, 6 training steps gave bitwise-equal
-   logged terms and parameters in 5 setups: near only, far joining mid-run, the mean ×1 guard,
-   top-down, and a config with no key. A config without the key means `sum`, so checkpoints, eval
-   and `latent_relerr.py` reproduce every earlier run.
-2. **Guard: `mean` requires `var_reduce: mean`, and `w_var` stays 25.** Both sides of each level's
-   balance (guard × w_var against that level's latent terms) move by 1/C, so the ratio is exactly
-   preserved. M4's fix ([far-collapse-guard-sum](2026-11-17-far-collapse-guard-sum.md)) holds level
-   by level (`test_every_level_keeps_its_guard_to_latent_ratio`).
-   - `latent_reduce: mean` with `var_reduce: sum` is refused. It would weight each guard 64–256×
-     its latent terms.
-   - This is **not** the guard comparison's "mean ×1" arm, which collapsed
-     ([experiment](../../experiments/2026-11-18-guard-comparison.md)). In that arm the latent terms
-     stayed sums while the guard was averaged at weight 1, which left the guard 25·C× weaker
-     relative to them.
+   pins it. `uv run python experiments/latent_reduce_bitwise.py --ref origin/main` trains a tiny
+   model for 6 steps through main's `jepa.py` and through this one. It printed BITWISE IDENTICAL:
+   every logged term and parameter matched in 5 setups (near only, far joining mid-run, the mean
+   ×1 guard, top-down, a config with no key). With `mean` it prints DIFFERENT. A config without
+   the key means `sum`, so checkpoints, eval and `latent_relerr.py` reproduce every earlier run.
+2. **The guard follows `latent_reduce`.** `var_reduce` keeps its M4 meaning, *relative to the
+   latent terms*: `sum` is their channel reduction, `mean` is 1/C of it. So each level's balance
+   (guard × w_var against that level's latent terms) moves by 1/C on both sides, and is set by
+   `var_reduce` and `w_var` alone under either `latent_reduce`. Sum ×25 stays sum ×25, and the
+   mean ×1 ablation stays mean ×1. M4's fix
+   ([far-collapse-guard-sum](2026-11-17-far-collapse-guard-sum.md)) holds level by level
+   (`test_every_level_keeps_its_guard_to_latent_ratio[sum|mean]`).
+   - **Lost: a second key that must agree** (`latent_reduce: mean` with `var_reduce: mean`,
+     and the mixed setting refused). Every config would have had to flip both, and the
+     invalid mix could be written.
+   - **Not the guard comparison's "mean ×1" arm,** which collapsed
+     ([experiment](../../experiments/2026-11-18-guard-comparison.md)). Under `mean` the guard
+     stays at sum ×25's ratio.
 3. **Between levels**, the far heads' weight against the near heads drops 2× (k = 10) and 4×
    (k = 20). This is the intended effect. By encoder stage:
    - **Stage 3** (L3's parameters) sees only L3 terms: the k20 NLL, the L3 guard, and the goal head,
@@ -98,6 +103,10 @@ goal head grows confident.
        below.
    - **Under `sum`, `w_goal` stays 0.5.** This value is tied to `mean`, and the configs that keep
      `sum` pin both.
+   - **Not enforced in code.** `latent_reduce: mean` with `w_goal: 0.5`, or with a fixed `w_pix`
+     (`pix_share: null`), trains a different objective: goal or pixel term about C_eff× heavier.
+     It is a legitimate experiment (the SPEC §5.4 weights on per-channel latents), so it isn't
+     refused. base.yaml's comment on `w_goal` states the pairing.
 5. **Pixel:** `pix_share` holds the pixel term at 10% of |L_rest| at any scale
    (`test_goal_and_pixel_terms_do_not_depend_on_it`). `w_pix_eff` will be about C_eff× smaller.
    With `w_goal` as above, L_rest stays positive: the latent total under `mean` is 4–8 on the
@@ -118,20 +127,23 @@ goal head grows confident.
    multiply by that level's channel count.
 
 ## Collapse check (before any default changes)
-`configs/exp_latent_mean.yaml` is `configs/exp_first_real_run.yaml` with only the two reductions
+`configs/exp_latent_mean.yaml` is `configs/exp_first_real_run.yaml` with only `latent_reduce`
 changed. That config is near + far, 8000 steps, far joining after 2000, on the train split, and it
-is the sum ×25 arm of the guard comparison. Seeds 0 and 1, under the GPU lock. Pass rule, fixed
-before the runs (experiments/2026-11-19-latent-mean-collapse-check.md):
-- L3's `emb_std` never falls below 50% of its step-2000 value;
-- the far log-variance doesn't run away;
-- dev k5 relerr at step 8000 is no worse than sum ×25's 0.302 / 0.291.
+is the sum ×25 arm of the guard comparison. Seeds 0 and 1, under the GPU lock.
+
+The pass rule, with its exact thresholds, lives in one place: [the note](../../experiments/2026-11-19-latent-mean-collapse-check.md), committed
+before the runs. In short: no L3 collapse, no runaway far log-variance, and dev k5 relerr no
+worse than sum ×25's.
 
 ## Consequences
 - **Now:** `loss.latent_reduce: sum` is in base.yaml, and nothing changes.
   `configs/exp_first_real_run.yaml` pins its reductions (sum, sum ×25), because it is the
   comparison arm.
+- **Logged scales:** `experiments/latent_relerr.py` records the run's `latent_reduce` in its
+  output, because its `loss/k`, `sqerr/k` and `var/L` scale with it.
 - **If the check passes**, in the same PR:
-  - base.yaml gets `latent_reduce: mean`, `var_reduce: mean` and `w_goal: 0.001953125`;
+  - base.yaml gets `latent_reduce: mean` and `w_goal: 0.001953125` (`var_reduce: sum` and
+    `w_var: 25` don't change);
   - every config whose recorded runs aren't part of the M7 reference chain pins `sum`
     (`exp_guard_mean`, `m3_*`, `m4_*`, `m7_pixel_share*`);
   - the M7 reference (`exp_headline`, `exp_headline_48k`) and `m7_obstacles` inherit the new

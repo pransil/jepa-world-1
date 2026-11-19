@@ -111,13 +111,18 @@ inactive heads, and levels only they read, run under no_grad: logged, never trai
   [experiment](../../experiments/2026-11-17-m4-far-collapse.md)
 - **Channel reduction: `loss.latent_reduce: sum | mean`** (2026-11-19; `sum` until the collapse
   check passes).
-  - `mean` divides every latent term by the channel count of the level it is scored on: `loss/k`,
-    `sqerr/k`, and for top-down `loss/td/k` and `sqerr/td/k`. `_over_channels` does it in one place.
+  - `mean` divides every per-level term by the channel count of the level it is scored on:
+    `loss/k`, `sqerr/k`, each level's guard `var/<L>`, and for top-down `loss/td/k` and
+    `sqerr/td/k`. `_over_channels` does it in one place.
   - **`sum` returns the same tensor**, so it is bitwise the old path, and so is a config with no
-    key (`test_sum_is_bitwise_the_channel_sum_formulas`, `test_a_config_without_the_key_is_bitwise_sum`).
-  - `mean` requires `var_reduce: mean` at the same `w_var`, so each level's guard-to-latent ratio,
-    M4's collapse fix, is unchanged. `check_latent_reduce` refuses the mix, both in
-    `train.check_config` and before the forward.
+    key (`test_sum_is_bitwise_the_channel_sum_formulas`, `test_a_config_without_the_key_is_bitwise_sum`,
+    and `experiments/latent_reduce_bitwise.py` over 6 training steps against a git ref).
+  - **The guard follows the latent reduction.** `var_reduce` is relative to it (`sum` = the latent
+    terms' scale, `mean` = 1/C of it), so `var_reduce` and `w_var` alone set each level's
+    guard-to-latent ratio, M4's collapse fix, under either setting. That leaves one key, with no
+    combination to refuse. A second key that had to agree lost.
+  - `latent_reduce(loss_cfg)` is the one accessor. It holds the absent-key default (`sum`) and the
+    validation, and `train.check_config` calls it before any run dir exists.
   - `relerr` is computed from the channel sums before any division, so it is bitwise identical
     under either setting. `loss/total`, `loss/k` and `var/L` differ by the level's channel count.
   - With Adam, `mean` on one level is a uniform rescale, a no-op up to ε. What it changes is the

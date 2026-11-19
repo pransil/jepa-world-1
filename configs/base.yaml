@@ -96,16 +96,18 @@ model:                        # SPEC §4
 
 loss:                         # SPEC §5
   latent_distance: mse        # squared L2, summed over channels, mean over positions (docs/decisions/2026-11-17-latent-distance-sq-l2.md)
-  latent_reduce: sum          # sum | mean over each level's channels, for every latent term (near, far, top-down). mean needs
-                              # var_reduce: mean, so each level keeps its guard-to-latent ratio (docs/decisions/2026-11-19-latent-loss-normalization.md)
+  latent_reduce: sum          # sum | mean over each level's channels, for every per-level term: near, far, top-down and the guard
+                              # (so each level keeps its guard-to-latent ratio). mean: docs/decisions/2026-11-19-latent-loss-normalization.md
   target_norm: none           # none | layernorm (per position, over channels): raw kept (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
   collapse_guard: true        # VICReg-style variance floor (docs/decisions/2026-11-17-collapse-guard-on.md)
   var_gamma: 1.0              # target batch std per (channel, position)
   var_eps: 1.0e-4             # inside the sqrt, so a zero-variance feature has a finite gradient
-  var_reduce: sum             # mean | sum (over channels, like the latent losses): sum stops the far-NLL collapse (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
+  var_reduce: sum             # mean | sum, relative to the latent terms: sum = their channel reduction (latent_reduce), mean = 1/C of it.
+                              # sum stops the far-NLL collapse (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
   w_var: 25.0                 # VICReg's variance weight (same decision); loss/var = sum over active levels of each level's guard
   w_k: 1.0
-  w_goal: 0.5                 # x loss/goal = sum over goal_horizons of the goal NLL (SPEC §5.4)
+  w_goal: 0.5                 # x loss/goal = sum over goal_horizons of the goal NLL (SPEC §5.4). Tied to latent_reduce: sum; under mean,
+                              # 0.5 / 256 (L3 channels) keeps the goal-to-L3 ratio (docs/decisions/2026-11-19-latent-loss-normalization.md)
   w_pix: 0.05                 # x loss/pix = mean |pred - frame t+1| in [0, 1] units, so <= w_pix. Used only when pix_share is null
   pix_share: 0.10             # a share s in (0, 1) replaces w_pix by s * |rest of loss/total| / loss/pix (detached), holding the
                               # pixel term at s (docs/decisions/2026-11-18-pixel-ablation-target-share.md). 0.10 by default since

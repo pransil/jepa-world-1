@@ -26,9 +26,13 @@ the near heads regress no more than under sum ×25.
    7501–8000 is ≥ −3.0, and no step is below −8 (80% of the −10 bound).
    - For reference, sum ×25 sat at −0.5…+0.1.
    - The collapsed mean ×1 arm sat at −3.4…−3.9, with a minimum of −5.3.
-3. **Near heads no worse:** dev `relerr/k5` at step 8000 is ≤ 0.302 **in each seed**, which is
-   inside or below sum ×25's range (0.302 / 0.291, mean 0.2965). The mean comparison is reported
-   beside it.
+3. **Near heads no worse:** dev `relerr/k5` at step 8000 is at or below the sum ×25 arm's worse
+   seed **in each seed**, i.e. inside or below sum ×25's range (0.30203 / 0.29121, mean 0.2966). The
+   mean comparison is reported beside it.
+   - *Clarified at 16:21Z on 2026-11-19, while the mean runs were still training and before any
+     mean result existed:* the first draft wrote the threshold as "0.302", the guard comparison's
+     rounding of 0.30203. Taken literally, that would have failed the sum ×25 arm against itself.
+     `experiments/latent_mean_check.py` reads the exact value from the sum runs' `latent_dev.json`.
    - Scored with `experiments/latent_relerr.py`: 200 dev batches of 32, seed 0, CPU.
    - These are the same windows as the guard comparison.
 

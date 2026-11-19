@@ -322,6 +322,15 @@ def test_pix_share_null_is_bitwise_the_fixed_weight():
     assert torch.equal(totals[0], totals[1])
     for a, b in zip(*grads, strict=True):
         assert (a is None and b is None) or torch.equal(a, b)
+    # The decoder's gradients against a hand-built w_pix * L_pix: a change to the pixel term too
+    # small to move loss/total (absorbed by rounding) still scales every decoder gradient. (Only
+    # the decoder: the encoder's gradients would sum two separate forwards in another order.)
+    model = _model(cfg)
+    decoder = {id(p) for p in model.pixel.parameters()}
+    want = [g for p, g in zip(model.parameters(), grads[0], strict=True) if id(p) in decoder]
+    _grads(model, {"loss/total": cfg["loss"]["w_pix"] * _losses(model, batch, cfg)["loss/pix"]})
+    for p, g in zip(model.pixel.parameters(), want, strict=True):
+        assert torch.equal(p.grad, g)
 
 
 def test_fixed_weight_logs_its_weight_and_share():

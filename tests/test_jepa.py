@@ -23,6 +23,14 @@ from jepa_world.models.jepa import (
 # The guard's configured weight and reduction (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
 W_VAR = tiny_cfg()["loss"]["w_var"]
 VAR_REDUCE = tiny_cfg()["loss"]["var_reduce"]
+# The latent terms' channel reduction, base.yaml's (docs/decisions/2026-11-19-latent-loss-normalization.md)
+REDUCE = tiny_cfg()["loss"]["latent_reduce"]
+
+
+def _per_level(x: torch.Tensor, level: str) -> torch.Tensor:
+    """A channel-summed value (variance_guard) in the loss's reduction: / C under mean. Written
+    out here on purpose, not jepa.over_channels: the test's oracle stays independent of the code."""
+    return x / TINY_SHAPE[level][0] if REDUCE == "mean" else x
 
 
 def _model(cfg=None) -> JEPA:
@@ -442,10 +450,10 @@ def test_far_loss_is_the_gaussian_nll_of_its_head():
     model, losses = _far_losses()
     out = model(random_frames(tiny_far_cfg()))
     for k in FAR:
-        nll = gaussian_nll(out["pred"][k], out["logvar"][k], out["target"][k])
+        nll = gaussian_nll(out["pred"][k], out["logvar"][k], out["target"][k], REDUCE)
         torch.testing.assert_close(losses[f"loss/k{k}"], nll)
         torch.testing.assert_close(
-            losses[f"sqerr/k{k}"], latent_loss(out["pred"][k], out["target"][k])
+            losses[f"sqerr/k{k}"], latent_loss(out["pred"][k], out["target"][k], REDUCE)
         )
         torch.testing.assert_close(losses[f"logvar/k{k}"], out["logvar"][k].mean())
 
@@ -454,7 +462,7 @@ def test_inactive_horizons_are_logged_but_left_out_of_the_total():
     model, losses = _far_losses(active=NEAR)
     assert {f"loss/k{k}" for k in FAR} <= set(losses)  # still logged
     out = model(random_frames(tiny_far_cfg()))
-    guard_l1 = variance_guard(out["context"]["L1"], 1.0, 1e-4, reduce=VAR_REDUCE)
+    guard_l1 = _per_level(variance_guard(out["context"]["L1"], 1.0, 1e-4, VAR_REDUCE), "L1")
     torch.testing.assert_close(losses["loss/var"], guard_l1)  # guard covers active levels only
     manual = sum(losses[f"loss/k{k}"] for k in NEAR) + W_VAR * losses["loss/var"]
     torch.testing.assert_close(losses["loss/total"], manual)
@@ -551,10 +559,10 @@ def test_target_norm_switch_normalizes_the_targets_the_model_returns():
         torch.testing.assert_close(out["target"][k], normalize_target(raw_targets[k], "layernorm"))
     for k in NEAR:
         torch.testing.assert_close(
-            losses[f"loss/k{k}"], latent_loss(out["pred"][k], out["target"][k])
+            losses[f"loss/k{k}"], latent_loss(out["pred"][k], out["target"][k], REDUCE)
         )
     for k in FAR:
-        nll = gaussian_nll(out["pred"][k], out["logvar"][k], out["target"][k])
+        nll = gaussian_nll(out["pred"][k], out["logvar"][k], out["target"][k], REDUCE)
         torch.testing.assert_close(losses[f"loss/k{k}"], nll)
     for k in ALL:
         torch.testing.assert_close(
@@ -590,5 +598,5 @@ def test_var_reduce_switch_reaches_the_loss(reduce):
     losses = compute_losses(model, frames, cfg["loss"])
     out = model(frames)
     for lv in ("L1", "L2", "L3"):
-        expected = variance_guard(out["context"][lv], 1.0, 1e-4, reduce=reduce)
+        expected = _per_level(variance_guard(out["context"][lv], 1.0, 1e-4, reduce=reduce), lv)
         torch.testing.assert_close(losses[f"var/{lv}"], expected)

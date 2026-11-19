@@ -9,3 +9,8 @@ train:
   stages: [near, far]
   stage_start: {near: 0, far: 100}
   steps: 300
+
+# Pinned to the channel-summed latent losses this config's runs used (base.yaml's default became
+# per-channel means on 2026-11-19: docs/decisions/2026-11-19-latent-loss-normalization.md).
+loss:
+  latent_reduce: sum

@@ -165,7 +165,12 @@ def test_td_terms_are_logged_and_use_the_far_heads_nll():
     with torch.no_grad():
         out = model(frames)
     for k in FAR:
-        want = gaussian_nll(out["td_pred"][k], out["td_logvar"][k], out["td_target"][k])
+        want = gaussian_nll(  # in the config's channel reduction (base.yaml: mean)
+            out["td_pred"][k],
+            out["td_logvar"][k],
+            out["td_target"][k],
+            cfg["loss"]["latent_reduce"],
+        )
         torch.testing.assert_close(losses[f"loss/td/k{k}"].detach(), want, rtol=1e-5, atol=1e-6)
 
 

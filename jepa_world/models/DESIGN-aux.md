@@ -39,6 +39,7 @@ batch ─┬─ frames ─► WorldModel ─► JEPA.forward (context L1..L3, he
        │                          └─ pixel dec. (context L1, L2, L3) ─► frame ────┼─► loss/pix  vs frames[:, C] (t+1)
        └─ ball_pos (a label, never a model input) ─► displacement_targets ───────┘
 loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix_eff·loss/pix [pixel stage started]
+             (under loss.latent_reduce: mean, w_goal ÷ C(L3) and a fixed w_pix ÷ C(L1): the level each reads)
 ```
 
 ### Logged terms (every step, for every BUILT aux head)
@@ -50,6 +51,7 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix_eff·lo
 | `goalratio/k<k>` | goalerr / mean ‖Δ‖: error relative to persistence, which predicts Δ = 0; < 1 beats it (SPEC §7.2, §11) |
 | `loss/goal` | Σ_k `loss/goal/k<k>`, the term weighted by `loss.w_goal` |
 | `loss/pix` | mean \|frame − frame t+1\|, the term weighted by `loss.w_pix` (or by `loss.pix_share`) |
+| `w_goal_eff` | the goal weight used this step: `w_goal`, ÷ C(L3) under `loss.latent_reduce: mean`; 0 before the goal stage starts |
 | `w_pix_eff` | the pixel weight used this step: `w_pix`, or the share weight; 0 before the pixel stage starts |
 | `pix_share` | `w_pix_eff·loss/pix / \|loss/total without it\|`: the pixel term's achieved share |
 

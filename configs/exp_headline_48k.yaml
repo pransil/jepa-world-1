@@ -1,7 +1,9 @@
 # Headline run at twice the length: configs/exp_headline.yaml (the full model, base.yaml defaults,
 # train split) with only train.steps doubled to 48000. The guard stays at the default sum x25,
 # so this compares directly with the 24k headline. There is no LR schedule and training is
-# deterministic, so steps 1-24000 should repeat the 24k runs exactly (at the same commit).
+# deterministic, so steps 1-24000 should repeat the 24k runs exactly (at the same commit and defaults:
+# the recorded 24k and 48k runs predate the 10% pixel share and the per-channel latent losses of
+# 2026-11-19, so a re-run now is the new reference, not a repeat of them).
 # Seeds: 0 (this file) and 1 (--set seed=1). experiments/2026-11-18-headline-48k.md
 # It is also the M7 reference: M7 ablation configs use base: exp_headline_48k.yaml
 # (docs/decisions/2026-11-19-m7-ablations-at-48k.md). It inherits base.yaml, so re-run it whenever

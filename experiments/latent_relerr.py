@@ -10,6 +10,10 @@ loss config), so each number means exactly what the training column with the sam
   relerr/k    error relative to predicting the batch-mean target (1.0 = no better)
   loss/k      the latent loss of horizon k; sqerr/k, logvar/k for the Gaussian far heads
   emb_std/Lx  the context embedding's spread per level
+loss/k, sqerr/k, var/Lx and loss/var follow the run's loss.latent_reduce: under 'mean' they are
+the 'sum' values divided by the level's channel count, so compare them only between runs with the
+same reduction (recorded as "latent_reduce" in the output). relerr, logvar and emb_std don't
+depend on it.
 No gradients are taken and nothing is fit, so scoring dev or test selects nothing.
 
 Batches: jepa_world.data.dataset.batches on the split, batch size = the run's train.batch_size,
@@ -101,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         "batch_size": run.cfg["train"]["batch_size"],
         "seed": args.seed,
         "device": str(device),
+        "latent_reduce": run.cfg["loss"].get("latent_reduce", "sum"),  # scale of loss/k, var/L
         "meta": meta,
         "terms": terms,
     }

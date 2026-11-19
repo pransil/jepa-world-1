@@ -49,3 +49,9 @@ matters, because SPEC §7.2 calibrates those variances.
 - **Open:** k = 20 under (b) was still near relerr 1.0 after 600 steps. A longer run on the
   train split, with several seeds, should check that the far heads learn under the stronger
   guard before M5's goal head relies on pooled L3. Revisit if k = 20 stays at relerr ≥ 0.9.
+
+**2026-11-19:** the latent losses are now averaged over channels by default
+([latent-loss-normalization](2026-11-19-latent-loss-normalization.md)). The guard's channel reduction follows them,
+and `var_reduce` is read relative to the latent terms. So this decision's guard-to-latent ratio per
+level (sum ×25) is unchanged; only the overall scale moved. The near + far collapse check passed
+([experiment](../../experiments/2026-11-19-latent-mean-collapse-check.md)).

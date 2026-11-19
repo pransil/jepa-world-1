@@ -140,6 +140,8 @@ For each horizon k, the loss is a distance between the predicted and stopped tar
 L_k = mean over positions of ‖ predictor_k(z_ctx) − stop_grad(z_tgt,k) ‖²
 
 - Use the same distance for all horizons. Normalize the embeddings per level if needed.
+- Since 2026-11-19 the default averages each level's latent terms over channels instead of summing them
+  (`loss.latent_reduce: mean`; docs/decisions/2026-11-19-latent-loss-normalization.md).
 - Cosine distance is an alternative. Pick one and report it.
 - Far heads: replace the squared distance with the Gaussian NLL of the target under the predicted distribution.
 - **Collapse guard (optional, on by default in tests):** a VICReg-style variance term on the context embeddings, penalizing any dimension whose batch standard deviation falls below a threshold.

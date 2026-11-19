@@ -13,7 +13,17 @@ import sys
 import pytest
 import torch
 from fake_episodes import SMALL_SPLITS, Recorder, decode
-from tiny import ALL, CONFIGS, FAR, NEAR, random_frames, tiny_cfg, tiny_far_cfg
+from tiny import (
+    ALL,
+    CONFIGS,
+    FAR,
+    LEVEL,
+    NEAR,
+    TINY_SHAPE,
+    random_frames,
+    tiny_cfg,
+    tiny_far_cfg,
+)
 
 from jepa_world import train
 from jepa_world.data import build
@@ -85,15 +95,18 @@ def test_far_heads_do_not_move_before_their_stage_starts():
     assert any(not torch.equal(params[n], p0) for n, p0 in far.items())
 
 
-def test_training_lowers_near_and_far_losses_on_a_fixed_batch():
-    cfg = tiny_far_cfg()
+@pytest.mark.parametrize("reduce", ["sum", "mean"])
+def test_training_lowers_near_and_far_losses_on_a_fixed_batch(reduce):
+    cfg = tiny_far_cfg(f"loss.latent_reduce={reduce}")
+    # mean values back in channel-sum units (x C of the level), so one threshold serves both
+    unit = {k: TINY_SHAPE[LEVEL[k]][0] if reduce == "mean" else 1 for k in ALL}
     model, opt = _built(cfg)
     frames = moving_disc_batch(4, 24, 16, generator=torch.Generator().manual_seed(0))
     near, far = [], []
     for _ in range(20):
         losses = train.train_step(model, opt, frames, cfg)
-        near.append(sum(losses[f"loss/k{k}"] for k in NEAR).item())
-        far.append(sum(losses[f"loss/k{k}"] for k in FAR).item())
+        near.append(sum(losses[f"loss/k{k}"] * unit[k] for k in NEAR).item())
+        far.append(sum(losses[f"loss/k{k}"] * unit[k] for k in FAR).item())
     assert near[-1] < 0.75 * near[0], near
     assert far[-1] < far[0] - 1.0, far  # NLL can be negative, so compare by difference
 

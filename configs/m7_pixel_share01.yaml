@@ -4,4 +4,5 @@
 base: exp_headline.yaml
 
 loss:
+  latent_reduce: sum          # what ran in PR #28 (base.yaml: mean since 2026-11-19, docs/decisions/2026-11-19-latent-loss-normalization.md)
   pix_share: 0.01

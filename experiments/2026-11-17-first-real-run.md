@@ -124,3 +124,126 @@ What this does and doesn't show:
 3. **Guard ablation at the same budget:** guard sum ×25 vs mean ×1. Does the guard cost the near
    heads (the k5 slip after far joins) or the probes?
 4. **Longer training** (≥ 30k steps) before judging the hierarchy. 8k steps is early.
+
+## Addendum (2026-11-18): readout probes (spatial grids, camera-relative targets)
+
+This follows up Next 1 and 2 above. The lane was taken over after the Mac restarted, so the seed 1
+readout and both random-init floors were run on 2026-11-18.
+- **Commit:** ee51d13 (`experiments/probe_readout.py`, clean), for every readout below.
+- **Script:** `uv run python experiments/probe_readout.py --run <run dir> [--random-init] [--device cpu]`.
+- **Files:** `readout.json` and `readout_random_init.json` in each seed's run dir.
+- **Device:** seed 0's trained readout embedded on MPS (2026-11-17). The others embedded on CPU, so
+  they didn't contend for the GPU lock with the headline training. fp32 both ways.
+- **Same protocol as the probes above:** ridge fit on train (every 2nd window, 38,000 rows), scored
+  on dev (1,480) and test (7,400). Nothing is fit on test.
+
+What changes:
+- Each level is average-pooled to a g×g grid (g = 1 is the global mean above), and the pooled
+  vector is probed. "pooled" concatenates L1–L3.
+- Targets at t: world `pos` and `vel`; `cam_vel`, the camera's own velocity (the background
+  scroll between the last two context frames); and `vel_rel` = vel − cam_vel, the ball's
+  velocity relative to the camera. On the orthographic camera, that is its pixel motion.
+
+### R², trained vs random init
+
+Each table gives R² on **dev**, with **test** in parentheses: the pooled probe for g1, g2 and g4, and the single level for g8. The trained encoder is the step-8000 checkpoint. Random init is the same architecture with the run's seed.
+
+**vel**: R² on dev (test)
+
+| encoder | seed | g1 pooled | g2 pooled | g4 pooled | g8_L1 L1 | g8_L2 L2 |
+|---|---|---|---|---|---|---|
+| trained | 0 | 0.63 (0.63) | 0.73 (0.75) | 0.77 (0.79) | 0.76 (0.78) | 0.72 (0.72) |
+| trained | 1 | 0.63 (0.61) | 0.73 (0.74) | 0.77 (0.79) | 0.77 (0.78) | 0.73 (0.72) |
+| random init | 0 | 0.72 (0.72) | 0.79 (0.81) | 0.79 (0.81) | 0.79 (0.81) | 0.76 (0.79) |
+| random init | 1 | 0.72 (0.73) | 0.78 (0.80) | 0.79 (0.80) | 0.78 (0.80) | 0.77 (0.79) |
+
+**vel_rel**: R² on dev (test)
+
+| encoder | seed | g1 pooled | g2 pooled | g4 pooled | g8_L1 L1 | g8_L2 L2 |
+|---|---|---|---|---|---|---|
+| trained | 0 | 0.48 (0.50) | 0.60 (0.62) | 0.64 (0.68) | 0.61 (0.67) | 0.56 (0.60) |
+| trained | 1 | 0.49 (0.50) | 0.58 (0.62) | 0.63 (0.67) | 0.61 (0.65) | 0.55 (0.58) |
+| random init | 0 | 0.60 (0.64) | 0.66 (0.69) | 0.65 (0.69) | 0.65 (0.71) | 0.61 (0.67) |
+| random init | 1 | 0.59 (0.63) | 0.65 (0.70) | 0.65 (0.69) | 0.63 (0.70) | 0.62 (0.68) |
+
+**cam_vel**: R² on dev (test)
+
+| encoder | seed | g1 pooled | g2 pooled | g4 pooled | g8_L1 L1 | g8_L2 L2 |
+|---|---|---|---|---|---|---|
+| trained | 0 | 0.80 (0.77) | 0.90 (0.89) | 0.92 (0.92) | 0.91 (0.91) | 0.91 (0.89) |
+| trained | 1 | 0.79 (0.74) | 0.89 (0.88) | 0.92 (0.92) | 0.91 (0.91) | 0.90 (0.89) |
+| random init | 0 | 0.87 (0.85) | 0.94 (0.95) | 0.94 (0.95) | 0.94 (0.95) | 0.94 (0.95) |
+| random init | 1 | 0.87 (0.85) | 0.93 (0.94) | 0.94 (0.95) | 0.93 (0.94) | 0.93 (0.94) |
+
+**pos**: R² on dev (test)
+
+| encoder | seed | g1 pooled | g2 pooled | g4 pooled | g8_L1 L1 | g8_L2 L2 |
+|---|---|---|---|---|---|---|
+| trained | 0 | 0.11 (0.06) | 0.09 (0.00) | -0.00 (-0.09) | 0.00 (-0.04) | -0.01 (-0.04) |
+| trained | 1 | 0.08 (0.05) | 0.07 (0.03) | 0.02 (-0.07) | 0.02 (-0.02) | 0.00 (-0.06) |
+| random init | 0 | 0.10 (0.05) | 0.03 (0.01) | 0.04 (-0.05) | 0.02 (0.00) | 0.05 (-0.01) |
+| random init | 1 | 0.09 (0.06) | 0.05 (-0.00) | -0.01 (-0.03) | 0.00 (-0.01) | 0.05 (-0.01) |
+
+### m6's eval check (seed 1)
+`runs/…-first-real-s1-72abd4/eval/20261118T071819Z-test-dev-9ff2cb.json` (sha 492d8c9, clean). Its
+probes are fit on 4,000 train windows, pooled over L1–L3, global mean. **Test** R²:
+- `pos_cam` (the ball's position relative to the camera centre) 0.73;
+- world `pos` 0.006;
+- `radius` 0.85.
+
+Friction and restitution are about 0. The encoder knows where the ball is *in the frame*, and its
+size. It doesn't know where it is in the world, which a ball-tracking camera hides.
+
+### The near heads regress after far joins
+This is stated plainly, from the training table above. In both seeds, once the far heads join at
+step 2000:
+- k5 relerr goes from 0.17–0.18 to 0.29–0.32 (last 500 steps);
+- k1 goes from 0.04 to 0.07–0.08.
+
+The far heads improve over the same steps. The headline run
+([2026-11-17-headline-full-model.md](2026-11-17-headline-full-model.md)) shows the same drift
+continuing through 24,000 steps.
+
+### Verdict
+**Pooling explains most of the gap, but not the ordering.** The original "refuted" holds, now
+with spatial readouts too. Both seeds give the same table to within 0.02.
+- **Grids help trained features more than random ones.** Velocity R² on dev, mean of two seeds:
+
+  | | global mean | 4×4 grid |
+  |---|---|---|
+  | trained | 0.63 | 0.77 |
+  | random init | 0.72 | 0.79 |
+
+  The trained–random gap shrinks from 0.09 to 0.02. Part of the original refutation was the
+  global mean diluting information held near the ball, as the first conclusion suspected.
+- **The trained encoder still never beats the random-init floor**, at any grid size, for any
+  motion target: vel, vel_rel (the ball relative to the camera, which is its motion in the image)
+  and cam_vel (the scroll).
+  - The gap is largest for vel_rel at global pooling: 0.48 vs 0.60.
+  - At 8×8 on L1 it is 0.61 vs 0.64.
+- **After 8000 steps of near + far JEPA**, the context embeddings hold no *more* linearly
+  readable motion than random conv features of the same architecture.
+- **World position stays unreadable** for every encoder (R² ≤ 0.11). Finer grids make the test
+  score negative (−0.09 at g4, trained), which is ridge overfitting to the training terrains.
+  m6's `pos_cam` result above shows the position information is there in camera coordinates. With
+  a tracking camera, world position simply isn't in the frame.
+
+One cross-reference, not a controlled comparison:
+- The headline full-model run ([2026-11-17-headline-full-model.md](2026-11-17-headline-full-model.md):
+  near + far + goal + pixel, 24,000 steps) reaches pooled test `pos_cam` R² 0.88–0.90, against 0.73
+  here. That's with eval's 4000-window probes in both cases.
+- Longer training or the goal head, or both, makes the embeddings more position-aware. The two
+  aren't separated.
+
+### Proposals for the user (not run; each needs a go-ahead)
+1. **Guard ablation, at the same budget.** Variance guard summed ×25 (the current default) vs mean
+   ×1 (M3's original), near + far, 8000 steps, 2 seeds.
+   - Question: does the guard cause the near-head regression after far joins, or the probe gap?
+   - Deciding metric: k5 relerr (dev), last 500 steps; secondary, g4 pooled vel R² (dev).
+   - Cost: 4 runs × about 19 min, about 1.3 GPU-h.
+2. **Longer training: ≥ 30,000 steps** before judging the hierarchy.
+   - Question: do the probes and the far heads keep improving past 8000 steps?
+   - The headline's goal head only started beating persistence on train batches after
+     step 12,000.
+   - Deciding metric: g4 pooled vel R² and k20 relerr (dev).
+   - Cost: about 75–95 min per seed for near + far at 150 ms/step, 2 seeds.

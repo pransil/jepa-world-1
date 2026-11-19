@@ -108,20 +108,27 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
   - **|L_rest|**, because the far and goal NLLs can push the rest small or negative.
   - **The 1e-6 floor** is the divide-by-zero guard. It can only make the share fall short of s,
     never exceed it.
-  - **Per step and stateless: no EMA, no clamp on w_eff.** In both headline runs, over the 18k
-    steps after the pixel stage joins:
+  - **Per step and stateless: no EMA, no clamp on w_eff.** Evidence: the two headline runs'
+    `metrics.jsonl` (`runs/20261118T231506Z-worktree-wt-exp-headline-headline-s0-32ff77` and `runs/20261119T001708Z-worktree-wt-exp-headline-headline-s1-d2c5c1`), with L_rest = loss/total − 0.05·loss/pix, over steps 6001–24000:
     - L_rest stayed within 431–1640 and was never negative.
-    - |L_rest|/L_pix moved about 11% step to step (median; p95 33%).
-    - It drifted about 250× over the run (1.6e3 → 4.5e5). That drift is what the share is meant
-      to follow.
+    - |L_rest|/L_pix moved about 11% step to step from step 6501 on (median; p95 33%).
+    - It rose about 50× in the first 500 pixel steps, as the decoder learned: L_pix fell from about
+      0.4 to about 0.01. After that it rose only about 5× (about 8e4 → 4.5e5).
+    - The smallest L_pix was 0.0012, three orders of magnitude above the 1e-6 floor.
 
-    An EMA would smooth only the 11%, but would add cross-step state that checkpoints don't carry.
-    The stateless weight is exact every step and is reproducible from the step alone.
+    So w_eff ramps up as the decoder learns, then moves slowly, about 11% per step, since both
+    values are batch means. An EMA would smooth only that 11%, but would add cross-step state that
+    checkpoints don't carry. A cap would silently break "share = s". The stateless weight is exact
+    every step and is reproducible from the step alone.
   - The share is of the loss **value**, not of the gradient norm. Adam rescales per parameter, so
     the pixel decoder's own parameters barely notice w_eff. The share matters where the pixel
-    gradient meets the latent gradients, in the shared encoder.
+    gradient meets the latent gradients, in the shared encoder, and the pixel term's share of that
+    gradient is **not measured**. It is about s × (L_pix's relative gradient / L_rest's), which
+    may be well above or below s. Logging the per-term encoder gradient norm on log steps would
+    measure it; that is a proposed follow-up, not built.
   - Every run with a pixel decoder logs `w_pix_eff` (0 before the stage starts) and the achieved
-    `pix_share`, so the ≈0 level is measurable in any run.
+    `pix_share`. Older runs predate these keys; for them, compute the share as
+    w_pix·loss/pix / |loss/total − w_pix·loss/pix|.
 - **The goal head's first Linear runs K times on the same pooled vector.** Splitting it into W_g·g
   (once per sample) plus W_e·k_embed (once per horizon) would save (l3_ch + l2_ch)·hidden·(K−1)
   MACs per sample, about 300k at the base sizes. That is noise next to the encoder's

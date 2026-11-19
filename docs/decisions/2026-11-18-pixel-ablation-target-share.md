@@ -26,7 +26,7 @@ term effectively at zero, and 0 / 0.05 / 0.5 would compare three near-zero setti
 
 | Level | Config | Pixel share of the rest of the loss |
 |---|---|---|
-| ≈ 0 | the existing headline runs (`configs/exp_headline.yaml`, w_pix 0.05) | ≤ 3e-5 (measured) |
+| ≈ 0 | the existing headline runs (`configs/exp_headline.yaml`, w_pix 0.05) | ≤ 3e-5 (measured, see below) |
 | 1% | `configs/m7_pixel_share01.yaml` (`loss.pix_share: 0.01`) | 0.01 |
 | 10% | `configs/m7_pixel_share10.yaml` (`loss.pix_share: 0.10`) | 0.10 |
 
@@ -38,6 +38,16 @@ term effectively at zero, and 0 / 0.05 / 0.5 would compare three near-zero setti
 - Every run with the pixel decoder logs `w_pix_eff` and the achieved `pix_share` every step.
 - The weighting is per step and stateless (no EMA). It uses |L_rest|, and floors L_pix at 1e-6, so
   the share can fall short of the target but never exceed it. See models/DESIGN-aux.md.
-- The share is a share of the loss **value**, not of the gradient norm.
+- **About the ≈ 0 level.** The headline runs (`runs/20261118T231506Z-worktree-wt-exp-headline-headline-s0-32ff77` and `runs/20261119T001708Z-worktree-wt-exp-headline-headline-s1-d2c5c1`) predate the `pix_share` log key. Their 3e-5
+  is w_pix·loss/pix / |loss/total|. The new key divides by |loss/total − pixel term| instead, and at
+  shares this small the two agree to within 3e-5 relative. For those runs, compute
+  w_pix·loss/pix / |loss/total − w_pix·loss/pix| from `metrics.jsonl`.
+- **The share is of the loss value, not of the gradient.** The pixel term's share of the gradient
+  in the shared encoder is about s × (L_pix's relative gradient / L_rest's), which is not
+  measured, and may differ a lot from s. So read "1%" and "10%" as value shares. Logging the
+  per-term encoder gradient norm would measure the gradient share; that is proposed, not built.
+- In those runs, w_eff would have been about 4e3 (1%) to 4e4 (10%) at steady state: |L_rest| about
+  750, L_pix about 0.002. It ramps up over the first ~500 pixel steps as the decoder learns, and
+  stays finite (L_pix floor 1e-6; the smallest observed L_pix was 0.0012).
 - M7-plan §1's hypothesis and deciding metric (k = 20 goal-position error vs persistence on the
   test split) carry over, with "high" = 10% and "low" = 1%.

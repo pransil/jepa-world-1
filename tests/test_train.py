@@ -389,6 +389,12 @@ def test_check_config_refuses_a_bad_pix_share():
         train.check_config(tiny_aux_cfg("loss.pix_share=2.0"))
 
 
+def test_pix_share_without_a_pixel_stage_is_refused():
+    """Otherwise the requested ablation level would silently not happen (no pixel term, no log)."""
+    with pytest.raises(ValueError, match="pix_share.*pixel"):
+        train.check_config(tiny_aux_cfg("loss.pix_share=0.1", "train.stages=[near, goal]"))
+
+
 @pytest.mark.parametrize(
     ("name", "share"), [("m7_pixel_share01", 0.01), ("m7_pixel_share10", 0.10)]
 )

@@ -181,7 +181,11 @@ def check_config(cfg: dict) -> list[int]:
             "lower-precision path must be built and tested explicitly first (SPEC §6)"
         )
     _check_stage_start(cfg, horizons)
-    check_pix_share(cfg["loss"])
+    if check_pix_share(cfg["loss"]) is not None and "pixel" not in cfg["train"]["stages"]:
+        raise ValueError(
+            f"loss.pix_share={cfg['loss']['pix_share']} but train.stages {cfg['train']['stages']} "
+            "has no pixel stage: the share would never apply"
+        )
     return horizons
 
 

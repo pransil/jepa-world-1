@@ -376,7 +376,7 @@ def test_share_weight_is_finite_and_never_overshoots(rest, pix):
     """|L_rest| (NLL terms can make it negative), and a floor on L_pix: the share can only fall
     short of the target, never exceed it."""
     rest_t, pix_t = torch.tensor(rest), torch.tensor(pix)
-    w = pix_share_weight(0.1, rest_t, pix_t)
+    w = pix_share_weight(0.1, rest_t, pix_t)  # check_pix_share refuses s = 0 upstream
     assert torch.isfinite(w) and w >= 0
     assert w * pix_t <= 0.1 * abs(rest) * (1 + 1e-6)
     if pix >= 1e-6:
@@ -389,8 +389,9 @@ def test_share_weight_is_detached():
     assert not pix_share_weight(0.01, rest, pix).requires_grad
 
 
-@pytest.mark.parametrize("bad", ["-0.1", "1.0", "1.5", "true"])
+@pytest.mark.parametrize("bad", ["-0.1", "0", "1.0", "1.5", "true", "'0.01'"])
 def test_bad_pix_share_is_refused(bad):
+    """(0, 1) only. 0 would silently drop the pixel term and ignore w_pix: use w_pix: 0 for that."""
     cfg = _share_cfg(bad)
     with pytest.raises(ValueError, match="pix_share"):
         _losses(_model(cfg), random_batch(cfg), cfg)

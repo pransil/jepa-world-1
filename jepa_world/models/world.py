@@ -24,13 +24,15 @@ PIX_FLOOR = 1e-6  # loss.pix_share: L_pix floor (MAE in [0, 1] units), the divid
 
 
 def check_pix_share(loss_cfg: dict) -> float | None:
-    """loss.pix_share: None (absent in pre-2026-11-18 configs) or a number in [0, 1)."""
+    """loss.pix_share: None (absent in pre-2026-11-18 configs) or a share in (0, 1). Zero is
+    refused: it would silently drop the pixel term and ignore w_pix (use w_pix: 0 for that)."""
     share = loss_cfg.get("pix_share")
     if share is None:
         return None
-    if isinstance(share, bool) or not isinstance(share, int | float) or not 0 <= share < 1:
+    if isinstance(share, bool) or not isinstance(share, int | float) or not 0 < share < 1:
         raise ValueError(
-            f"loss.pix_share={share!r}: expected null (fixed w_pix) or a share in [0, 1) "
+            f"loss.pix_share={share!r}: expected null (fixed w_pix) or a share in (0, 1); to turn "
+            "the pixel term off use w_pix: 0 "
             "(docs/decisions/2026-11-18-pixel-ablation-target-share.md)"
         )
     return float(share)
@@ -195,7 +197,7 @@ def compute_world_losses(
             w = pix.new_zeros(())
         elif share is None:
             total = total + loss_cfg["w_pix"] * pix  # the fixed weight, exactly as before
-            w = pix.new_tensor(loss_cfg["w_pix"])
+            w = pix.new_full((), loss_cfg["w_pix"])  # filled on device: no host copy
         else:
             w = pix_share_weight(share, rest, pix)
             total = total + w * pix

@@ -47,6 +47,13 @@ sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
     rolling_per_friction: 0.01     # rolling-resistance coefficient (m) per unit friction
     min_air_s: 0.1            # bounce = contact onset after >= this long airborne...
     bounce_min_speed: 0.5     # ...with normal approach speed >= this (m/s)
+  # obstacles:                # M7 occluding posts. Keep this block COMMENTED here: an absent key means off, and
+  #                           # any key, even an "off" one, would change the sim hash and re-key every dataset
+  #                           # (docs/decisions/2026-11-17-obstacles-dataset-keying.md). Experiments add it in
+  #                           # their own yaml (configs/m7_obstacles.yaml); --set can't create it.
+  #   count: [3, 6]           # posts per terrain, uniform integer
+  #   width: [0.8, 1.6]       # metres along x
+  #   gap: 1.0                # metres: min clear space between posts, and from the wall zones
 
 data:                         # SPEC §3.5, split by terrain seed, never by frame. Design: jepa_world/data/DESIGN.md
   source: episodes            # episodes (the M2 loader) | synthetic (moving disc; smoke runs and benchmarks only)
@@ -78,6 +85,14 @@ model:                        # SPEC §4
   l3_head_kernel: 3
   ema_momentum: 0.996         # [OPEN] maybe toward 0.999 later
   action_dim: 0               # slot exists, zeros in v1
+  top_down: false             # M7 / SPEC §9.2: each far head's level also predicts the next-finer target at its k (docs/decisions/2026-11-17-top-down-targets.md)
+  # Auxiliary heads (SPEC §4.6-4.7), built when train.stages has goal / pixel. models/DESIGN-aux.md
+  goal_horizons: [1, 2, 3, 4, 5, 10, 20]  # ball displacement from t (world m) at these k (docs/decisions/2026-11-17-goal-target-displacement.md)
+  goal_l2: false              # also pool L2 into the goal head (SPEC §4.6 "optionally"); L3 only by default
+  goal_hidden: 128            # goal MLP width (pooled L3 = 256 in): placeholder (docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md)
+  goal_logvar_bound: 10.0     # goal log-variance = b * tanh(raw / b): std in e^+-5 m
+  pix_widths: [64, 32]        # pixel-decoder stage widths at L2 (32x32), then L1 (64x64): placeholder (same decision)
+  unet_skips: true            # encoder L1/L2 -> decoder skips; false = decode from L3 alone, M7 (docs/decisions/2026-11-17-skip-connections-meaning.md)
 
 loss:                         # SPEC §5
   latent_distance: mse        # squared L2, summed over channels, mean over positions (docs/decisions/2026-11-17-latent-distance-sq-l2.md)
@@ -88,8 +103,9 @@ loss:                         # SPEC §5
   var_reduce: sum             # mean | sum (over channels, like the latent losses): sum stops the far-NLL collapse (docs/decisions/2026-11-17-far-collapse-guard-sum.md)
   w_var: 25.0                 # VICReg's variance weight (same decision); loss/var = sum over active levels of each level's guard
   w_k: 1.0
-  w_goal: 0.5
-  w_pix: 0.05
+  w_goal: 0.5                 # x loss/goal = sum over goal_horizons of the goal NLL (SPEC §5.4)
+  w_pix: 0.05                 # x loss/pix = mean |pred - frame t+1| in [0, 1] units, so <= w_pix
+  w_td: 0.5                   # x each loss/td/k (top-down NLL), only with model.top_down (same decision)
 
 train:                        # SPEC §6
   device: auto                # auto | mps | cpu
@@ -99,7 +115,18 @@ train:                        # SPEC §6
   weight_decay: 0.01          # torch 2.15 AdamW default
   precision: fp32             # do not assume bf16 works on MPS
   stages: [near, far, goal, pixel]   # SPEC §5.5
-  stage_start: {near: 0, far: 2000}  # steps completed before a stage joins loss/total (logged throughout): docs/decisions/2026-11-17-stage-schedule-within-run.md. far: placeholder
+  stage_start: {near: 0, far: 2000, goal: 4000, pixel: 6000}  # steps completed before a stage joins loss/total (logged throughout): docs/decisions/2026-11-17-stage-schedule-within-run.md. far, goal, pixel: placeholders (goal/pixel PROPOSED: docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md)
   steps: 10000                # placeholder, set per experiment
   log_every: 50               # flush interval for metrics.jsonl; every step is still logged
   ckpt_every: 2000            # plus one checkpoint at the end
+
+eval:                         # SPEC §7, M6: python -m jepa_world.eval --run <run dir>. Design: jepa_world/DESIGN.md
+  device: auto                # auto | mps | cpu (MPS takes the GPU lock)
+  batch_size: 64              # windows per forward pass
+  coverage_levels: [0.5, 0.9] # SPEC §7.2 calibration intervals
+  event_window: 5             # frames before / after an out-of-view or occlusion onset (metrics.event_response)
+  sim_params: ["true", "mean"]  # simulator baselines beside the model, quoted ("true" isn't a bool): PROPOSED, docs/decisions/2026-11-17-simulator-baseline-params.md
+  probes:
+    enabled: true             # linear probes on the frozen context levels (SPEC §7.2)
+    train_windows: 4000       # random windows of the run's training split the probes are fit on (placeholder)
+    seed: 0

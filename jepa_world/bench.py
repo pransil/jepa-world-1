@@ -25,7 +25,16 @@ import torch
 
 from jepa_world.data.synthetic import moving_disc_batch
 from jepa_world.models.jepa import context_stack
-from jepa_world.train import build_model, build_optimizer, model_horizons, start_run, train_step
+from jepa_world.train import (
+    batch_k_max,
+    build_model,
+    build_optimizer,
+    model_horizons,
+    needs_gt,
+    start_run,
+    to_device,
+    train_step,
+)
 from jepa_world.utils.config import load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
@@ -65,13 +74,18 @@ def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> 
     seed_everything(cfg["seed"])
     model = build_model(cfg).to(device)
     opt = build_optimizer(model, cfg)
-    n = cfg["model"]["context_frames"] + max(model.horizons)
-    frames = moving_disc_batch(
-        cfg["train"]["batch_size"],
-        n,
-        cfg["sim"]["frame_size"],
-        generator=torch.Generator().manual_seed(cfg["seed"]),
-    ).to(device)
+    n = cfg["model"]["context_frames"] + batch_k_max(cfg, model.horizons)
+    batch = to_device(
+        moving_disc_batch(
+            cfg["train"]["batch_size"],
+            n,
+            cfg["sim"]["frame_size"],
+            generator=torch.Generator().manual_seed(cfg["seed"]),
+            with_gt=needs_gt(cfg),  # the goal stage's labels
+        ),
+        device,
+    )
+    frames = batch["frames"] if isinstance(batch, dict) else batch
     with torch.no_grad():
         feat = model.context_encoder(context_stack(frames, model.context_frames), upto="L1")["L1"]
 
@@ -84,7 +98,7 @@ def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> 
         sum(h(feat).square().mean() for h in l1_heads).backward()
 
     def full_step():
-        train_step(model, opt, frames, cfg)  # step=None: every built stage active
+        train_step(model, opt, batch, cfg)  # step=None: every built stage active
 
     ms_heads = _time_ms(heads_fwd_bwd, device, iters, warmup)
     ms_step = _time_ms(full_step, device, iters, warmup)
@@ -97,6 +111,10 @@ def _bench_variant(cfg: dict, device: torch.device, iters: int, warmup: int) -> 
         "ms_train_step": ms_step,
         "head_params": sum(p.numel() for h in l1_heads for p in h.parameters()),
         "far_head_params": sum(p.numel() for h in far_heads for p in h.parameters()),
+        # M7 top-down branches (model.top_down); their cost shows in ms_train_step
+        "td_head_params": (
+            0 if model.td_heads is None else sum(p.numel() for p in model.td_heads.parameters())
+        ),
         "stages": list(cfg["train"]["stages"]),
         "total_trainable_params": sum(p.numel() for p in model.trainable_parameters()),
         # The cache is emptied between variants, and the caching allocator keeps this variant's

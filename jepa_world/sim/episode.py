@@ -8,7 +8,8 @@ Event flags, for frame t (frames are at t / fps):
 - bounce[t]: a contact onset (a landing) at a state in (t-1, t], after at least `min_air_s` airborne,
   with normal approach speed >= `bounce_min_speed`.
 - out_of_view[t]: the projected ball disc lies entirely outside the image.
-- occluded[t]: always False. No obstacles exist yet (deferred to M7).
+- occluded[t]: the ball is in view, but posts hide all of it (obstacles.occluded). Always False
+  without `sim.obstacles`, and never True together with out_of_view.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 import mujoco
 import numpy as np
 
-from jepa_world.sim import camera
+from jepa_world.sim import camera, obstacles
 from jepa_world.sim.ball import BallParams, sample_ball, start_z
 from jepa_world.sim.contact import timestep
 from jepa_world.sim.scene import build_model, geom_id
@@ -224,8 +225,9 @@ def _run(
     seeds: tuple[int | None, int | None],
     extra_meta: dict,
 ) -> Episode:
-    """The one simulation loop behind both entry points. Anything added to the scene or the loop
-    (obstacles, from `sim_cfg.get("obstacles")`) applies to both."""
+    """The one simulation loop behind both entry points, so obstacles (from
+    `sim_cfg.get("obstacles")` and the terrain's seed) apply to both. Without them, every output is
+    what it was before obstacles existed."""
     if segmentation and not render:
         raise ValueError("segmentation requires render=True")
     cfg_plain = plain_json(sim_cfg)  # fail before simulating, not halfway through a dataset build
@@ -233,7 +235,11 @@ def _run(
     h = timestep(sim_cfg)
     rig_y = -float(sim_cfg["camera"]["distance"])
 
-    m = build_model(terrain, ball, sim_cfg)
+    obs = obstacles.sample_obstacles(sim_cfg, terrain)  # None when the key is absent
+    obstacles.check_view(
+        [cam0[1]], obs, sim_cfg
+    )  # a bad (from-state) start fails before simulating
+    m = build_model(terrain, ball, sim_cfg, obs)
     d = mujoco.MjData(m)
     d.qpos[:] = qpos
     d.qvel[:] = qvel
@@ -288,6 +294,7 @@ def _run(
         "damping": -float(m.geom_solref[geom_id(m, "ball")][1]),  # what MuJoCo actually used
         "sim_cfg_hash": config_hash(cfg_plain),
         "sim_cfg": cfg_plain,
+        **({} if obs is None else {"obstacles": obs.to_json()}),
         **extra_meta,
     }
     return Episode(
@@ -300,7 +307,7 @@ def _run(
         contact=contact,
         bounce=bounce,
         out_of_view=np.asarray(camera.out_of_view(ball_px, ball.radius, sim_cfg)),
-        occluded=np.zeros(T, bool),
+        occluded=obstacles.occluded(ball_px, ball.radius, cam, obs, sim_cfg),
         terrain=terrain,
         ball=ball,
         meta=meta,

@@ -9,7 +9,7 @@ import sys
 
 import pytest
 import torch
-from tiny import CONFIGS, NEAR, TINY, random_frames, tiny_cfg
+from tiny import CONFIGS, NEAR, TINY, random_batch, random_frames, tiny_aux_cfg, tiny_cfg
 
 from jepa_world import train
 from jepa_world.data.synthetic import moving_disc_batch
@@ -126,10 +126,122 @@ def test_episode_source_needs_its_split_built():
         train.check_config(tiny_cfg("data.source=episodes"))
 
 
-@pytest.mark.parametrize("stage, milestone", [("goal", "M5"), ("pixel", "M5")])
-def test_later_stages_say_which_milestone_builds_them(stage, milestone):
-    with pytest.raises(NotImplementedError, match=milestone):
-        train.check_config(tiny_cfg(f"train.stages=[near, {stage}]"))
+def test_goal_and_pixel_stages_build_and_check():
+    """M5 built the last two SPEC §5.5 stages."""
+    cfg = tiny_aux_cfg()
+    assert train.check_config(cfg) == NEAR  # aux stages own no horizon
+    model = train.build_model(cfg)
+    assert model.goal is not None and model.pixel is not None
+
+
+def test_unknown_stage_is_refused():
+    with pytest.raises(ValueError, match="bogus"):
+        train.check_config(tiny_cfg("train.stages=[near, bogus]"))
+
+
+@pytest.mark.parametrize("stage", ["goal", "pixel"])
+def test_aux_stage_needs_an_int_start(stage):
+    with pytest.raises(ValueError, match=f"stage_start.{stage}"):
+        train.check_config(tiny_aux_cfg(f"train.stage_start.{stage}=null"))
+
+
+@pytest.mark.parametrize("stage", ["goal", "pixel"])
+def test_aux_stage_that_would_never_train_is_refused(stage):
+    with pytest.raises(ValueError, match="never train"):
+        train.check_config(tiny_aux_cfg("train.steps=3", f"train.stage_start.{stage}=3"))
+
+
+def test_active_aux_follows_stage_start():
+    cfg = tiny_aux_cfg("train.stage_start={near: 0, goal: 2, pixel: 4}")
+    assert [train.active_aux(cfg, s) for s in range(6)] == [
+        [],
+        [],
+        ["goal"],
+        ["goal"],
+        ["goal", "pixel"],
+        ["goal", "pixel"],
+    ]
+    assert train.active_aux(cfg, None) == ["goal", "pixel"]
+    assert train.active_aux(tiny_cfg(), 100) == []
+
+
+def test_batches_carry_ball_pos_only_with_a_goal_stage():
+    c = 4
+    cfg = tiny_aux_cfg()
+    batch = next(train.make_batches(cfg, NEAR))
+    assert set(batch) == {"frames", "ball_pos"}
+    assert batch["frames"].shape == (2, c + 5, 3, 16, 16)
+    assert batch["ball_pos"].shape == (2, c + 5, 2) and batch["ball_pos"].dtype == torch.float32
+    frames_only = next(train.make_batches(tiny_aux_cfg("train.stages=[near, pixel]"), NEAR))
+    assert isinstance(frames_only, torch.Tensor) and frames_only.shape == (2, c + 5, 3, 16, 16)
+
+
+def test_batch_length_covers_the_goal_horizons():
+    cfg = tiny_aux_cfg("model.goal_horizons=[1, 20]")
+    assert train.batch_k_max(cfg, NEAR) == 20
+    assert next(train.make_batches(cfg, NEAR))["frames"].shape[1] == 4 + 20
+    assert train.batch_k_max(tiny_cfg(), NEAR) == 5
+
+
+def test_train_step_takes_a_dict_or_a_frames_tensor():
+    cfg = tiny_aux_cfg()
+    model, opt = _built(cfg)
+    losses = train.train_step(model, opt, random_batch(cfg), cfg)
+    assert {"loss/goal", "loss/pix"} <= set(losses)
+    assert all(not v.requires_grad for v in losses.values())
+    cfg = tiny_cfg()
+    model, opt = _built(cfg)
+    assert "loss/total" in train.train_step(model, opt, random_frames(cfg), cfg)
+
+
+def test_train_step_keeps_unstarted_aux_stages_out_of_the_total():
+    cfg = tiny_aux_cfg("train.stage_start={near: 0, goal: 5, pixel: 5}")
+    model, opt = _built(cfg)
+    train.train_step(model, opt, random_batch(cfg), cfg, step=0)
+    assert all(p.grad is None for p in model.goal.parameters())
+    assert all(p.grad is None for p in model.pixel.parameters())
+    train.train_step(model, opt, random_batch(cfg), cfg, step=5)
+    assert all(p.grad is not None for p in model.goal.parameters())
+
+
+def test_same_seed_gives_identical_losses_with_aux_stages(tmp_path):
+    cfg = tiny_aux_cfg("train.steps=2")
+    a = train.run(cfg, tmp_path / "a", device=torch.device("cpu"))
+    b = train.run(cfg, tmp_path / "b", device=torch.device("cpu"))
+    assert a == b and {"loss/goal", "loss/pix"} <= set(a)
+    c = train.run(
+        tiny_aux_cfg("train.steps=2", "seed=1"), tmp_path / "c", device=torch.device("cpu")
+    )
+    assert a != c
+
+
+def test_run_logs_the_aux_terms_every_step(tmp_path):
+    cfg = tiny_aux_cfg("train.steps=3")
+    train.check_config(cfg)
+    train.run(cfg, tmp_path, device=torch.device("cpu"))
+    lines = [json.loads(s) for s in (tmp_path / "metrics.jsonl").read_text().splitlines()]
+    assert [r["step"] for r in lines] == [1, 2, 3]
+    for r in lines:
+        assert {"loss/goal", "loss/pix", "loss/goal/k3", "goalerr/k3", "goalratio/k3"} <= set(r)
+    ckpt = torch.load(tmp_path / "checkpoints" / "step_0000003.pt", weights_only=False)
+    assert any(k.startswith("goal.") for k in ckpt["model"])
+    assert any(k.startswith("pixel.") for k in ckpt["model"])
+
+
+def test_pixel_term_does_not_dominate_the_logged_total():
+    """SPEC §8 M5. At the base weight (w_pix = 0.05) the weighted pixel term stays under 10% of
+    loss/total at every step of a short run, and pixel_l1 <= 1 bounds it by w_pix outright. A sum
+    reduction (x3 channels x every pixel) would break both."""
+    cfg = tiny_aux_cfg("train.stages=[near, pixel]")
+    assert cfg["loss"]["w_pix"] == 0.05  # the base weight, not one picked for the test
+    model, opt = _built(cfg)
+    g = torch.Generator().manual_seed(0)
+    for step in range(10):
+        frames = moving_disc_batch(2, 9, 16, generator=g)
+        losses = train.train_step(model, opt, frames, cfg, step=step)
+        pix = cfg["loss"]["w_pix"] * losses["loss/pix"]
+        assert pix <= cfg["loss"]["w_pix"]
+        assert pix < 0.1 * losses["loss/total"], (step, pix.item(), losses["loss/total"].item())
 
 
 def test_cli_rejects_bad_config_before_creating_a_run_dir():
@@ -207,4 +319,50 @@ def test_train_step_on_mps_at_spec_shapes_is_finite_with_no_cpu_fallback():
     result = json.loads(r.stdout.strip().splitlines()[-1])
     assert all(result["finite"].values()), result
     assert {f"loss/k{k}" for k in NEAR} <= set(result["finite"])
+    assert result["fallbacks"] == [], result["fallbacks"]
+
+
+MPS_ALL_STAGES = """
+import json, sys
+sys.path.insert(0, "tests")
+import jepa_world  # sets PYTORCH_ENABLE_MPS_FALLBACK before torch
+import torch
+from tiny import spec_cfg
+from jepa_world import train
+from jepa_world.bench import record_mps_fallbacks
+from jepa_world.data.synthetic import moving_disc_batch
+
+cfg = spec_cfg(
+    "train.batch_size=2",
+    "train.stages=[near, far, goal, pixel]",
+    "train.stage_start={near: 0, far: 0, goal: 0, pixel: 0}",
+)
+with record_mps_fallbacks() as fallbacks:
+    torch.manual_seed(0)
+    dev = torch.device("mps")
+    model = train.build_model(cfg).to(dev)
+    opt = train.build_optimizer(model, cfg)
+    batch = moving_disc_batch(2, 24, 64, generator=torch.Generator().manual_seed(0), with_gt=True)
+    batch = {k: v.to(dev) for k, v in batch.items()}
+    losses = train.train_step(model, opt, batch, cfg)
+    torch.mps.synchronize()
+finite = {k: bool(torch.isfinite(v).item()) for k, v in losses.items()}
+print(json.dumps({"finite": finite, "fallbacks": fallbacks}))
+"""
+
+
+@pytest.mark.mps
+def test_all_four_stages_on_mps_at_spec_shapes_are_finite_with_no_cpu_fallback():
+    root = CONFIGS.parent
+    r = subprocess.run(
+        [sys.executable, "-c", MPS_ALL_STAGES],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert r.returncode == 0, r.stderr
+    result = json.loads(r.stdout.strip().splitlines()[-1])
+    assert all(result["finite"].values()), result
+    assert {"loss/goal", "loss/pix", "loss/k20"} <= set(result["finite"])
     assert result["fallbacks"] == [], result["fallbacks"]

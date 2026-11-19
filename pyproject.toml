@@ -54,3 +54,8 @@ extend-exclude = [".claude/worktrees"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# Pinned, so import order never depends on what ruff infers from the tree it runs in (it flipped
+# between a fresh lane and a full checkout, failing lint on M2 and M5a).
+known-first-party = ["jepa_world"]

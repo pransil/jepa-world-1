@@ -293,7 +293,7 @@ def by_visibility(mean, var, truth, hidden, levels: Iterable[float] = COVERAGE_L
 
     mean, var, truth: (M, 2). hidden: (M,) bool, e.g. `out_of_view | occluded` at the window's
     t. `std_ratio` = mean predictive_std on hidden windows / on visible ones: above 1 means the
-    model knows it can't see the ball. A side with no windows (`occluded` until M7) gets None
+    model knows it can't see the ball. A side with no windows (`occluded` on base datasets) gets None
     for its numbers, and `has_hidden` says so. It never raises or warns over it."""
     levels = tuple(_levels(levels).values())
     mean, var, truth = _positions(mean, "mean"), _positions(var, "var"), _positions(truth, "truth")

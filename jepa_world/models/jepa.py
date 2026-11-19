@@ -1,24 +1,24 @@
 """JEPA core: context encoder, EMA target encoder, horizon heads, latent losses. SPEC §4-§5.1.
 
 Near heads (k = 1..5) predict a mean on L1, scored by squared L2. Far heads (k = 10 on L2,
-k = 20 on L3) predict a mean and a log-variance, scored by a Gaussian NLL. Independent of the goal
-head and the pixel decoder (SPEC §10). See models/DESIGN.md for the batch contract and decisions.
+k = 20 on L3) predict a mean and a log-variance, scored by a Gaussian NLL. With model.top_down (M7,
+off by default), each far head's level also predicts the next-finer target at its horizon (SPEC
+§9.2). Independent of the goal head and the pixel decoder (SPEC §10). See models/DESIGN.md for the
+batch contract and decisions.
 """
 
 from __future__ import annotations
 
 import copy
-import math
 from collections.abc import Collection, Iterator, Sequence
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from jepa_world.models.heads import GaussianHead, HorizonHead
+from jepa_world.models.heads import GaussianHead, HorizonHead, TopDownHead
+from jepa_world.models.losses import gaussian_nll_terms
 from jepa_world.models.unet import encoder_from_cfg
-
-LOG_2PI = math.log(2 * math.pi)
 
 # ---------------------------------------------------------------- batch slicing
 
@@ -63,7 +63,7 @@ def _sq_from_err2(err2: torch.Tensor) -> torch.Tensor:
 
 
 def _nll_from_err2(err2: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-    return (0.5 * (err2 * torch.exp(-logvar) + logvar + LOG_2PI)).sum(dim=1).mean()
+    return gaussian_nll_terms(err2, logvar).sum(dim=1).mean()  # the one NLL formula (losses.py)
 
 
 def _relerr_from_sq(sq: torch.Tensor, target: torch.Tensor, eps: float) -> torch.Tensor:
@@ -135,15 +135,22 @@ def variance_guard(z: torch.Tensor, gamma: float, eps: float, reduce: str = "mea
 class JEPA(nn.Module):
     """Context encoder + EMA target encoder + one head per horizon.
 
+    `extra_levels`: levels some consumer outside the JEPA core reads (the goal head and pixel
+    decoder, models/world.py), so they are always encoded even if no horizon head reads them.
+    This module knows nothing else about those consumers (SPEC §10).
+
     forward(frames (B, C + k_max, 3, H, W)) -> {
-        "context": {level: (B, ch, s, s)}   levels up to the deepest one a head reads,
+        "context": {level: (B, ch, s, s)}   levels up to the deepest one a head or an
+                                            extra_levels consumer reads,
         "pred":    {k: (B, ch, s, s)}       the mean, for every horizon,
         "logvar":  {k: (B, ch, s, s)}       far horizons only, bounded (GaussianHead),
         "target":  {k: (B, ch, s, s)}       detached, from the target encoder, after loss.target_norm,
-    }
+    } plus, only with model.top_down, for each far horizon k with a finer level below its own:
+        "td_pred", "td_logvar": {k: (B, ch', s', s')}   the branch's Gaussian on the finer level,
+        "td_target":            {k: (B, ch', s', s')}   that level of the target stack ending at t+k.
     """
 
-    def __init__(self, cfg: dict, horizons: Sequence[int]):
+    def __init__(self, cfg: dict, horizons: Sequence[int], extra_levels: Collection[str] = ()):
         super().__init__()
         m = cfg["model"]
         self.context_frames = m["context_frames"]
@@ -159,7 +166,10 @@ class JEPA(nn.Module):
             raise RuntimeError("encoder has buffers; ema_update covers parameters only")
         self.target_encoder = copy.deepcopy(self.context_encoder).requires_grad_(False)
         self.level_names = list(self.context_encoder.names)
-        self.deepest = max(self.head_level.values(), key=self.level_names.index)
+        unknown = set(extra_levels) - set(self.level_names)
+        if unknown:
+            raise ValueError(f"extra_levels {sorted(unknown)}: no such level ({self.level_names})")
+        self.deepest = max([*self.head_level.values(), *extra_levels], key=self.level_names.index)
         channels = {name: lv["channels"] for name, lv in m["levels"].items()}
         heads: dict[str, nn.Module] = {}
         for k in self.horizons:
@@ -183,11 +193,56 @@ class JEPA(nn.Module):
             else:
                 heads[str(k)] = HorizonHead(ch, ch, **common)
         self.heads = nn.ModuleDict(heads)
+        self._build_top_down(m, channels)
+
+    def _build_top_down(self, m: dict, channels: dict[str, int]) -> None:
+        """M7 top-down branches (docs/decisions/2026-11-17-top-down-targets.md). Off, nothing is
+        built, so the state-dict keys stay as before. A config saved before M7 has no
+        model.top_down and reads as off. Built after the heads, so their init is unchanged."""
+        top_down = m.get("top_down", False)
+        if not isinstance(top_down, bool):  # a quoted "false" must not switch it on
+            raise ValueError(f"model.top_down must be true or false, got {top_down!r}")
+        self.top_down = top_down
+        self.td_level: dict[int, str] = {}  # far horizon -> the finer level its branch predicts
+        self.td_heads: nn.ModuleDict | None = None
+        if not self.top_down:
+            return
+        for k in self.far_horizons:
+            i = self.level_names.index(self.head_level[k])
+            if i > 0:
+                self.td_level[k] = self.level_names[i - 1]
+        if not self.td_level:
+            raise ValueError(
+                "model.top_down needs a far head on a level with a finer level below it, and none "
+                f"is built (far horizons {self.far_horizons}; add the far stage to train.stages)"
+            )
+        shape = (
+            self.context_encoder.level_shape
+        )  # {level: (channels, size)}, validated by the encoder
+        td: dict[str, nn.Module] = {}
+        for k, fine in self.td_level.items():
+            coarse = self.head_level[k]
+            scale = shape[fine][1] // shape[coarse][1]  # the encoder only builds power-of-2 steps
+            key = fine.lower()  # the branch's output lives at the finer level: use its head shape
+            td[str(k)] = TopDownHead(
+                channels[coarse],
+                channels[fine],
+                scale=scale,
+                logvar_bound=m["far_logvar_bound"],
+                hidden=m[f"{key}_head_hidden"],
+                kernel=m[f"{key}_head_kernel"],
+                embed_dim=m["horizon_embed_dim"],
+                action_dim=m["action_dim"],
+                norm_groups=m["norm_groups"],
+            )
+        self.td_heads = nn.ModuleDict(td)
 
     def trainable_parameters(self) -> Iterator[nn.Parameter]:
         """Everything the optimizer may touch: the context encoder and the heads, never the target."""
         yield from self.context_encoder.parameters()
         yield from self.heads.parameters()
+        if self.td_heads is not None:
+            yield from self.td_heads.parameters()
 
     def check_active(self, active: Collection[int] | None) -> set[int]:
         active = set(self.horizons if active is None else active)
@@ -202,10 +257,12 @@ class JEPA(nn.Module):
         frames: torch.Tensor,
         action: torch.Tensor | None = None,
         active: Collection[int] | None = None,
+        grad_levels: Collection[str] = (),
     ) -> dict:
         """`active` (default: all) are the horizons that will be trained. Every head still runs,
         but inactive heads, and context levels only they read, run without autograd: same values,
-        no graph kept for a backward that would never use it."""
+        no graph kept for a backward that would never use it. `grad_levels` are levels an active
+        consumer outside the core trains on, so they keep autograd too."""
         active = self.check_active(active)
         need = self.context_frames + max(self.horizons)
         if frames.ndim != 5 or frames.shape[1] < need:
@@ -213,7 +270,9 @@ class JEPA(nn.Module):
                 f"need frames (B, >= {need}, 3, H, W) for horizons {self.horizons}, "
                 f"got {tuple(frames.shape)}"
             )
-        deepest_active = max((self.head_level[k] for k in active), key=self.level_names.index)
+        deepest_active = max(
+            [*(self.head_level[k] for k in active), *grad_levels], key=self.level_names.index
+        )
         context = self.context_encoder(
             context_stack(frames, self.context_frames), upto=deepest_active
         )
@@ -232,29 +291,51 @@ class JEPA(nn.Module):
                 pred[k], logvar[k] = out
             else:
                 pred[k] = out
-        return {
-            "context": context,
-            "pred": pred,
-            "logvar": logvar,
-            "target": self.encode_targets(frames),
-        }
+        targets, td_targets = self._encode(frames)
+        result = {"context": context, "pred": pred, "logvar": logvar, "target": targets}
+        if self.td_heads is not None:
+            td_pred, td_logvar = {}, {}
+            for k in self.td_level:  # each branch trains exactly when its far horizon does
+                with torch.set_grad_enabled(torch.is_grad_enabled() and k in active):
+                    td_pred[k], td_logvar[k] = self.td_heads[str(k)](
+                        context[self.head_level[k]], action
+                    )
+            result.update(td_pred=td_pred, td_logvar=td_logvar, td_target=td_targets)
+        return result
 
     @torch.no_grad()
     def encode_targets(self, frames: torch.Tensor) -> dict[int, torch.Tensor]:
         """One target-encoder call per level: the stacks of every head reading that level go in
         one batch, encoded only `upto` that level, so near stacks never pay for L2/L3. GroupNorm is
         per sample, so the grouping cannot change any result. loss.target_norm is applied here."""
+        return self._encode(frames)[0]
+
+    @torch.no_grad()
+    def _encode(
+        self, frames: torch.Tensor
+    ) -> tuple[dict[int, torch.Tensor], dict[int, torch.Tensor]]:
+        """encode_targets, plus the top-down targets: for each branch, the finer level of its
+        horizon's stack. That level is computed on the way to the far head's level anyway, so it
+        costs no extra encoder pass."""
         b = frames.shape[0]
         targets: dict[int, torch.Tensor] = {}
+        td: dict[int, torch.Tensor] = {}
         for level in self.level_names:
             ks = [k for k in self.horizons if self.head_level[k] == level]
             if not ks:
                 continue
             stacks = torch.cat([target_stack(frames, self.context_frames, k) for k in ks])
-            z = normalize_target(self.target_encoder(stacks, upto=level)[level], self.target_norm)
+            zs = self.target_encoder(stacks, upto=level)
+            z = zs[level]
+            fine = {self.td_level[k]: zs[self.td_level[k]] for k in ks if k in self.td_level}
+            del zs  # free the other intermediate levels now, as before top-down (peak memory)
+            z = normalize_target(z, self.target_norm)
             for i, k in enumerate(ks):
                 targets[k] = z[i * b : (i + 1) * b].detach()
-        return targets
+                if k in self.td_level:
+                    zf = fine[self.td_level[k]][i * b : (i + 1) * b]
+                    td[k] = normalize_target(zf, self.target_norm).detach()
+        return targets, td
 
     @torch.no_grad()
     def ema_update(self, momentum: float) -> None:
@@ -284,37 +365,72 @@ def compute_losses(
       loss/var     SUM of the guards of the levels ACTIVE heads read (if the guard is on)
       loss/total   sum of w_k * loss/k over ACTIVE horizons, plus w_var * loss/var
       emb_std/<L>  batch std of every level any head reads, detached
+    and, with model.top_down, for each branch k (M7):
+      loss/td/k<k>  Gaussian NLL of the finer target at t+k; w_td * it joins loss/total if k ACTIVE
+      sqerr/td/k<k>, logvar/td/k<k>, relerr/td/k<k>   as for the far heads, detached
 
     `active` (default: all built horizons) is the §5.5 stage schedule. Inactive horizons are
     still computed and logged, but stay out of loss/total, so their heads get no gradient."""
+    check_loss_cfg(model, loss_cfg)  # before the forward, so a bad config fails fast
+    active = model.check_active(active)
+    return losses_from_output(model, model(frames, action, active=active), loss_cfg, active)
+
+
+def check_loss_cfg(model: JEPA, loss_cfg: dict) -> None:
     if loss_cfg["latent_distance"] != "mse":
         raise ValueError(
             f"loss.latent_distance={loss_cfg['latent_distance']!r}: only 'mse' (squared L2) "
             "is implemented (docs/decisions/2026-11-17-latent-distance-sq-l2.md)"
         )
+    if model.td_heads is not None and "w_td" not in loss_cfg:
+        raise ValueError("model.top_down is on, so loss.w_td must be set (base.yaml: 0.5)")
     if loss_cfg["target_norm"] != model.target_norm:
         raise ValueError(
             f"loss.target_norm={loss_cfg['target_norm']!r} but the model was built with "
             f"{model.target_norm!r}: the targets are normalized inside the model"
         )
-    active = model.check_active(active)
-    out = model(frames, action, active=active)
+
+
+def _gaussian_terms(
+    losses: dict, tag: str, pred: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One Gaussian head's NLL against its detached target (= gaussian_nll), and its detached
+    diagnostics sqerr/<tag> and logvar/<tag>. The far heads and the top-down branches both go
+    through it, so their terms can't drift apart. Returns (nll, sqerr)."""
+    err2 = _err2(pred, target)  # computed once, shared by the loss and the diagnostics
+    sqerr = _sq_from_err2(err2)  # = latent_loss(pred, target)
+    losses[f"sqerr/{tag}"] = sqerr.detach()
+    losses[f"logvar/{tag}"] = logvar.detach().mean()
+    return _nll_from_err2(err2, logvar), sqerr
+
+
+def losses_from_output(
+    model: JEPA, out: dict, loss_cfg: dict, active: Collection[int]
+) -> dict[str, torch.Tensor]:
+    """compute_losses' terms from an existing forward() output, so a caller that also needs the
+    output (models/world.py) runs the model once. The same terms and the same total.
+    The caller validates first, before its forward: check_loss_cfg, and `active` from
+    model.check_active (compute_losses and world.compute_world_losses both do)."""
     losses: dict[str, torch.Tensor] = {}
-    total = frames.new_zeros(())
+    total = out["context"][model.level_names[0]].new_zeros(())
     for k in model.horizons:
         pred, target = out["pred"][k], out["target"][k]  # target: detached, already normalized
-        err2 = _err2(pred, target)  # computed once, shared by the loss and the diagnostics
-        sqerr = _sq_from_err2(err2)  # = latent_loss(pred, target)
         if k in model.far_horizons:
-            lk = _nll_from_err2(err2, out["logvar"][k])  # = gaussian_nll(pred, logvar, target)
-            losses[f"sqerr/k{k}"] = sqerr.detach()
-            losses[f"logvar/k{k}"] = out["logvar"][k].detach().mean()
+            lk, sqerr = _gaussian_terms(losses, f"k{k}", pred, out["logvar"][k], target)
         else:
+            sqerr = _sq_from_err2(_err2(pred, target))  # = latent_loss(pred, target)
             lk = sqerr
         losses[f"loss/k{k}"] = lk
         losses[f"relerr/k{k}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
             total = total + loss_cfg["w_k"] * lk
+    for k in model.td_level:  # empty unless model.top_down
+        tag, target = f"td/k{k}", out["td_target"][k]
+        ltd, sqerr = _gaussian_terms(losses, tag, out["td_pred"][k], out["td_logvar"][k], target)
+        losses[f"loss/{tag}"] = ltd
+        losses[f"relerr/{tag}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
+        if k in active:
+            total = total + loss_cfg["w_td"] * ltd
     active_levels = {model.head_level[k] for k in active}
     guards, extra = [], {}
     for lv in sorted(set(model.head_level.values()), key=model.level_names.index):

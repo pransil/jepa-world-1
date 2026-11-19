@@ -6,15 +6,13 @@ Standalone: it reads no config and does not depend on the JEPA core. See models/
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 
 import torch
 from torch import nn
 
+from jepa_world.models.losses import gaussian_nll_terms
 from jepa_world.models.unet import check_groups
-
-LOG_2PI = math.log(2 * math.pi)
 
 
 def displacement_targets(
@@ -23,7 +21,8 @@ def displacement_targets(
     """ball_pos (B, T, 2) world (x, z), on the batch's frame axis (index C-1 is time t)
     -> (B, K, 2) float32: ball_pos[:, C-1+k] - ball_pos[:, C-1], in `horizons` order.
 
-    The subtraction runs at the input's precision (M2 stores float64), then casts to fp32."""
+    The subtraction runs at the input's precision, then casts to fp32. M2's batches already carry
+    float32 (rounding < 2e-6 m; MPS has no float64), and a float64 caller keeps full precision."""
     if ball_pos.ndim != 3 or ball_pos.shape[-1] != 2:
         raise ValueError(f"ball_pos must be (B, T, 2), got {tuple(ball_pos.shape)}")
     if not horizons or min(horizons) < 0:
@@ -48,12 +47,12 @@ def goal_nll(mean: torch.Tensor, logvar: torch.Tensor, target: torch.Tensor) -> 
 
         mean_b sum_{x,z} 0.5 * [(t - mu)^2 * exp(-logvar) + logvar + log(2 pi)]
 
-    The same formula as the far heads' gaussian_nll (models/DESIGN.md), so it is a true NLL."""
+    The same formula as the far heads' gaussian_nll (models/losses.py), so it is a true NLL."""
     shapes = {"mean": mean.shape, "logvar": logvar.shape, "target": target.shape}
     if len(set(shapes.values())) != 1 or mean.ndim != 3 or mean.shape[-1] != 2:
         raise ValueError(f"shape mismatch, expected (B, K, 2) each: {shapes}")
     err2 = (target.detach() - mean).square()
-    return (0.5 * (err2 * torch.exp(-logvar) + logvar + LOG_2PI)).sum(dim=-1).mean(dim=0)
+    return gaussian_nll_terms(err2, logvar).sum(dim=-1).mean(dim=0)  # the one formula (losses.py)
 
 
 class GoalHead(nn.Module):

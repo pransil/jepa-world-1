@@ -9,6 +9,14 @@
   - [skip connections = decoder skips](../decisions/2026-11-17-skip-connections-meaning.md).
 - **Ablation length (user, 2026-11-19):** every remaining arm trains for **48,000 steps**, seeds 0
   and 1, against the 48k reference ([m7-ablations-at-48k](../decisions/2026-11-19-m7-ablations-at-48k.md)).
+- **Defaults the reference and arms inherit (user, 2026-11-19):**
+  - a 10% pixel share ([pixel-share-default](../decisions/2026-11-19-pixel-share-default.md),
+    PR #30);
+  - per-channel latent losses ([latent-loss-normalization](../decisions/2026-11-19-latent-loss-normalization.md),
+    PR #31).
+
+  So §1 and §2 are stated relative to the 10% share, and runs compare on scale-free metrics
+  ("Shared protocol").
 
 Each section below is written so it can become a single `/experiment` run
 (`.claude/skills/experiment/SKILL.md`). Its block maps onto Step 1 (hypothesis, deciding metric,
@@ -26,16 +34,36 @@ the experiment note, then fill in the shas and run dirs.
 
 ## Shared protocol
 
-- **Reference run:** `configs/exp_headline_48k.yaml`, with **seeds 0 and 1**. It is base.yaml's
-  defaults (skips on, top-down off, `track_lagged`, no obstacles) trained for 48,000 steps. Every
-  ablation is a diff against it. Reuse the reference only if
+- **Reference run:** `configs/exp_headline_48k.yaml` **at the 2026-11-19 defaults**, with **seeds
+  0 and 1**. That is base.yaml as of PRs #30 and #31, trained for 48,000 steps:
+  - **pixel term at a 10% share** (`loss.pix_share: 0.10`,
+    [pixel-share-default](../decisions/2026-11-19-pixel-share-default.md));
+  - **per-channel latent losses** (`loss.latent_reduce: mean`,
+    [latent-loss-normalization](../decisions/2026-11-19-latent-loss-normalization.md)). Every
+    per-level latent term, the guard included, is divided by its level's channel count. `w_goal`
+    stays 0.5 and is divided by C(L3); a fixed `w_pix` would be divided by C(L1);
+  - skips on, top-down off, `track_lagged`, no obstacles, guard sum ×25.
+
+  Every ablation is a diff against it. Reuse the reference only if
   `git diff <ref sha> <ablation sha> -- jepa_world/models jepa_world/train.py jepa_world/data configs/base.yaml`
   is empty. Otherwise re-run it at the ablation's sha.
-  - The existing 48k runs (commit 5ed1564, [headline-48k](../../experiments/2026-11-18-headline-48k.md))
-    predate m5's two default changes in base.yaml: `loss.pix_share` 0.10 and a latent-loss
-    normalization.
-  - Once those land, the reference must be re-run before any ablation is compared with it (2 runs,
-    ≈ 4 GPU-h). Whether to spend that GPU time is the user's call.
+  - **The re-run at these defaults is assigned to m5** (2026-11-19): 2 runs, ≈ 4 GPU-h. It is the
+    first full-model run at the new defaults, because the latent-normalization collapse check was
+    near + far only.
+  - **The existing 48k runs are not the reference** (commit 5ed1564,
+    [headline-48k](../../experiments/2026-11-18-headline-48k.md)). They trained at a fixed `w_pix`
+    0.05 with channel-summed latents. They reproduce at their commit, or with
+    `--set loss.pix_share=null --set loss.latent_reduce=sum`.
+- **Compare runs only on scale-free metrics.** Under `latent_reduce: mean`, `loss/total` is about
+  64× smaller than under `sum` before far joins, and about 112–161× smaller after
+  ([latent-loss-normalization](../decisions/2026-11-19-latent-loss-normalization.md), item 7).
+  - **Use:** `relerr/k`, `goalratio/k`, `goalerr/k`, `emb_std/L`, `logvar/k`, and M6's eval
+    metrics. These are unchanged by the reduction.
+  - **Never `loss/total`**, and not `loss/k`, `sqerr/k`, `var/L` or `loss/var` across reductions.
+    That covers any comparison with the old headline, 48k or pixel-share runs, which are all `sum`.
+    To put a `mean` run's per-level term on the `sum` scale, multiply by that level's channel count.
+  - Within the M7 arms, all at `mean`, the per-level terms are comparable. The scale-free ones
+    are still preferred.
 - **Seeds:** 2 per setting, which is the minimum `/experiment` allows for claiming a difference.
   Add a 3rd seed when the difference between settings is under 2× the spread between seeds.
 - **Split:** the headline numbers are on the **test** terrain seeds only, and dev numbers are
@@ -59,13 +87,16 @@ the experiment note, then fill in the shas and run dirs.
 
   So "beats persistence at k = 20" is a real bar. M6 must score models on these same windows (M2.md).
 - **Configs:** `configs/m7_<slug>.yaml` with `base: exp_headline_48k.yaml`, holding only the keys
-  under test, so each arm trains 48,000 steps with all four stages. The tree is clean when the run
-  starts (`/experiment` Step 2).
+  under test, so each arm trains 48,000 steps with all four stages. Each arm inherits the 10% share
+  and `latent_reduce: mean`. Don't pin either unless it is the key under test. The tree is clean
+  when the run starts (`/experiment` Step 2).
 - **Training sanity before any conclusion** (`/experiment` Step 4):
   - did it converge, judged from the whole of `metrics.jsonl`?
   - embedding std per level, to rule out collapse;
-  - every loss term sane;
-  - `w_pix·L_pix` as a share of `loss/total`.
+  - every loss term finite, with its trend sane. Judge the size of each term only against the
+    reference, at the same reduction;
+  - the logged `pix_share`, which should sit at the target (0.10 unless the arm sets another)
+    once the pixel stage starts, and `w_pix_eff` / `w_goal_eff`.
 - **GPU:** every run takes `locks.gpu_lock` through `train.main`. Queue one job per lane at a time.
 
 ## Compute basis
@@ -96,6 +127,9 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
   the chained queue).
 - **Planning figure: ≈ 2 GPU-h per 48k arm per seed**, eval included. It doesn't count dataset
   builds, which only §3 and §5 need, nor readouts, which run on CPU.
+- **Timing basis:** these runs used `latent_reduce: sum`. `mean` only divides each term by a
+  constant, so the step time shouldn't change. The pixel-share runs already ran the 10% share's
+  weighting, which is now the default. Re-check against m5's reference re-run.
 
 The 2026-11-17 extrapolation it replaces was ≈ 32–37 min per 10k-step run. The full model measures
 0.13–0.15 s/step, so that is about 22–25 min per 10k steps; the estimate was high.
@@ -109,51 +143,51 @@ The 2026-11-17 extrapolation it replaces was ≈ 32–37 min per 10k-step run. T
   like a run.
 - Only §3 (track_full) and §5 (obstacles) need new sets.
 
-## 1. Pixel weight: 0, low, high
+## 1. Pixel weight: 0, low, high (as shares of the loss)
 
-> **Superseded settings (2026-11-18, user):** a fixed `w_pix` leaves the pixel term at ≤ 3e-5 of the
-> loss, so the levels are now **target shares** via `loss.pix_share`:
-> - ≈ 0: the existing headline runs;
-> - 1%: `configs/m7_pixel_share01.yaml`;
-> - 10%: `configs/m7_pixel_share10.yaml`.
->
-> Each is 24k steps, seeds 0 and 1. The hypothesis and the deciding metric below carry over, with
-> high = 10% and low = 1%.
->
-> These are shares of the loss **value**; the gradient share in the encoder is not measured.
-> [pixel-ablation-target-share](../decisions/2026-11-18-pixel-ablation-target-share.md)
->
-> **Ran at 24k, before the 48k decision** ([2026-11-18-pixel-share-ablation.md](../../experiments/2026-11-18-pixel-share-ablation.md),
-> PR #28). Its configs stay at 24k because they record what ran. A 48k re-run is not scheduled; it
-> is the user's call and needs new configs.
-> - If 0.10 becomes the base.yaml default, the 10% arm *is* the re-run reference.
-> - Only ≈ 0 and 1% would then be new: 4 runs, ≈ 8 GPU-h.
+**Done at 24k, under the old defaults** ([2026-11-18-pixel-share-ablation.md](../../experiments/2026-11-18-pixel-share-ablation.md),
+PR #28). A fixed `w_pix` left the pixel term at ≤ 3e-5 of the loss, so the levels became **target
+shares** via `loss.pix_share` ([pixel-ablation-target-share](../decisions/2026-11-18-pixel-ablation-target-share.md)):
+- **The levels:** ≈ 0, which is the existing headline runs (fixed `w_pix` 0.05); 1%
+  (`configs/m7_pixel_share01.yaml`); and 10% (`configs/m7_pixel_share10.yaml`).
+- **How they ran:** 24k steps, seeds 0 and 1, all at `latent_reduce: sum`. Those configs pin `sum`
+  and stay at 24k, because they record what ran.
+- **Result:** at 10% the k = 20 ratio was 0.416, against 0.430 at ≈ 0, so no worse. k = 1–5
+  improved by 10–15%, and 1% sat within the seed spread of ≈ 0. **10% became the base.yaml default**
+  ([pixel-share-default](../decisions/2026-11-19-pixel-share-default.md)).
 
-- **Question:** does the pixel term help or hurt the latent world model, and from what weight?
-- **Switch:** `loss.w_pix`. The key **exists** in `configs/base.yaml` (0.05). It is consumed by
-  `models/pixel.py` and the training loss (M5, lane m5).
+These are shares of the loss **value**; the gradient share in the encoder is not measured.
+
+**At 48k, relative to the 10% default: not scheduled.** A re-run is the user's call. If it runs:
+- **Question:** does moving the pixel share away from the 10% default, down to 0 or up, help or hurt
+  the latent world model?
+- **Switch:** `loss.pix_share`, default 0.10.
+  - `pix_share: 0` is refused (`check_pix_share`). The "0" arm is `pix_share: null` with
+    `w_pix: 0`.
+  - `pix_share: null` with the fixed `w_pix` 0.05 is ≈ 0, not 0. Under `mean` that weight is divided
+    by C(L1) = 64, so the term stays tiny.
 - **Settings:**
+  - the reference: **10%**, skips on;
   - **0**;
-  - **0.05** (low, the SPEC §5.4 default, i.e. the reference);
-  - **0.5** (high, 10× the base).
-
-  Revisit "high" once M5's logs show how big `L_pix` is next to the latent terms.
-- **Hypothesis:** raising `w_pix` from 0.05 to 0.5 worsens the k = 20 goal-head position error.
+  - **high: 30%**, which is the pixel-share note's proposal 1. It was never tested.
+  - 1% is optional. At 24k it was within the seed spread of ≈ 0.
+- **Hypothesis:** raising the share from 10% to 30% worsens the k = 20 goal-head position error.
   The pixel term pulls encoder capacity toward reconstruction, which is SPEC §4.7's "blur"
-  concern. Between 0 and 0.05 the difference stays within the seed spread.
+  concern. Dropping it to 0 loses the k = 1–5 gain that 10% showed at 24k.
 - **Deciding metric:** the goal-head position error at **k = 20**, as a ratio to persistence, on
-  the **test** split. Compare 0.5 with 0.05.
-- **Refuted if:** at 0.5 the ratio is no worse than at 0.05, beyond the seed spread.
+  the **test** split. Compare 30% with 10%.
+- **Refuted if:** at 30% the ratio is no worse than at 10%, beyond the seed spread.
 - **Secondary:**
-  - 0 vs 0.05 on the same metric;
+  - 0 vs 10% at k = 1–5;
   - linear-probe ball-position error at L1 and L3 (SPEC §7.2);
   - embedding std per level;
-  - `w_pix·L_pix / loss/total`. SPEC §8 M5 tests that the pixel term "does not dominate" at 0.05, and
-    at 0.5 it may.
+  - the logged `pix_share` and `w_pix_eff`, as a check that each arm held its target.
 - **Baselines:** the shared table.
-- **Runs:** 0 and 0.5, × seeds 0 and 1 = **4 new runs**, plus the reference. ≈ 2.1–2.5 GPU-h.
-- **Depends on:** M2, M4, M5, M6. No new code.
-- **Config:** `configs/m7_pixel_w0.yaml` and `configs/m7_pixel_w05.yaml`, each setting `loss.w_pix`.
+- **Runs:** 0 and 30%, × seeds 0 and 1 = **4 new runs**, ≈ 8 GPU-h. Adding 1% is 2 more runs, ≈ 4
+  GPU-h. 10% is the reference.
+- **Depends on:** the reference. No new code.
+- **Config:** `configs/m7_pixel_off_48k.yaml` (`pix_share: null`, `w_pix: 0`) and
+  `configs/m7_pixel_share30_48k.yaml` (`pix_share: 0.30`), each with `base: exp_headline_48k.yaml`.
 
 ## 2. Skip connections on/off (U-Net decoder skips)
 
@@ -162,27 +196,29 @@ The 2026-11-17 extrapolation it replaces was ≈ 32–37 min per 10k-step run. T
 - **Switch:** `model.unet_skips` (default `true`). It **exists**: m5 added it to the decoder path in
   `models/pixel.py` with M5. With `false`, the decoder upsamples from L3 alone
   ([decision](../decisions/2026-11-17-skip-connections-meaning.md)).
-- **Settings:** skips on or off, at `w_pix` 0.05 and 0.5. At `w_pix = 0` the switch is a no-op,
-  because it only acts through the pixel loss.
+- **Settings:** skips on or off, at the **10% default share**. Skips on is the reference.
+  - The switch acts only through the pixel loss, so it is a no-op with the pixel term off.
+  - **What stays fixed:** the share holds the pixel term at 10% of the rest of the loss in both arms.
+    With the skips off, `loss/pix` should rise, and `w_pix_eff` falls to keep the term at 10%. So
+    the arms differ in how hard the decoder finds L3-only reconstruction, not in the pixel term's
+    share of the loss.
 - **Hypothesis:** with the skips off, the pixel loss has to be satisfied through L3, so L3 holds
   more ball-position information.
 - **Deciding metric:** the **L3 linear-probe ball-position error** (M6 `probes.py`) on the **test**
-  split, skips off vs on, at `w_pix = 0.5`.
-- **Refuted if:** the difference at 0.5 is within the seed spread, or the off setting is worse.
+  split, skips off vs on, at 10%.
+- **Refuted if:** the difference is within the seed spread, or the off setting is worse.
 - **Secondary:**
-  - the same comparison at 0.05;
   - the k = 20 goal-head error ÷ persistence, to see whether the richer L3 helps or costs far
     prediction;
   - `loss/pix`, which should be worse with the skips off. That is a sanity check that the switch
-    did something.
-- **Runs:** off × {0.05, 0.5} × seeds 0, 1 = **4 new runs** at 48k steps. Skips on reuses the
-  reference (0.05) and §1's 0.5 runs, if the shas allow it under the reuse rule. ≈ 8 GPU-h.
-  - These settings are still written as fixed `w_pix` values, which the pixel-share decision
-    found effectively zero (§1).
-  - The lane that runs §2 should restate them as shares. The run count, and so the cost, depends
-    on that.
-- **Depends on:** M5 (the decoder), the switch, M6. Run it after §1, so the 0.5 runs can be shared.
-- **Config:** `configs/m7_skips_off_w005.yaml` and `configs/m7_skips_off_w05.yaml`.
+    did something. Compare `loss/pix` itself, not the pixel term, which the share holds fixed.
+- **Runs:** skips off × seeds 0, 1 = **2 new runs** at 48k steps, ≈ 4 GPU-h. Skips on is the
+  reference.
+  - The plan's earlier second level (`w_pix` 0.5) becomes 30%. Off at 30% is 2 more runs, ≈ 4
+    GPU-h. The on arm is §1's 30% arm, if §1 runs it at the same sha.
+- **Depends on:** M5 (the decoder), the switch, M6, the reference.
+- **Config:** `configs/m7_skips_off.yaml` (`model.unet_skips: false`, `base: exp_headline_48k.yaml`).
+  Add `configs/m7_skips_off_share30.yaml` for the 30% level.
 
 ## 3. Camera mode: track_lagged vs track_full
 
@@ -231,16 +267,23 @@ The 2026-11-17 extrapolation it replaces was ≈ 32–37 min per 10k-step run. T
   [decision](../decisions/2026-11-17-top-down-targets.md):
   - k = 20 on L3 also predicts the target **L2(t+20)**, through up×4;
   - k = 10 on L2 also predicts the target **L1(t+10)**, through up×2;
-  - both use Gaussian NLL at `w_td = 0.5`, with the gradient flowing into context L3/L2.
+  - both use Gaussian NLL at `w_td = 0.5`, with the gradient flowing into context L3/L2;
+  - under `latent_reduce: mean`, each branch's NLL is divided by its target level's channel count,
+    like that level's own terms. Where it enters, though, it gains 2× against the far NLL of the
+    level it reads ([latent-loss-normalization](../decisions/2026-11-19-latent-loss-normalization.md),
+    item 6). Both arms inherit `mean`, so they compare at one reduction. Don't compare this
+    ablation with a `sum` run.
 - **Hypothesis:** the top-down terms make context L3 keep finer information about the ball, which
   lowers the k = 20 goal-head position error.
 - **Deciding metric:** the goal-head position error at **k = 20**, ÷ persistence, on the **test**
   split, top-down on vs the reference.
 - **Refuted if:** the on setting isn't lower by more than the seed spread.
 - **Guards (a win only counts if these hold):**
-  - the near-head losses (k = 1..5) and the far heads' own `sqerr/10`, `sqerr/20` are no worse
-    than the reference, beyond the seed spread;
-  - the variance on every level stays above the floor.
+  - the near heads' `relerr/k1`–`relerr/k5` and the far heads' own `relerr/k10`, `relerr/k20`
+    (dev, via `experiments/latent_relerr.py`) are no worse than the reference, beyond the seed
+    spread. These are scale-free; `loss/k` and `sqerr/k` would also do between two `mean` runs;
+  - the embedding std on every level stays above the floor, and the far `logvar/k` doesn't run
+    away.
 - **Secondary:** the L3 and L2 linear-probe ball-position error, and probes for the hidden
   parameters at L3.
 - **Runs:** top-down on × seeds 0, 1 = **2 new runs** at 48k steps. ≈ 5.5 GPU-h (2 h × 1.35 per
@@ -314,19 +357,22 @@ Every arm is **48,000 steps, seeds 0 and 1**, at ≈ 2 GPU-h per run (Compute ba
 
 | § | Ablation | Switch | Exists now? | Code owner | New runs | Est. GPU-h |
 |---|---|---|---|---|---|---|
-| — | Reference, re-run after m5's base.yaml defaults land | `configs/exp_headline_48k.yaml` | yes | — | 2 | ≈ 4 |
-| 1 | Pixel share ≈ 0 / 1% / 10% | `loss.pix_share` | **yes** (PR #25) | — | **done at 24k** (PR #28); 4 if re-run at 48k | 0 (≈ 8 if re-run) |
-| 2 | Decoder skips on/off | `model.unet_skips` | **yes** (M5) | — | 4 | ≈ 8 |
+| — | Reference at the 2026-11-19 defaults (10% share, `latent_reduce: mean`); assigned to m5 | `configs/exp_headline_48k.yaml` | yes | — | 2 | ≈ 4 |
+| 1 | Pixel share vs the 10% default: 0 / 30% (1% optional) | `loss.pix_share` (`w_pix: 0` for 0) | **yes** (PRs #25, #30) | — | **done at 24k** (PR #28); at 48k not scheduled: 4, +2 for 1% | 0 (≈ 8, +4 for 1%) |
+| 2 | Decoder skips off, at 10% | `model.unet_skips` | **yes** (M5) | — | 2; +2 for a 30% level | ≈ 4 (+4) |
 | 3 | track_lagged vs track_full | `sim.camera_mode` | **yes** (M1) | — (dataset build) | 2 | ≈ 4 |
 | 4 | Top-down (A) | `model.top_down`, `loss.w_td` | **yes** (M7 top-down lane) | — | 2 | ≈ 5.5 |
 | 5 | Obstacles | `sim.obstacles` | **yes** (PR #17) | — (dataset build) | 2 | ≈ 4 |
-| | **Total remaining** | | | | **12** | **≈ 25.5** (≈ 33.5 with §1 at 48k) |
+| | **Total remaining** | | | | **10** | **≈ 21.5** |
 
-The totals count training plus eval. The two dataset builds (§3, §5) add under 5 min each.
-On the one GPU, ≈ 25.5 GPU-h is about a day of back-to-back runs.
+- **The total counts** the reference, §2 at 10%, and §3–§5. It covers training plus eval; the two
+  dataset builds (§3, §5) add under 5 min each.
+- **After m5's reference re-run:** 8 runs, ≈ 17.5 GPU-h.
+- **Optional:** §1 at 48k (≈ 8, or ≈ 12 with 1%) and §2's 30% level (≈ 4) bring the total to
+  ≈ 33.5–37.5 GPU-h.
+- On the one GPU, ≈ 21.5 GPU-h is most of a day of back-to-back runs.
 
 **Order:**
-1. The reference re-run, once m5's default changes land and the user approves the GPU time.
-2. Then §2, §3, §4 and §5, back to back, keeping one queued job per lane.
-
-§1 ran at 24k. §2 can share §1's runs only if §1 is re-run at 48k.
+1. The reference, at the 2026-11-19 defaults (m5).
+2. §2 at 10%, §3, §4 and §5, back to back, keeping one queued job per lane.
+3. If the user approves §1 at 48k, run its 30% arm before §2's 30% level, so the two share it.

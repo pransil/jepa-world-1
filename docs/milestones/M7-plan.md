@@ -1,12 +1,14 @@
 # M7 plan: ablations
 
-- **Status:** plan only, with no runs yet. Written 2026-11-17, before M2, M4, M5 and M6 merged.
+- **Status:** plan. Written 2026-11-17, before M2, M4, M5 and M6 merged. §1 has run, at 24k steps (PR #28).
 - **SPEC ref:** §8 M7: "Skip connections on and off. Top-down prediction (see section 9). Camera
   modes and obstacles. Pixel weight at 0, low, and high."
 - **Decisions made for this plan (user, 2026-11-17):**
   - [top-down targets](../decisions/2026-11-17-top-down-targets.md) (SPEC §9.2);
   - [obstacle keys: absent means off](../decisions/2026-11-17-obstacles-dataset-keying.md);
   - [skip connections = decoder skips](../decisions/2026-11-17-skip-connections-meaning.md).
+- **Ablation length (user, 2026-11-19):** every remaining arm trains for **48,000 steps**, seeds 0
+  and 1, against the 48k reference ([m7-ablations-at-48k](../decisions/2026-11-19-m7-ablations-at-48k.md)).
 
 Each section below is written so it can become a single `/experiment` run
 (`.claude/skills/experiment/SKILL.md`). Its block maps onto Step 1 (hypothesis, deciding metric,
@@ -24,11 +26,16 @@ the experiment note, then fill in the shas and run dirs.
 
 ## Shared protocol
 
-- **Reference run:** the base config after M5 (`configs/base.yaml`, `w_pix` 0.05, skips on,
-  top-down off, `track_lagged`, no obstacles), with **seeds 0 and 1**. Every ablation is a diff
-  against it. Reuse the reference only if
-  `git diff <ref sha> <ablation sha> -- jepa_world/models jepa_world/train.py jepa_world/data`
+- **Reference run:** `configs/exp_headline_48k.yaml`, with **seeds 0 and 1**. It is base.yaml's
+  defaults (skips on, top-down off, `track_lagged`, no obstacles) trained for 48,000 steps. Every
+  ablation is a diff against it. Reuse the reference only if
+  `git diff <ref sha> <ablation sha> -- jepa_world/models jepa_world/train.py jepa_world/data configs/base.yaml`
   is empty. Otherwise re-run it at the ablation's sha.
+  - The existing 48k runs (commit 5ed1564, [headline-48k](../../experiments/2026-11-18-headline-48k.md))
+    predate m5's two default changes in base.yaml: `loss.pix_share` 0.10 and a latent-loss
+    normalization.
+  - Once those land, the reference must be re-run before any ablation is compared with it (2 runs,
+    ≈ 4 GPU-h). Whether to spend that GPU time is the user's call.
 - **Seeds:** 2 per setting, which is the minimum `/experiment` allows for claiming a difference.
   Add a 3rd seed when the difference between settings is under 2× the spread between seeds.
 - **Split:** the headline numbers are on the **test** terrain seeds only, and dev numbers are
@@ -51,8 +58,9 @@ the experiment note, then fill in the shas and run dirs.
     at k = 20.
 
   So "beats persistence at k = 20" is a real bar. M6 must score models on these same windows (M2.md).
-- **Configs:** `configs/m7_<slug>.yaml` with `base: base.yaml`, holding only the keys under test.
-  The tree is clean when the run starts (`/experiment` Step 2).
+- **Configs:** `configs/m7_<slug>.yaml` with `base: exp_headline_48k.yaml`, holding only the keys
+  under test, so each arm trains 48,000 steps with all four stages. The tree is clean when the run
+  starts (`/experiment` Step 2).
 - **Training sanity before any conclusion** (`/experiment` Step 4):
   - did it converge, judged from the whole of `metrics.jsonl`?
   - embedding std per level, to rule out collapse;
@@ -74,11 +82,23 @@ Measured (MPS, fp32, B = 32, synthetic frames, so timing depends on the shapes a
 
 The step time varied by up to 25% between identical runs (l1-head-width), so read every figure as ±25%.
 
-**Per-run estimate (an extrapolation, not measured):**
-- 158 ms × 10k steps (the `train.steps` placeholder) ≈ 26 min.
-- M5's goal head and pixel decoder add an estimated +20–40%, giving **≈ 32–37 min per run**.
-- That leaves out the real data loader and M6 eval time, neither yet measured.
-- Re-check against M5's bench, and scale linearly if real-data runs need more than 10k steps.
+**Per-run cost, measured on the full model (real data, all four stages, MPS, B = 32):**
+
+| Runs | Steps | Training wall-clock | Step time |
+|---|---|---|---|
+| headline 48k, seeds 0 / 1 (commit 5ed1564) | 48,000 | 1.95 / 1.90 h | 0.146 / 0.143 s |
+| pixel share 1% and 10%, seeds 0 / 1 (commit f1a7c03) | 24,000 | 0.87–0.88 h | 0.130–0.132 s |
+
+- Training time is from the run-dir timestamp to the last write of `metrics.jsonl`.
+- The 48k runs were slower per step, probably because a CPU readout ran alongside part of each
+  (the guard comparison's).
+- `eval --split test --split dev` took about 2 min per run (1.4–1.8 min after training ended, in
+  the chained queue).
+- **Planning figure: ≈ 2 GPU-h per 48k arm per seed**, eval included. It doesn't count dataset
+  builds, which only §3 and §5 need, nor readouts, which run on CPU.
+
+The 2026-11-17 extrapolation it replaces was ≈ 32–37 min per 10k-step run. The full model measures
+0.13–0.15 s/step, so that is about 22–25 min per 10k steps; the estimate was high.
 
 **Dataset builds:**
 - One full set of splits is dev 10×4 + train 500×4 + test 50×4 = 2240 episodes (`data.splits` in
@@ -102,6 +122,12 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 >
 > These are shares of the loss **value**; the gradient share in the encoder is not measured.
 > [pixel-ablation-target-share](../decisions/2026-11-18-pixel-ablation-target-share.md)
+>
+> **Ran at 24k, before the 48k decision** ([2026-11-18-pixel-share-ablation.md](../../experiments/2026-11-18-pixel-share-ablation.md),
+> PR #28). Its configs stay at 24k because they record what ran. A 48k re-run is not scheduled; it
+> is the user's call and needs new configs.
+> - If 0.10 becomes the base.yaml default, the 10% arm *is* the re-run reference.
+> - Only ≈ 0 and 1% would then be new: 4 runs, ≈ 8 GPU-h.
 
 - **Question:** does the pixel term help or hurt the latent world model, and from what weight?
 - **Switch:** `loss.w_pix`. The key **exists** in `configs/base.yaml` (0.05). It is consumed by
@@ -149,8 +175,12 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
     prediction;
   - `loss/pix`, which should be worse with the skips off. That is a sanity check that the switch
     did something.
-- **Runs:** off × {0.05, 0.5} × seeds 0, 1 = **4 new runs**. Skips on reuses the reference (0.05)
-  and §1's 0.5 runs, if the shas allow it under the reuse rule. ≈ 2.1–2.5 GPU-h.
+- **Runs:** off × {0.05, 0.5} × seeds 0, 1 = **4 new runs** at 48k steps. Skips on reuses the
+  reference (0.05) and §1's 0.5 runs, if the shas allow it under the reuse rule. ≈ 8 GPU-h.
+  - These settings are still written as fixed `w_pix` values, which the pixel-share decision
+    found effectively zero (§1).
+  - The lane that runs §2 should restate them as shares. The run count, and so the cost, depends
+    on that.
 - **Depends on:** M5 (the decoder), the switch, M6. Run it after §1, so the 0.5 runs can be shared.
 - **Config:** `configs/m7_skips_off_w005.yaml` and `configs/m7_skips_off_w05.yaml`.
 
@@ -184,8 +214,8 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
   - k = 5 position error on OOV windows, lagged ÷ full, which is the accuracy cost of the lagged
     camera;
   - the k = 20 headline ratio for both.
-- **Runs:** track_full × seeds 0, 1 = **2 new runs**, plus a dataset build. Lagged = the reference.
-  ≈ 1.1–1.2 GPU-h.
+- **Runs:** track_full × seeds 0, 1 = **2 new runs** at 48k steps, plus a dataset build. Lagged =
+  the reference. ≈ 4 GPU-h.
 - **Depends on:** M2 (the build pipeline), M5 (the goal head's variance), M6 (calibration, event
   metric).
 - **Config:** `configs/m7_camera_full.yaml` (`sim.camera_mode: track_full`).
@@ -213,9 +243,9 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
   - the variance on every level stays above the floor.
 - **Secondary:** the L3 and L2 linear-probe ball-position error, and probes for the hidden
   parameters at L3.
-- **Runs:** top-down on × seeds 0, 1 = **2 new runs**. ≈ 1.3–1.6 GPU-h. The step is about 35%
-  slower, measured at 201 ms vs 146–151 ms on M4's synthetic bench (`models/DESIGN.md`, "Top-down
-  prediction"). That is more than the decision's +10–20 ms estimate.
+- **Runs:** top-down on × seeds 0, 1 = **2 new runs** at 48k steps. ≈ 5.5 GPU-h (2 h × 1.35 per
+  run). The step is about 35% slower, measured at 201 ms vs 146–151 ms on M4's synthetic bench
+  (`models/DESIGN.md`, "Top-down prediction"). That is more than the decision's +10–20 ms estimate.
 - **Depends on:** M4, M5, M6. The code has landed.
 - **Config:** `configs/m7_top_down.yaml` (`model.top_down: true`), which the experiment lane writes
   with its run, per `/experiment` Step 2.
@@ -257,10 +287,11 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
     physical windows (its frames have no occluder), which is the accuracy cost of occlusion;
   - the k = 20 headline ratio;
   - for M7's write-up, a comparison with §3's out-of-view behavior.
-- **Runs:** obstacles × seeds 0, 1 = **2 new runs**, plus a dataset build. ≈ 1.1–1.2 GPU-h.
+- **Runs:** obstacles × seeds 0, 1 = **2 new runs** at 48k steps, plus a dataset build. ≈ 4 GPU-h.
 - **Depends on:** M2, M5, M6, the sim lane, and **the timing below**.
-- **Config:** `configs/m7_obstacles.yaml` (`sim.obstacles: {…}`, with the camera left at
-  `track_lagged`, which is SPEC's `track_lagged_obstacles`).
+- **Config:** `configs/m7_obstacles.yaml` (`base: exp_headline_48k.yaml`, plus
+  `sim.obstacles: {…}`, with the camera left at `track_lagged`, which is SPEC's
+  `track_lagged_obstacles`).
 
 ### Flag: the obstacle work changes `sim/` and touches dataset hashes
 
@@ -278,15 +309,24 @@ The step time varied by up to 25% between identical runs (l1-head-width), so rea
 
 ## Summary
 
+Every arm is **48,000 steps, seeds 0 and 1**, at ≈ 2 GPU-h per run (Compute basis), per the
+[48k decision](../decisions/2026-11-19-m7-ablations-at-48k.md).
+
 | § | Ablation | Switch | Exists now? | Code owner | New runs | Est. GPU-h |
 |---|---|---|---|---|---|---|
-| — | Reference | base.yaml | yes, after M5 | — | 2 | 1.1–1.2 |
-| 1 | Pixel weight 0 / 0.05 / 0.5 | `loss.w_pix` | key yes; consumer M5 | m5 | 4 | 2.1–2.5 |
-| 2 | Decoder skips on/off | `model.unet_skips` | **yes** (M5) | — | 4 | 2.1–2.5 |
-| 3 | track_lagged vs track_full | `sim.camera_mode` | **yes** (M1) | — (dataset build) | 2 | 1.1–1.2 |
-| 4 | Top-down (A) | `model.top_down`, `loss.w_td` | **yes** (M7 top-down lane) | — | 2 | 1.3–1.6 |
-| 5 | Obstacles | `sim.obstacles` | **yes** (PR #17) | — (dataset build) | 2 | 1.1–1.2 |
-| | **Total** | | | | **16** | **≈ 8.7–10.2** (training only) |
+| — | Reference, re-run after m5's base.yaml defaults land | `configs/exp_headline_48k.yaml` | yes | — | 2 | ≈ 4 |
+| 1 | Pixel share ≈ 0 / 1% / 10% | `loss.pix_share` | **yes** (PR #25) | — | **done at 24k** (PR #28); 4 if re-run at 48k | 0 (≈ 8 if re-run) |
+| 2 | Decoder skips on/off | `model.unet_skips` | **yes** (M5) | — | 4 | ≈ 8 |
+| 3 | track_lagged vs track_full | `sim.camera_mode` | **yes** (M1) | — (dataset build) | 2 | ≈ 4 |
+| 4 | Top-down (A) | `model.top_down`, `loss.w_td` | **yes** (M7 top-down lane) | — | 2 | ≈ 5.5 |
+| 5 | Obstacles | `sim.obstacles` | **yes** (PR #17) | — (dataset build) | 2 | ≈ 4 |
+| | **Total remaining** | | | | **12** | **≈ 25.5** (≈ 33.5 with §1 at 48k) |
 
-**Order:** §1, then §2 (it shares §1's runs), then §3, then §4, then §5. §1 and §3 need no new code
-once M5 and M6 land. Run them back to back, keeping one queued job per lane.
+The totals count training plus eval. The two dataset builds (§3, §5) add under 5 min each.
+On the one GPU, ≈ 25.5 GPU-h is about a day of back-to-back runs.
+
+**Order:**
+1. The reference re-run, once m5's default changes land and the user approves the GPU time.
+2. Then §2, §3, §4 and §5, back to back, keeping one queued job per lane.
+
+§1 ran at 24k. §2 can share §1's runs only if §1 is re-run at 48k.

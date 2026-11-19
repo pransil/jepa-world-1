@@ -419,12 +419,14 @@ def test_base_default_holds_the_pixel_term_at_ten_percent():
 
 
 @pytest.mark.parametrize("name", ["exp_headline", "exp_headline_48k", "m7_obstacles"])
-def test_configs_tied_to_the_fixed_weight_reference_keep_it(name):
-    """The headline runs trained at w_pix 0.05 (pixel share <= 3e-5); re-running them must
-    reproduce that, whatever base.yaml defaults to. M7's obstacles run is compared against them."""
+def test_the_m7_reference_and_its_ablations_inherit_the_base_pixel_weighting(name):
+    """docs/decisions/2026-11-19-m7-ablations-at-48k.md: the 48k reference is base.yaml's defaults
+    at the commit it runs at, and M7 ablations (obstacles) diff against it, so none of them may pin
+    the pixel weighting. The pixel-share ablation configs set their own share
+    (test_m7_pixel_share_configs)."""
+    base = load_config(CONFIGS / "base.yaml")["loss"]
     loss = load_config(CONFIGS / f"{name}.yaml")["loss"]
-    assert loss["pix_share"] is None
-    assert loss["w_pix"] == 0.05
+    assert (loss["pix_share"], loss["w_pix"]) == (base["pix_share"], base["w_pix"])
 
 
 @pytest.mark.parametrize("path", sorted(CONFIGS.glob("*.yaml")), ids=lambda p: p.stem)

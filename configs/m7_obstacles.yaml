@@ -2,14 +2,9 @@
 # base.yaml keeps sim.obstacles only as a comment. An absent key means off, so the base datasets keep
 # their hash (docs/decisions/2026-11-17-obstacles-dataset-keying.md). This file adds the block, and
 # so builds its own datasets. Values tuned with sim.preview (sim/DESIGN.md, "Obstacles and occlusion").
-#
-# pix_share is pinned to null (the fixed w_pix 0.05): M7's shared protocol compares this run against
-# the 0.05 reference (the headline runs). base.yaml's default became a 10% share on 2026-11-19
-# (docs/decisions/2026-11-19-pixel-share-default.md); drop this pin if the reference is re-run at 10%.
-base: base.yaml
-
-loss:
-  pix_share: null
+# It inherits the 48k M7 reference (all four stages, 48000 steps): docs/decisions/2026-11-19-m7-ablations-at-48k.md.
+# Seeds 0 (this file) and 1 (--set seed=1).
+base: exp_headline_48k.yaml
 
 sim:
   obstacles:

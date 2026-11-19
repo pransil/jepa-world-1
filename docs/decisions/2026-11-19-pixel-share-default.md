@@ -37,24 +37,27 @@ This is a share of the loss **value**, not of the encoder's gradient, which isn'
 - **SPEC §5.4's `w_pix` line** now points here, a minimal edit the user approved with this
   decision (2026-11-19, relayed by the orchestrator session). The formula is unchanged: w_pix
   becomes the per-step share weight.
-- **Configs whose runs already exist keep their meaning.** `configs/exp_headline.yaml` pins
-  `pix_share: null`, the fixed `w_pix` 0.05 its runs trained with. `exp_headline_48k.yaml`
-  inherits that, and `m7_pixel_share01/10.yaml` set their own share on top. No other config has
-  a pixel stage except `m7_obstacles.yaml`, which has no runs yet. M7's shared protocol compares
-  it against the 0.05 reference (the headline runs), so it pins `pix_share: null` too, keeping
-  that a one-switch comparison. Drop the pin if the reference is re-run at 10%.
+- **Configs with a pixel stage:**
+  - `m7_pixel_share01/10.yaml` set their own share, so they keep their meaning.
+  - `exp_headline.yaml`, `exp_headline_48k.yaml` (the M7 reference) and `m7_obstacles.yaml` (an
+    M7 ablation on top of it) **inherit the new default**, as
+    [m7-ablations-at-48k](2026-11-19-m7-ablations-at-48k.md) requires: the reference is base.yaml's
+    defaults at the commit it runs at, and is re-run once this and the latent normalization land.
+    `test_the_m7_reference_and_its_ablations_inherit_the_base_pixel_weighting` pins that.
+  - The existing headline runs (24k, commit ba81066; 48k, 5ed1564) trained at the fixed `w_pix`
+    0.05. To reproduce them, check out their commit or add `--set loss.pix_share=null`. The
+    ≈ 0 arm of the pixel ablation ([decision](2026-11-18-pixel-ablation-target-share.md)) is
+    those runs.
 - **The near/far-only configs** (M3, M4, `exp_first_real_run`, `exp_guard_mean`) are unaffected.
   With no pixel stage there is no decoder and no pixel term, exactly as `w_pix` was unused before.
   So `train.check_config` no longer refuses a share without a pixel stage. That check
   (PR #25) would have made every near/far-only config unrunnable under this default.
   `test_every_committed_config_passes_check_config` now covers every file in `configs/`.
-- **M7's reference run** (M7-plan "Shared protocol": "the base config after M5, `w_pix` 0.05")
-  no longer matches base.yaml. Its reuse check diffs `jepa_world/models`, `train.py` and
-  `data` only, so it can't see a base.yaml change. Any M7 ablation config that inherits
-  base.yaml now trains at 10% unless it pins `pix_share: null`, and needs either that pin or
-  a reference at 10%. M7-plan.md is the m7 lane's file (held on 2026-11-19), so it is not
-  edited here; the m7 lane and the orchestrator were told. A new reference run is the user's
-  call on GPU time.
+- **M7's reference** is handled by [m7-ablations-at-48k](2026-11-19-m7-ablations-at-48k.md): its
+  reuse check now includes `configs/base.yaml`, so this change forces the re-run. M7-plan
+  §1/§2 still describe `w_pix` 0.05 as "the reference" / "the base" for the pixel and skip
+  ablations. That is the m7 lane's file, so it is not edited here; the m7 lane and the
+  orchestrator were told.
 - **An explicit share without a pixel stage** (e.g. `--set train.stages=[near, far, goal]` on
   a share config) is accepted silently, as `w_pix` always was. The stage list is the switch
   that turns the pixel term off, and an inherited default can't be told apart from an explicit

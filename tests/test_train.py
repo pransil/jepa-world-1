@@ -230,10 +230,24 @@ def test_run_logs_the_aux_terms_every_step(tmp_path):
 
 
 def test_pixel_term_does_not_dominate_the_logged_total():
-    """SPEC §8 M5. At the base weight (w_pix = 0.05) the weighted pixel term stays under 10% of
-    loss/total at every step of a short run, and pixel_l1 <= 1 bounds it by w_pix outright. A sum
-    reduction (x3 channels x every pixel) would break both."""
+    """SPEC §8 M5. At base.yaml's default (pix_share 0.10, decision 2026-11-19) the weighted pixel
+    term is 0.10/1.10 of loss/total, under 10%, at every step of a short run."""
     cfg = tiny_aux_cfg("train.stages=[near, pixel]")
+    assert cfg["loss"]["pix_share"] == 0.10  # the base default, not one picked for the test
+    model, opt = _built(cfg)
+    g = torch.Generator().manual_seed(0)
+    for step in range(10):
+        frames = moving_disc_batch(2, 9, 16, generator=g)
+        losses = train.train_step(model, opt, frames, cfg, step=step)
+        pix = losses["w_pix_eff"] * losses["loss/pix"]
+        assert pix < 0.1 * losses["loss/total"], (step, pix.item(), losses["loss/total"].item())
+
+
+def test_fixed_pixel_weight_term_is_bounded_by_w_pix():
+    """pix_share null (e.g. the headline configs): pixel_l1 <= 1 bounds the term by w_pix
+    outright, and at w_pix 0.05 it stays under 10% of loss/total. A sum reduction (x3 channels
+    x every pixel) would break both."""
+    cfg = tiny_aux_cfg("train.stages=[near, pixel]", "loss.pix_share=null")
     assert cfg["loss"]["w_pix"] == 0.05  # the base weight, not one picked for the test
     model, opt = _built(cfg)
     g = torch.Generator().manual_seed(0)
@@ -241,6 +255,7 @@ def test_pixel_term_does_not_dominate_the_logged_total():
         frames = moving_disc_batch(2, 9, 16, generator=g)
         losses = train.train_step(model, opt, frames, cfg, step=step)
         pix = cfg["loss"]["w_pix"] * losses["loss/pix"]
+        assert losses["w_pix_eff"] == cfg["loss"]["w_pix"]
         assert pix <= cfg["loss"]["w_pix"]
         assert pix < 0.1 * losses["loss/total"], (step, pix.item(), losses["loss/total"].item())
 
@@ -389,10 +404,39 @@ def test_check_config_refuses_a_bad_pix_share():
         train.check_config(tiny_aux_cfg("loss.pix_share=2.0"))
 
 
-def test_pix_share_without_a_pixel_stage_is_refused():
-    """Otherwise the requested ablation level would silently not happen (no pixel term, no log)."""
-    with pytest.raises(ValueError, match="pix_share.*pixel"):
-        train.check_config(tiny_aux_cfg("loss.pix_share=0.1", "train.stages=[near, goal]"))
+def test_pix_share_is_a_no_op_without_a_pixel_stage():
+    """base.yaml's share (0.10 since 2026-11-19) must not refuse near/far-only runs: with no pixel
+    stage there is no decoder and no pixel term, exactly as w_pix is then unused."""
+    cfg = tiny_cfg()  # near only, base.yaml's loss block
+    assert cfg["loss"]["pix_share"] == 0.10
+    train.check_config(cfg)
+    model, opt = _built(cfg)
+    losses = train.train_step(model, opt, random_frames(cfg), cfg, step=0)
+    assert model.pixel is None
+    assert not {"loss/pix", "w_pix_eff", "pix_share"} & set(losses)
+
+
+def test_base_default_holds_the_pixel_term_at_ten_percent():
+    """docs/decisions/2026-11-19-pixel-share-default.md. w_pix stays as the null fallback."""
+    loss = load_config(CONFIGS / "base.yaml")["loss"]
+    assert loss["pix_share"] == 0.10
+    assert loss["w_pix"] == 0.05
+
+
+@pytest.mark.parametrize("name", ["exp_headline", "exp_headline_48k"])
+def test_configs_with_finished_runs_keep_the_fixed_pixel_weight(name):
+    """Their runs trained at w_pix 0.05 (pixel share <= 3e-5); re-running them must reproduce
+    that, whatever base.yaml defaults to."""
+    loss = load_config(CONFIGS / f"{name}.yaml")["loss"]
+    assert loss["pix_share"] is None
+    assert loss["w_pix"] == 0.05
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS.glob("*.yaml")), ids=lambda p: p.stem)
+def test_every_committed_config_passes_check_config(path):
+    """A base.yaml default must never make an existing experiment config unrunnable. Synthetic
+    data, because the episode datasets aren't built in the test artifact root."""
+    train.check_config(load_config(path, ["data.source=synthetic"]))
 
 
 @pytest.mark.parametrize(

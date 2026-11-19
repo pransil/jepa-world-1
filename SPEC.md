@@ -160,7 +160,8 @@ Starting weights (placeholders, tune with ablations):
 
 - w_k = 1.0 for all horizons.
 - w_goal = 0.5.
-- w_pix = 0.05.
+- w_pix = 0.05. Since 2026-11-19 the default instead sets w_pix each step so that w_pix · L_pix is 10% of
+  the rest of L (`loss.pix_share`; docs/decisions/2026-11-19-pixel-share-default.md).
 
 Log every term separately, every step.
 

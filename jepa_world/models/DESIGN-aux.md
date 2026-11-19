@@ -38,7 +38,7 @@ batch ─┬─ frames ─► WorldModel ─► JEPA.forward (context L1..L3, he
        │                          ├─ goal head  (context L3 [, L2]) ─► μ, logvar ─┼─► loss/goal/k, goalerr/k, goalratio/k, loss/goal
        │                          └─ pixel dec. (context L1, L2, L3) ─► frame ────┼─► loss/pix  vs frames[:, C] (t+1)
        └─ ball_pos (a label, never a model input) ─► displacement_targets ───────┘
-loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/pix [pixel stage started]
+loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix_eff·loss/pix [pixel stage started]
 ```
 
 ### Logged terms (every step, for every BUILT aux head)
@@ -94,12 +94,17 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
 - **Sigmoid output**, so the prediction is in [0, 1], the same range as the target. A clamp lost
   because it has no gradient outside the range.
 - **`pixel_l1` is the mean over every element**: mean absolute error in [0, 1] intensity units. So
-  w_pix · L_pix ≤ w_pix (0.05 at the SPEC weight). `test_pixel_term_does_not_dominate_the_logged_total`
-  holds it under 10% of `loss/total` over a short run.
+  a fixed weight bounds the term, w_pix · L_pix ≤ w_pix (`test_fixed_pixel_weight_term_is_bounded_by_w_pix`).
+  At base.yaml's 10% share the term is 0.10/1.10 of `loss/total`
+  (`test_pixel_term_does_not_dominate_the_logged_total`).
 - **Pixel weight: fixed, or a target share** (`loss.pix_share`, M7).
   [pixel-ablation-target-share](../../docs/decisions/2026-11-18-pixel-ablation-target-share.md)
-  - **null** (the default) keeps `w_pix`, through exactly the old expression. It is bitwise the
+  - **null** keeps `w_pix`, through exactly the old expression. It is bitwise the
     pre-2026-11-18 loss and gradients (`test_pix_share_null_is_bitwise_the_fixed_weight`).
+    It was the default until 2026-11-19. Since then base.yaml sets **0.10**, and the configs
+    whose runs predate that pin null
+    ([pixel-share-default](../../docs/decisions/2026-11-19-pixel-share-default.md)). Without a pixel stage the share is a
+    no-op, like w_pix: there is no decoder.
   - **A share s** sets `w_eff = s·|L_rest| / max(L_pix, 1e-6)` (`pix_share_weight`), where
     L_rest is `loss/total` without the pixel term.
   - **Both sides are detached**, so the gradient flows only through L_pix, and the rest keeps its
@@ -152,12 +157,14 @@ loss/total = JEPA total + w_goal·loss/goal [goal stage started] + w_pix·loss/p
   head runs and is logged every step. Before its `stage_start`, it runs under `no_grad` and stays
   out of `loss/total`. Once active, its levels keep autograd even if no active horizon head reads
   them. For example, the goal head trains the L3 encoder stage while only near heads are active.
-  The start steps and the head sizes are **proposed placeholders**:
+  The start steps and the head sizes are placeholders, **accepted by the user on 2026-11-18**:
   [m5-stage-starts-and-aux-sizes](../../docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md).
 - **Active aux losses train the context encoder.** This is deliberate, and it is the point of
   the heads. SPEC §4.7's pixel decoder exists "to keep the scene grounded", which only a gradient
   into the embedding can do. "It must not drive the embedding toward blur" is handled by its low
-  weight (w_pix = 0.05) and by keeping it a separate, logged term, not by detaching it. M7's
+  weight and by keeping it a separate, logged term, not by detaching it. (The weight was w_pix = 0.05
+  until 2026-11-19, and is a 10% value share since then. M7's ablation found that 10% doesn't
+  hurt k = 20: experiments/2026-11-18-pixel-share-ablation.md.) M7's
   "pixel weight at 0, low, and high" ablation and the
   [skip decision](../../docs/decisions/2026-11-17-skip-connections-meaning.md) ("reconstruction
   must pass through L3"; L3 probe as the deciding metric) both assume this gradient. The goal

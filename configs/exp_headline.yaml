@@ -3,7 +3,13 @@
 # 2026-11-18, docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md). Only the length is set here:
 # 24000 steps, so the full model trains for 18000 steps after pixel joins.
 # Seeds: 0 (this file) and 1 (--set seed=1). experiments/2026-11-17-headline-full-model.md
+# The pixel weight is pinned to the fixed w_pix (0.05) these runs trained with: base.yaml's default
+# became a 10% share on 2026-11-19 (docs/decisions/2026-11-19-pixel-share-default.md). So this file,
+# exp_headline_48k.yaml, and the m7_pixel_share* files (which set their own share) keep their meaning.
 base: base.yaml
 
 train:
   steps: 24000
+
+loss:
+  pix_share: null

@@ -22,10 +22,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
-import jepa_world  # noqa: E402,F401  (MPS fallback env before torch)
 import torch  # noqa: E402
 from tiny import random_frames, tiny_cfg, tiny_far_cfg  # noqa: E402
 
+import jepa_world  # noqa: E402,F401  (MPS fallback env before torch)
 from jepa_world import train  # noqa: E402
 from jepa_world.models import jepa as current  # noqa: E402
 
@@ -33,7 +33,10 @@ from jepa_world.models import jepa as current  # noqa: E402
 def module_at(ref: str):
     src = subprocess.run(
         ["git", "show", f"{ref}:jepa_world/models/jepa.py"],
-        cwd=ROOT, check=True, capture_output=True, text=True,
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     path = Path(tempfile.mkdtemp()) / "jepa_at_ref.py"
     path.write_text(src)

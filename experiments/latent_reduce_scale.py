@@ -22,8 +22,15 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-WINDOWS = [(1501, 2000), (2001, 2500), (3501, 4000), (4001, 4500), (6001, 6500), (11501, 12000),
-           (23501, 24000)]
+WINDOWS = [
+    (1501, 2000),
+    (2001, 2500),
+    (3501, 4000),
+    (4001, 4500),
+    (6001, 6500),
+    (11501, 12000),
+    (23501, 24000),
+]
 
 
 def table(run: Path) -> list[str]:
@@ -35,8 +42,11 @@ def table(run: Path) -> list[str]:
     level = {int(k): v for k, v in m["head_level"].items()}
     has_goal = "goal" in cfg["train"]["stages"]
     rows = [json.loads(s) for s in (run / "metrics.jsonl").read_text().splitlines()]
-    out = [run.name, f"{'steps':>13} {'lat sum':>9} {'lat mean':>9} {'C_eff':>6} {'near/far sum':>12} "
-           f"{'near/far mean':>13} {'goal/lat sum':>12} {'goal/lat mean':>13}"]
+    out = [
+        run.name,
+        f"{'steps':>13} {'lat sum':>9} {'lat mean':>9} {'C_eff':>6} {'near/far sum':>12} "
+        f"{'near/far mean':>13} {'goal/lat sum':>12} {'goal/lat mean':>13}",
+    ]
     for a, b in WINDOWS:
         w = [r for r in rows if a <= r["step"] <= b]
         if not w:
@@ -68,8 +78,10 @@ def table(run: Path) -> list[str]:
             return f"{np.mean(x):.3g}" if x else "-"
 
         c_eff = np.mean(s_tot) / np.mean(m_tot)
-        out.append(f"{a:>6}-{b:<6} {f(s_tot):>9} {f(m_tot):>9} {c_eff:6.1f} {f(nf_s):>12} "
-                   f"{f(nf_m):>13} {f(g_s):>12} {f(g_m):>13}")
+        out.append(
+            f"{a:>6}-{b:<6} {f(s_tot):>9} {f(m_tot):>9} {c_eff:6.1f} {f(nf_s):>12} "
+            f"{f(nf_m):>13} {f(g_s):>12} {f(g_m):>13}"
+        )
     return out
 
 

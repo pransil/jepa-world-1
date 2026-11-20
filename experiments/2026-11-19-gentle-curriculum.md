@@ -16,16 +16,23 @@ The user approved it (relayed by the orchestrator, 2026-11-19).
   - at k = 5, smooth rolling is 42% of windows but only 4% of the const-velocity error, while
     bounces are 35% of windows and 78% of it;
   - at k = 20, bounces are 50% of windows and 85% of the error.
-- **Where the model is weak.** m6's first per-regime read of the reference (G; test, s0, and s1
-  agrees) found the model weakest in the easy regime:
-  - In smooth-rolling windows its k = 1 error is 1.05 cm. That is 1.8× const-velocity with the
-    true velocity, and 11× the mean-parameter simulator; it stays 5.8–8× the simulator at every
-    k.
-  - In bounce windows it beats const-velocity at every k.
+- **Where the model's error is** (m6's G read of the reference,
+  [error by motion regime](2026-11-19-error-by-motion-regime.md), PR #35):
+  - In smooth rolling the goal head is about at par with the fair, context-only
+    finite-difference const-velocity baseline at k = 1 (0.99 for s0, 1.09 for s1; 1.05 cm, about
+    0.2 px). It beats that baseline from k = 2 on (0.65 at k = 2, 0.36 at k = 5, 0.24 at k = 20).
+  - The baselines with the simulator's exact velocity and spin do better in rolling. They are not
+    fair comparisons: the model sees only frames.
+  - The error lives in bounces and flight. Bounce windows hold 54% of the summed goal error at
+    k = 5 and 71% at k = 20, and airborne windows hold 69% at k = 1.
 
-The full world mixes all regimes from step 1. The premise is that a model which first learns
-smooth rolling, where the future is predictable, gets a better start, and that the easy regime
-isn't mastered now.
+The full world mixes all regimes from step 1. So the premise is a transfer question: does
+learning smooth rolling first, where the future is predictable, give the model a better start for
+bounces and flight, where its error is?
+
+*(Background corrected 2026-11-20, after seed 0 started. The first version quoted the rolling
+error against baselines that are given the exact velocity, which overstated how weak the model is
+in rolling. The rules below are unchanged.)*
 
 ## What runs
 

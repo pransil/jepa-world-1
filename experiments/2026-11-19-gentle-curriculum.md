@@ -1,6 +1,6 @@
 # Gentle-world curriculum (H)
 
-**Status:** seed 0 scored (provisional, one seed); seed 1 running. The rules below were committed before any curriculum run.
+**Status:** done, two seeds: **refuted** (worse at k = 20, within at every other k). The rules below were committed before any curriculum run.
 
 ## Question
 
@@ -193,138 +193,200 @@ against the reference's same window with the B rule. There is no prediction.
 
 ## Results
 
-### Seed 0: provisional, one seed (seed 1 is running)
+**Verdict: REFUTED, on two seeds.** The pre-registered rule is "worse at k = 20". At matched total
+steps (48k), the gentle-world curriculum is **worse at k = 20** on the full-world test set (both
+seeds above both reference seeds, +4.5%), and **within at every other k**. It does not improve the
+smooth-rolling rows. They are worse at 6 of 7 k.
 
-**Runs and code:**
-- **Run:** `20261120T075255Z-worktree-wt-exp-gentle-curriculum-gentle-curriculum-s0-ea4fa1`, trained
-  at 1cd2d43 (clean tree, MPS, 48,000 steps).
-- **Its eval files** are both at ad3b9a4 (clean tree):
-  - eval: `eval/20261120T094709Z-test-dev-8c79ad.json`
-  - regimes: `eval/regimes/20261120T094833Z-regimes-test-e1c19f.json`
-- **The training code is the same at both shas.** From 1cd2d43 to ad3b9a4, nothing changes in
-  `train.py`, `models/`, `data/` or `configs/`. ad3b9a4 adds main's regimes and calibration
-  modules and an `eval.py` refactor: helpers extracted, a pixel output off by default, and
-  `write_new`.
-- **The reference's 48k evals ran at 6fd7059,** before that refactor. The windows, the goal
-  outputs and the ratios are computed the same way, so the evals compare like for like.
-- **The reference's step-36,000 evals** (D) ran at ad3b9a4:
-  - s0: `eval/20261120T095228Z-test-dev-d1bdc2.json`
-  - s1: `eval/20261120T095352Z-test-dev-57e49d.json`
+### Runs and code
+
+| | seed 0 | seed 1 |
+|---|---|---|
+| run | `20261120T075255Z-worktree-wt-exp-gentle-curriculum-gentle-curriculum-s0-ea4fa1` | `20261120T095402Z-worktree-wt-exp-gentle-curriculum-gentle-curriculum-s1-f8bb0b` |
+| trained at | 1cd2d43, clean tree, MPS | ad3b9a4, clean tree, MPS (`--set seed=1`, as the reference's s1) |
+| eval (test + dev) | `eval/20261120T094709Z-test-dev-8c79ad.json` (ad3b9a4) | `eval/20261120T114525Z-test-dev-a2352e.json` (38473a9) |
+| regimes (test) | `eval/regimes/20261120T094833Z-regimes-test-e1c19f.json` (ad3b9a4) | `eval/regimes/20261120T114645Z-regimes-test-7aa2fc.json` (38473a9) |
+
+- **The training code is the same at both training shas.** From 1cd2d43 to ad3b9a4, nothing
+  changes in `train.py`, `models/`, `data/` or `configs/`. 38473a9 differs from ad3b9a4 only in
+  this note.
+- **The evals compare like for like.** The reference's 48k evals ran at 6fd7059, before an
+  `eval.py` refactor from main: helpers extracted, a pixel output off by default, and
+  `write_new`. The windows, goal outputs and ratios are computed the same way.
+- **The reference's step-36,000 evals** (D) are `eval/20261120T095228Z-test-dev-d1bdc2.json` (s0)
+  and `eval/20261120T095352Z-test-dev-57e49d.json` (s1), both at ad3b9a4.
+- **GPU time:** about 3.7 h for the two trainings (1h47 each) and their evals, plus 3 min for the
+  step-36k evals. That is within the ~4 GPU-h budget.
 - **Every table below** is printed by:
-  `uv run python experiments/gentle_curriculum_check.py --arm <H s0> --ref <ref s0> --ref <ref s1> --ref36`
+  `uv run python experiments/gentle_curriculum_check.py --arm <H s0> --arm <H s1> --ref <ref s0> --ref <ref s1> --ref36`
 
-**A. Gates: PASS.**
+### A. Gates: PASS, both seeds
+
 - No NaN or inf in any logged term.
-- After step 2000, emb_std's lowest values are 0.76, 0.97 and 0.91 (L1, L2, L3), the step-2000
-  values themselves. Over the last 1000 steps it is 1.73, 1.93 and 1.87.
-- Far logvar's last-500-step mean is −0.36 at k10 and −0.07 at k20. Its lowest value after step
-  2000 is −3.50.
+- emb_std's lowest value after step 2000 is the step-2000 value itself, in both seeds:
+  - s0: 0.76, 0.97 and 0.91 (L1, L2, L3);
+  - s1: 0.70, 0.97 and 0.96.
+- Over the last 1000 steps, emb_std is 1.69–1.93.
+- Far logvar's last-500-step mean is −0.36 / −0.38 (k10) and −0.07 / −0.07 (k20). Its lowest
+  value after step 2000 is −3.50 / −3.28.
 - pix_share stays within 1.6e-8 of 0.10, and w_goal_eff = 0.5/256 at every step after 4000.
 
-**The switch** (reported, not gated):
-- **Config:** the config check passes (steps 12000; the merged gentle sim equals
-  `configs/world_gentle.yaml`'s).
-- **loss/total:** 3.04 over steps 11,901–12,000, then 7.63 over 12,001–12,100. The reference has
-  6.73 over the same steps.
-- **Near relerr k1–5 mean:** 0.090, then 0.242, against the reference's 0.218 over the same
-  steps. It is within 10% of the reference's from the next window (12,101–12,200) on (the
-  amended measure).
-- **Far relerr k20** takes longer to recover: 0.83 over steps 12,001–13,000, against the
-  reference's 0.64 / 0.67. It is level with it by steps 17,001–18,000 (0.60 against 0.60 / 0.61).
+**The switch** (reported, not gated). Both seeds' configs pass the check: steps 12000, and the
+merged gentle sim equals `configs/world_gentle.yaml`'s.
 
-**B. Deciding: goal head, full-world TEST, ratio to persistence at step 48,000** (provisional):
+| | s0 | s1 | reference s0, same steps |
+|---|---|---|---|
+| loss/total, 11,901–12,000 → 12,001–12,100 | 3.04 → 7.63 | 3.50 → 7.57 | 6.73 |
+| near relerr k1–5 mean, same windows | 0.090 → 0.242 | 0.090 → 0.240 | 0.218 |
+| far relerr k20, 12,001–13,000 | 0.83 | 0.80 | 0.64 / 0.67 |
+| far relerr k20, 17,001–18,000 | 0.60 | 0.62 | 0.60 / 0.61 |
 
-| k | reference s0 / s1 | H s0 | change vs ref mean | verdict |
-|---:|---|---:|---:|---|
-| 1 | 0.2111 / 0.2310 | 0.2551 | +15.4% | worse |
-| 2 | 0.2055 / 0.2184 | 0.2318 | +9.4% | worse |
-| 3 | 0.2087 / 0.2208 | 0.2244 | +4.5% | worse |
-| 4 | 0.2122 / 0.2234 | 0.2214 | +1.7% | within |
-| 5 | 0.2184 / 0.2277 | 0.2243 | +0.6% | within |
-| 10 | 0.2471 / 0.2506 | 0.2444 | −1.8% | better |
-| 20 | 0.3288 / 0.3312 | 0.3371 | +2.1% | worse |
+- Near relerr is within 10% of the reference's from the next 100-step window (12,101) on, in both
+  seeds. This is the amended measure.
+- Far relerr k20 takes about 5k steps to come level.
 
-- **Seed-1 trigger: fired on both conditions.**
-  - At k20, |s0 − ref mean| = 0.0071, against a spread of 0.0023.
-  - On the k1–5 mean (0.2314), |s0 − ref mean| = 0.0137, against a spread of 0.0131.
-  - Seed 1 is `20261120T095402Z-worktree-wt-exp-gentle-curriculum-gentle-curriculum-s1-f8bb0b`,
-    started at ad3b9a4 (clean tree).
-- **Hypothesis, provisional: REFUTED** (worse at k = 20). My prediction was mixed (better at
-  k1–5); it was wrong at k1–3 too.
+### B. Deciding: goal head, full-world TEST, ratio to persistence at step 48,000
 
-**B2. Per regime, TEST, goal ratio to persistence** (provisional; `share` is the regime's share of
-the windows at that k):
+| k | reference s0 / s1 | H s0 / s1 | change (mean) | verdict |
+|---:|---|---|---:|---|
+| 1 | 0.2111 / 0.2310 | 0.2551 / 0.2286 | +9.4% | within |
+| 2 | 0.2055 / 0.2184 | 0.2318 / 0.2085 | +3.9% | within |
+| 3 | 0.2087 / 0.2208 | 0.2244 / 0.2136 | +2.0% | within |
+| 4 | 0.2122 / 0.2234 | 0.2214 / 0.2204 | +1.4% | within |
+| 5 | 0.2184 / 0.2277 | 0.2243 / 0.2296 | +1.7% | within |
+| 10 | 0.2471 / 0.2506 | 0.2444 / 0.2617 | +1.7% | within |
+| 20 | 0.3288 / 0.3312 | 0.3371 / 0.3527 | +4.5% | **worse** |
 
-| k | rolling: ref s0 / s1 → H | airborne: ref → H | bounce: ref → H |
+- **Hypothesis: REFUTED** (worse at k = 20).
+- **My prediction was mixed** (better at k1–5, within or worse at k20). k20 came out as
+  predicted, but k1–5 did not improve.
+- **H's mean is above the reference mean at every k** (+1.4% to +9.4%). Only k = 20 separates
+  from the reference's seed range.
+
+### B2. Per regime, TEST, goal ratio to persistence
+
+| k | rolling: ref s0 / s1 → H s0 / s1 | airborne: ref → H | bounce: ref → H |
 |---:|---|---|---|
-| 1 | 0.122 / 0.135 → 0.209 **worse** | 0.236 / 0.256 → 0.254 within | 0.303 / 0.342 → 0.384 **worse** |
-| 2 | 0.115 / 0.117 → 0.152 **worse** | 0.222 / 0.236 → 0.241 **worse** | 0.290 / 0.316 → 0.321 **worse** |
-| 3 | 0.115 / 0.111 → 0.133 **worse** | 0.219 / 0.234 → 0.230 within | 0.288 / 0.310 → 0.307 within |
-| 4 | 0.116 / 0.109 → 0.124 **worse** | 0.220 / 0.237 → 0.228 within | 0.283 / 0.304 → 0.294 within |
-| 5 | 0.118 / 0.108 → 0.120 **worse** | 0.232 / 0.246 → 0.236 within | 0.280 / 0.300 → 0.291 within |
-| 10 | 0.142 / 0.131 → 0.135 within | 0.276 / 0.272 → 0.268 better | 0.300 / 0.314 → 0.301 within |
-| 20 | 0.215 / 0.210 → 0.225 **worse** | 0.278 / 0.288 → 0.299 **worse** | 0.396 / 0.400 → 0.401 **worse** |
+| 1 | 0.122 / 0.135 → 0.209 / 0.157 **worse** | 0.236 / 0.256 → 0.254 / 0.242 within | 0.303 / 0.342 → 0.384 / 0.339 within |
+| 2 | 0.115 / 0.117 → 0.152 / 0.121 **worse** | 0.222 / 0.236 → 0.241 / 0.222 within | 0.290 / 0.316 → 0.321 / 0.297 within |
+| 3 | 0.115 / 0.111 → 0.133 / 0.115 **worse** | 0.219 / 0.234 → 0.230 / 0.225 within | 0.288 / 0.310 → 0.307 / 0.295 within |
+| 4 | 0.116 / 0.109 → 0.124 / 0.118 **worse** | 0.220 / 0.237 → 0.228 / 0.235 within | 0.283 / 0.304 → 0.294 / 0.290 within |
+| 5 | 0.118 / 0.108 → 0.120 / 0.124 **worse** | 0.232 / 0.246 → 0.236 / 0.251 within | 0.280 / 0.300 → 0.291 / 0.290 within |
+| 10 | 0.142 / 0.131 → 0.135 / 0.152 within | 0.276 / 0.272 → 0.268 / 0.279 within | 0.300 / 0.314 → 0.301 / 0.320 within |
+| 20 | 0.215 / 0.210 → 0.225 / 0.238 **worse** | 0.278 / 0.288 → 0.299 / 0.319 **worse** | 0.396 / 0.400 → 0.401 / 0.417 **worse** |
 
-- **Rolling** is better at 0 of 7 k.
-- **Bounce** is worse at k = 1, 2 and 20.
+- **Rolling** is better at 0 of 7 k and worse at 6.
+- **Bounce** is worse only at k = 20.
 - So "rolling improved without hurting bounces" is **False**.
-- My prediction ("rolling better at most k") was wrong. Rolling is where H loses most: k1 rolling
-  is 0.209 against 0.122 / 0.135. Against the context-only finite-difference const-velocity
-  baseline, H's k1 rolling ratio is 1.69 (the reference's mean is 1.04).
+- **Rolling is the regime where the curriculum loses most.** At k1 in rolling, H's error is 1.48×
+  the context-only finite-difference const-velocity baseline's (mean over seeds), against the
+  reference's 1.04×.
+- **My prediction was wrong here** ("rolling better at most k, bounce within"). The bounce half
+  held except at k20.
 
-**C. Latent relerr, full-world training batches, steps 47,001–48,000** (no prediction). H is
-below both reference seeds at k = 1–5 and k = 20, and within at k = 10:
+### C. Latent relerr, full-world training batches, steps 47,001–48,000 (no prediction)
 
 | k | 1 | 2 | 3 | 4 | 5 | 10 | 20 |
 |---|---|---|---|---|---|---|---|
 | ref s0 / s1 | 0.1376 / 0.1375 | 0.2136 / 0.2114 | 0.2896 / 0.2837 | 0.3509 / 0.3455 | 0.4020 / 0.3966 | 0.5666 / 0.5490 | 0.5532 / 0.5512 |
-| H s0 | 0.1361 | 0.2091 | 0.2802 | 0.3406 | 0.3911 | 0.5636 | 0.5470 |
+| H s0 / s1 | 0.1361 / 0.1365 | 0.2091 / 0.2093 | 0.2802 / 0.2837 | 0.3406 / 0.3438 | 0.3911 / 0.3925 | 0.5636 / 0.5443 | 0.5470 / 0.5645 |
+| verdict | better | better | better | better | better | within | within |
 
-The margins are 1–3%. Each reference value is one seed's mean over 1000 steps.
+- The near latent heads are 1–3% lower in both seeds.
+- So the curriculum does not hurt the encoder's near-horizon latent prediction. If anything it
+  helps.
+- The goal head's test score doesn't follow (B).
 
-**D. Reported without a verdict:**
-- **Matched full-world steps.** The question: is H at 48k (36k full-world steps) better than the
-  reference at 36k?
+### D. Reported without a verdict
 
-  | k | ref @36k s0 / s1 | ref @48k s0 / s1 | H @48k | vs ref@36k | vs ref@48k |
-  |---:|---|---|---:|---|---|
-  | 1 | 0.2361 / 0.3193 | 0.2111 / 0.2310 | 0.2551 | within | worse |
-  | 2 | 0.2203 / 0.2680 | 0.2055 / 0.2184 | 0.2318 | within | worse |
-  | 3 | 0.2217 / 0.2582 | 0.2087 / 0.2208 | 0.2244 | within | worse |
-  | 4 | 0.2264 / 0.2603 | 0.2122 / 0.2234 | 0.2214 | better | within |
-  | 5 | 0.2328 / 0.2677 | 0.2184 / 0.2277 | 0.2243 | better | within |
-  | 10 | 0.2529 / 0.2871 | 0.2471 / 0.2506 | 0.2444 | better | better |
-  | 20 | 0.3444 / 0.3663 | 0.3288 / 0.3312 | 0.3371 | better | worse |
+- **Matched full-world steps.** Does H at 48k (36k full-world steps) beat the reference at 36k?
 
-  By the pre-registered reading:
-  - at k = 20 the gentle phase helps, but less than 12k more full-world steps;
-  - at k = 10 it is worth more;
-  - at k = 1–3 H is inside the reference's 36k seed range, which is wide (0.236–0.319 at k = 1).
+  | k | ref @36k s0 / s1 | ref @48k s0 / s1 | H @48k s0 / s1 | vs ref@36k | vs ref@48k |
+  |---:|---|---|---|---|---|
+  | 1 | 0.2361 / 0.3193 | 0.2111 / 0.2310 | 0.2551 / 0.2286 | within | within |
+  | 2 | 0.2203 / 0.2680 | 0.2055 / 0.2184 | 0.2318 / 0.2085 | within | within |
+  | 3 | 0.2217 / 0.2582 | 0.2087 / 0.2208 | 0.2244 / 0.2136 | within | within |
+  | 4 | 0.2264 / 0.2603 | 0.2122 / 0.2234 | 0.2214 / 0.2204 | better | within |
+  | 5 | 0.2328 / 0.2677 | 0.2184 / 0.2277 | 0.2243 / 0.2296 | better | within |
+  | 10 | 0.2529 / 0.2871 | 0.2471 / 0.2506 | 0.2444 / 0.2617 | within | within |
+  | 20 | 0.3444 / 0.3663 | 0.3288 / 0.3312 | 0.3371 / 0.3527 | within | worse |
+
+  - At k = 20 the means are:
+    - reference at 36k: 0.355;
+    - H at 48k: 0.345;
+    - reference at 48k: 0.330.
+  - So the 12k gentle steps moved k = 20 by −3.0% against the reference at 36k, inside its seed
+    range. 12k more full-world steps moved it by −7.1%.
+  - That is the pre-registered "between: it helps, but less", with the "helps" not separable from
+    seed spread.
+  - At k = 4–5, H is better than the reference at 36k and level with it at 48k.
+  - The reference's 36k seeds are far apart at k1 (0.236 vs 0.319), so k1–3 can't separate.
 - **Calibration, TEST, joint coverage** (an observation, not a cause):
 
-  | k | 50%: ref s0 / s1 | 50%: H | 90%: ref s0 / s1 | 90%: H |
-  |---:|---|---:|---|---:|
-  | 1 | 0.58 / 0.61 | 0.29 | 0.90 / 0.91 | 0.84 |
-  | 2 | 0.49 / 0.54 | 0.33 | 0.86 / 0.90 | 0.81 |
-  | 3 | 0.47 / 0.53 | 0.38 | 0.83 / 0.88 | 0.83 |
-  | 5 | 0.47 / 0.52 | 0.44 | 0.83 / 0.87 | 0.86 |
-  | 10 | 0.47 / 0.53 | 0.58 | 0.85 / 0.87 | 0.90 |
-  | 20 | 0.44 / 0.56 | 0.65 | 0.83 / 0.88 | 0.92 |
+  | k | 50%: ref s0 / s1 | 50%: H s0 / s1 | 90%: ref s0 / s1 | 90%: H s0 / s1 |
+  |---:|---|---|---|---|
+  | 1 | 0.58 / 0.61 | 0.29 / 0.53 | 0.90 / 0.91 | 0.84 / 0.89 |
+  | 2 | 0.49 / 0.54 | 0.33 / 0.54 | 0.86 / 0.90 | 0.81 / 0.88 |
+  | 5 | 0.47 / 0.52 | 0.44 / 0.50 | 0.83 / 0.87 | 0.86 / 0.87 |
+  | 10 | 0.47 / 0.53 | 0.58 / 0.52 | 0.85 / 0.87 | 0.90 / 0.87 |
+  | 20 | 0.44 / 0.56 | 0.65 / 0.53 | 0.83 / 0.88 | 0.92 / 0.89 |
 
-  - At k = 1–2, H's goal head is overconfident.
-  - At k = 20 it leans the other way.
-- **Dev** (development only) has H above both reference seeds at every k. So dev agrees with test
-  at k1–3 and k20, but not at k10, where test had H better:
-  - k1 0.264 against 0.216 / 0.231;
-  - k10 0.257 against 0.246 / 0.243;
-  - k20 0.340 against 0.330 / 0.319.
-- **Test ratio to const-velocity:** 1.46 at k1 (the reference's mean is 1.27); 0.28 at k20
-  (0.27).
-- **Probes** (pooled pos_cam RMSE): 0.163, against 0.158 / 0.174 (within). The hidden-parameter
-  probes (radius, friction, restitution) are better than both reference seeds. Restitution R²
-  is 0.126, against 0.047 / 0.055.
-- **Goal ratio on training batches,** steps 47,001–48,000:
-  - k1: 0.213, against 0.224 / 0.259;
-  - k20: 0.340, against 0.328 / 0.338.
+  - Seed 0's goal head is overconfident at k1–2, with 50% coverage of 0.29 and 0.33.
+  - Seed 1's isn't (0.53 and 0.54). So it is not a consistent effect of the curriculum.
+- **Dev** (development only), ratio to persistence:
 
-  That is better at k1 on the training batches, but worse at k1 on test.
+  | k | 1 | 2 | 3 | 4 | 5 | 10 | 20 |
+  |---|---|---|---|---|---|---|---|
+  | ref s0 / s1 | 0.216 / 0.231 | 0.212 / 0.217 | 0.215 / 0.218 | 0.216 / 0.221 | 0.220 / 0.224 | 0.246 / 0.243 | 0.330 / 0.319 |
+  | H s0 / s1 | 0.264 / 0.230 | 0.246 / 0.212 | 0.238 / 0.213 | 0.234 / 0.215 | 0.237 / 0.221 | 0.257 / 0.250 | 0.340 / 0.349 |
+
+  Dev agrees with test: H is above both reference seeds at k = 10 and 20, and seed 0 is the high
+  one at k = 1–5.
+- **Test, other baselines.**
+  - Ratio to const-velocity: H's mean is 1.39 at k1 (the reference's mean is 1.27), 0.40 at k5
+    (0.39) and 0.28 at k20 (0.27).
+  - The error in metres at k20 is 0.577 / 0.604.
+- **Probes,** TEST:
+  - Pooled pos_cam RMSE is within at every level.
+  - Friction and restitution are better in both seeds:
+    - restitution R² 0.126 / 0.099, against 0.047 / 0.055;
+    - friction RMSE 0.2687 / 0.2657, against 0.2696 / 0.2700.
+  - Both stay near chance (R² ≤ 0.13), so this is a small shift in a weak probe.
+- **Goal ratio on training batches,** steps 44,001–48,000:
+  - k1: 0.217 / 0.234, against 0.227 / 0.263;
+  - k20: 0.342 / 0.352, against 0.332 / 0.340.
+
+  The k20 deficit on test is already present on the training batches.
+
+### What seed 0 alone said (superseded)
+
+Seed 0 alone read worse at k1–3 as well, with rolling worse and bounce worse at k1, k2 and k20,
+and k1–2 overconfidence. Seed 1 is close to the reference at k1–3 (0.229 / 0.209 / 0.214), so
+those three verdicts became within, and the overconfidence did not repeat. k = 20 is worse in both
+seeds, and rolling is worse in both.
+
+## Conclusion
+
+**Refuted.** On the full-world test set, 12k gentle-world steps followed by 36k full-world steps do
+not beat 48k full-world steps:
+- **k = 20 is worse** in both seeds (0.337 / 0.353 against 0.329 / 0.331).
+- **Every other k is within** the reference's seed range.
+- **The smooth-rolling rows** are worse at 6 of 7 k, which is the opposite of the premise.
+- **Against the reference at 36k** (the same full-world step count), H is better at k4–5 and
+  level elsewhere. So the gentle phase is worth something at the middle horizons, but less than
+  the same number of full-world steps at k = 20.
+- **The latent near heads** come out 1–3% better on training batches. The goal head's test score
+  doesn't follow.
+
+## Next step
+
+No follow-up is proposed from this note. The curriculum stays off (`data.curriculum: null`, the
+default).
+
+The matched-steps table (D) points to the cause of the k = 20 cost: it is mostly the 25% of
+full-world steps the curriculum gives up, not harm from the gentle phase. That is a reading of
+two seeds plus two reference checkpoints, not a test.
+
+If gentle data is revisited, the direct test is 12k gentle steps followed by the full 48k
+full-world steps (60k total), scored against the reference at 48k. That is a new experiment and
+the user's call.

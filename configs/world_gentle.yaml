@@ -1,0 +1,18 @@
+# The gentle world (H, the curriculum experiment): smooth rolling, no ledges, the ball starting on the
+# surface. The full world's ball ranges, camera, contact model and walls are unchanged; only the terrain's
+# relief and slope cap are lower, and it has no ledges. A solid sphere rolls without slipping while
+# tan(slope) <= 3.5 mu, and mu >= 0.1, so max_slope 0.2 leaves a 1.75x margin. Measured with
+# `python -m jepa_world.sim.preview --config configs/world_gentle.yaml` and experiments/gentle_world_stats.py
+# (numbers in jepa_world/sim/DESIGN.md, "The gentle world").
+# Used two ways: to build its datasets (`python -m jepa_world.data.build --config configs/world_gentle.yaml
+# --split train`), and as data.curriculum.sim in configs/exp_gentle_curriculum.yaml, which must name the
+# same overrides (tests/test_train_curriculum.py checks the two give the same dataset).
+base: base.yaml
+
+sim:
+  terrain:
+    relief: [0.5, 1.5]        # full world [0.5, 4.0]; the slope cap below binds on most terrains anyway
+    max_slope: 0.2            # full world 0.8; below 3.5 x min friction (0.35): no sustained slip
+    ledges: [0, 0]            # full world [2, 5]
+  ball:
+    drop: [0.0, 0.0]          # full world [0.0, 2.0]: the ball starts on the surface (see DESIGN for the start settle)

@@ -13,6 +13,7 @@ from __future__ import annotations
 # `python -m jepa_world.train` imports the jepa_world package (which sets
 # PYTORCH_ENABLE_MPS_FALLBACK) before this module, so before torch.
 import argparse
+import itertools
 import json
 import sys
 from collections.abc import Iterator, Mapping
@@ -31,8 +32,9 @@ from jepa_world.models.world import (
     WorldModel,
     check_pix_share,
     compute_world_losses,
+    loss_term_names,
 )
-from jepa_world.utils.config import load_config
+from jepa_world.utils.config import deep_merge, load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
 from jepa_world.utils.paths import new_run_dir
@@ -125,9 +127,87 @@ def needs_gt(cfg: dict) -> bool:
     return "goal" in cfg["train"]["stages"]  # only the goal loss needs a label beyond the frames
 
 
+# sim keys a curriculum world must share with the run's: they fix the batch contract (frame size,
+# episode length, time per frame) or name the generator. A curriculum world with other frames
+# would fail only inside run(), after the run dir and the GPU lock.
+CURRICULUM_FIXED_SIM = ("fps", "episode_frames", "frame_size", "generator_version")
+
+
+def _kind(v) -> tuple:
+    """What an override must keep: a section, a list of the same length, or a value of the same
+    type (bool is not a number here)."""
+    if isinstance(v, dict):
+        return ("section",)
+    if isinstance(v, list):
+        return ("list", len(v))
+    if isinstance(v, bool):
+        return ("bool",)
+    if isinstance(v, int | float):
+        return ("number",)
+    return (type(v).__name__,)
+
+
+def _check_sim_overrides(sim: dict, over: dict, path: str) -> None:
+    """Every key in `over` names an existing key of `sim`, and keeps its kind (`_kind`): a typo or
+    a range given as a number must fail, not build a dataset of a world nobody asked for. So a
+    curriculum can't add or drop a section that is off when absent (sim.obstacles):
+    jepa_world/data/DESIGN.md, "Curriculum"."""
+    for k, v in over.items():
+        if k not in sim:
+            raise KeyError(f"{path}.{k}: not a sim key (known: {sorted(sim)})")
+        if _kind(v) != _kind(sim[k]):
+            raise ValueError(
+                f"{path}.{k}: {v!r} must keep the run's kind {_kind(sim[k])} (got {_kind(v)})"
+            )
+        if isinstance(v, dict):
+            _check_sim_overrides(sim[k], v, f"{path}.{k}")
+
+
+def check_curriculum(cfg: dict) -> None:
+    """data.curriculum: null, or exactly {steps, sim}. steps is an int in (0, train.steps), so
+    both worlds train; sim is a non-empty set of overrides of existing sim keys, none of them in
+    CURRICULUM_FIXED_SIM; the source is episodes (a synthetic batch has no world). The split it
+    reads is data.split, checked by _require_built_source like the run's own."""
+    cur = cfg["data"].get("curriculum")
+    if cur is None:
+        return
+    if not isinstance(cur, dict) or set(cur) != {"steps", "sim"}:
+        raise ValueError(f"data.curriculum must be null or exactly {{steps, sim}}, got {cur!r}")
+    steps, total = cur["steps"], cfg["train"]["steps"]
+    if type(steps) is not int or not 0 < steps < total:
+        raise ValueError(
+            f"data.curriculum.steps must be an int in (0, train.steps={total}), got {steps!r}"
+        )
+    if not isinstance(cur["sim"], dict) or not cur["sim"]:
+        raise ValueError(f"data.curriculum.sim must be a non-empty mapping, got {cur['sim']!r}")
+    fixed = [k for k in CURRICULUM_FIXED_SIM if k in cur["sim"]]
+    if fixed:
+        raise ValueError(
+            f"data.curriculum.sim may not change {fixed}: both worlds must give the same batches "
+            "(frame size, episode length, time per frame) from the same generator"
+        )
+    _check_sim_overrides(cfg["sim"], cur["sim"], "data.curriculum.sim")
+    if cfg["data"]["source"] != "episodes":
+        raise ValueError(
+            f"data.curriculum needs data.source=episodes (got {cfg['data']['source']!r}): "
+            "it switches between two simulated worlds"
+        )
+
+
+def curriculum_cfg(cfg: dict) -> dict | None:
+    """The config of the curriculum's world: cfg with data.curriculum.sim merged onto sim, and no
+    curriculum of its own. None without a curriculum. It doesn't validate: check_config and
+    make_batches run check_curriculum first."""
+    if cfg["data"].get("curriculum") is None:
+        return None
+    phase = deep_merge(cfg, {"sim": cfg["data"]["curriculum"]["sim"]})
+    phase["data"]["curriculum"] = None
+    return phase
+
+
 def _require_built_source(cfg: dict) -> None:
-    """'episodes' needs data.split to be dev or train (never test) and built for this config
-    (FileNotFoundError names the command)."""
+    """'episodes' needs data.split to be dev or train (never test) and built for this config, and
+    for the curriculum's world if there is one (FileNotFoundError names the command)."""
     source = cfg["data"]["source"]
     if source == "episodes":
         split = cfg["data"]["split"]
@@ -137,6 +217,16 @@ def _require_built_source(cfg: dict) -> None:
                 "terrains are held out for evaluation (SPEC §3.5, §7.3)"
             )
         require_split(cfg, split)
+        phase = curriculum_cfg(cfg)
+        if phase is not None:
+            try:
+                require_split(phase, split)
+            except FileNotFoundError as e:
+                over = cfg["data"]["curriculum"]["sim"]
+                raise FileNotFoundError(
+                    f"data.curriculum's world is not built. {e}\n<your config> here is one whose "
+                    f"sim is this run's sim with data.curriculum.sim merged: {over}"
+                ) from None
     elif source != "synthetic":
         raise ValueError(f"data.source={source!r}: expected 'episodes' or 'synthetic'")
 
@@ -173,6 +263,7 @@ def check_config(cfg: dict) -> list[int]:
     """Everything a training run needs, checked once, before any run dir exists.
     Returns the horizons that get heads."""
     horizons = model_horizons(cfg)
+    check_curriculum(cfg)
     _require_built_source(cfg)
     if cfg["train"]["optimizer"] != "adamw":
         raise ValueError(f"train.optimizer={cfg['train']['optimizer']!r}: only 'adamw' exists")
@@ -182,6 +273,10 @@ def check_config(cfg: dict) -> list[int]:
             "lower-precision path must be built and tested explicitly first (SPEC §6)"
         )
     _check_stage_start(cfg, horizons)
+    for key in ("grad_norm_every", "copy_every"):
+        v = cfg["train"].get(key, 0)
+        if type(v) is not int or v < 0:
+            raise ValueError(f"train.{key} must be an int >= 0 (0 = off), got {v!r}")
     latent_reduce(cfg["loss"])  # fails before any run dir; the loss checks again per call
     check_pix_share(cfg["loss"])  # a no-op without a pixel stage, like w_pix: base.yaml sets one
     return horizons
@@ -200,6 +295,69 @@ def build_optimizer(model: WorldModel, cfg: dict) -> torch.optim.Optimizer:
     )
 
 
+DIAGNOSTIC_PREFIXES = ("relerr/copy/", "gradnorm/")  # columns logged only on their steps
+
+
+def diagnostic_keys(model: WorldModel, cfg: dict) -> list[str]:
+    """Every diagnostic column a run can log (models/DESIGN.md, "Diagnostics"). Each is written
+    only on the steps it is measured: relerr/copy/k<k> (and relerr/copy/td/k<k>) every
+    train.copy_every steps; gradnorm/enc/<term>/<level> every train.grad_norm_every steps, for
+    each term in loss/total at that step, plus gradnorm/enc/total/<level>."""
+    t, keys = cfg["train"], []
+    if t.get("copy_every", 0):
+        keys += [f"relerr/copy/k{k}" for k in model.horizons]
+        keys += [f"relerr/copy/td/k{k}" for k in model.td_level]
+    if t.get("grad_norm_every", 0):
+        names = [*loss_term_names(model, cfg["loss"]), "total"]
+        keys += [f"gradnorm/enc/{n}/{lv}" for n in names for lv in model.context_encoder.names]
+    return keys
+
+
+def _encoder_stage_params(model: WorldModel) -> list[list[torch.nn.Parameter]]:
+    """The context encoder's parameters, stage by stage (stage i makes level names[i]). Refuses an
+    encoder with parameters outside its stages: the norms would be credited to the wrong level."""
+    enc = model.context_encoder
+    stages = [list(st.parameters()) for st in enc.stages]
+    if sum(map(len, stages)) != len(list(enc.parameters())):
+        raise RuntimeError("context encoder has parameters outside its stages: update the norms")
+    return stages
+
+
+def _stage_grad_norms(
+    model: WorldModel, stages: list[list[torch.nn.Parameter]], grads, tag: str
+) -> dict[str, torch.Tensor]:
+    """{gradnorm/enc/<tag>/<level>: L2 norm of that stage's gradients}, from `grads` listed in the
+    order of `stages`. None (no path to the stage) counts as 0."""
+    out, i = {}, 0
+    zero = stages[0][0].new_zeros(())
+    for lv, ps in zip(model.context_encoder.names, stages, strict=True):
+        sq = [g.pow(2).sum() for g in grads[i : i + len(ps)] if g is not None]
+        out[f"gradnorm/enc/{tag}/{lv}"] = torch.stack(sq).sum().sqrt() if sq else zero
+        i += len(ps)
+    return out
+
+
+def encoder_grad_norms(
+    model: WorldModel, terms: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """How hard each weighted term of loss/total pulls on the context encoder, per encoder level:
+    the norm of d(term)/d(stage parameters). One autograd.grad per term, keeping the graph for the
+    step's own backward. It writes no .grad, so the step is unchanged."""
+    stages = _encoder_stage_params(model)
+    params = [p for ps in stages for p in ps]
+    out = {}
+    for name, term in terms.items():
+        grads = torch.autograd.grad(term, params, retain_graph=True, allow_unused=True)
+        out.update(_stage_grad_norms(model, stages, grads, name))
+    return out
+
+
+def _due(every: int, step: int | None) -> bool:
+    """A diagnostic runs when `step` (steps completed) is a multiple of its interval. step=None
+    (a step outside a run: bench, tests) runs none, so it is timed as training runs."""
+    return every > 0 and step is not None and step % every == 0
+
+
 def train_step(
     model: WorldModel,
     opt: torch.optim.Optimizer,
@@ -211,32 +369,81 @@ def train_step(
     `batch` is a frames tensor, or a with_gt dict ({"frames", "ball_pos", ...}; the goal stage
     needs it). `step` (steps completed before this one) selects the active stages via
     train.stage_start; None means every built stage.
+    The diagnostics (diagnostic_keys) are added on the steps they are due (_due). They change no
+    parameter: the per-term gradients come from autograd.grad before the backward, the total's
+    from .grad after it, and the copy baseline is a no-grad target pass.
     Returns every term detached, still on the device (no host sync here)."""
     model.train()
     active = active_horizons(cfg, model.horizons, step)
     aux = [s for s in active_aux(cfg, step) if s in model.aux_stages]
-    losses = compute_world_losses(model, batch, cfg["loss"], active=active, aux_active=aux)
+    grads_due = _due(cfg["train"].get("grad_norm_every", 0), step)
+    terms: dict[str, torch.Tensor] | None = {} if grads_due else None
+    losses = compute_world_losses(
+        model,
+        batch,
+        cfg["loss"],
+        active=active,
+        aux_active=aux,
+        terms=terms,
+        copy_baseline=_due(cfg["train"].get("copy_every", 0), step),
+    )
+    diag: dict[str, torch.Tensor] = {}
+    if grads_due:
+        unknown = set(terms) - set(loss_term_names(model, cfg["loss"]))
+        if unknown:  # a new loss term must be named in loss_term_names, or its column is lost
+            raise RuntimeError(f"loss/total has terms {sorted(unknown)} that loss_term_names lacks")
+        diag = encoder_grad_norms(model, terms)
     opt.zero_grad(set_to_none=True)
     losses["loss/total"].backward()
+    if grads_due:
+        stages = _encoder_stage_params(model)
+        grads = [p.grad for ps in stages for p in ps]
+        diag.update(_stage_grad_norms(model, stages, grads, "total"))
     opt.step()
     model.ema_update(cfg["model"]["ema_momentum"])
-    return {k: v.detach() for k, v in losses.items()}
+    return {k: v.detach() for k, v in {**losses, **diag}.items()}
 
 
 def make_batches(cfg: dict, horizons: list[int]) -> Iterator[Batch]:
     """Endless CPU batches, seeded from cfg['seed']: frames (B, C + k_max, 3, S, S) in the M3
-    layout, or, when train.stages has goal, {"frames", "ball_pos" (B, C + k_max, 2)}."""
+    layout, or, when train.stages has goal, {"frames", "ball_pos" (B, C + k_max, 2)}.
+
+    With data.curriculum, the first curriculum.steps batches come from the curriculum's world,
+    then the run's own world from its first batch: each world has its own sampler, both seeded
+    from cfg['seed']. Both splits load here, before the GPU lock."""
+    check_curriculum(cfg)
     _require_built_source(cfg)
-    if cfg["data"]["source"] == "episodes":
+    if cfg["data"]["source"] == "synthetic":
+        return _synthetic_batches(cfg, horizons)
+    phase = curriculum_cfg(cfg)
+    if phase is None:
         return _episode_batches(cfg, horizons)
-    return _synthetic_batches(cfg, horizons)
+    first = _episode_batches(phase, horizons)
+    steps = cfg["data"]["curriculum"]["steps"]
+    return itertools.chain(itertools.islice(first, steps), _episode_batches(cfg, horizons))
 
 
-def _flush(rows: list[tuple[int, torch.Tensor]], keys: list[str], f, writer) -> None:
-    """One host sync for a block of steps; each step still gets its own line."""
+def _flush(
+    rows: list[tuple[int, torch.Tensor]],
+    keys: list[str],
+    f,
+    writer,
+    diag_rows: list[tuple[int, list[str], torch.Tensor]] | None = None,
+) -> None:
+    """One host sync for a block of steps (two with diagnostics); each step still gets its own
+    line. `diag_rows` (step, names, values) are merged into their step's line: a diagnostic column
+    appears only on the steps it was measured."""
+    extra: dict[int, dict[str, float]] = {}
+    if diag_rows:
+        flat = torch.cat([v for _, _, v in diag_rows]).cpu().tolist()
+        i = 0
+        for step, names, _ in diag_rows:
+            extra[step] = dict(zip(names, flat[i : i + len(names)], strict=True))
+            i += len(names)
+        diag_rows.clear()
     values = torch.stack([v for _, v in rows]).cpu().tolist()
     for (step, _), vals in zip(rows, values, strict=True):
-        rec = {"step": step, **dict(zip(keys, vals, strict=True))}
+        rec = {"step": step, **dict(zip(keys, vals, strict=True)), **extra.get(step, {})}
         f.write(json.dumps(rec) + "\n")
         for k, v in rec.items():
             if k != "step":
@@ -268,7 +475,8 @@ def run(
     device: torch.device | None = None,
 ) -> dict[str, float]:
     """Train for cfg['train']['steps'] steps, logging every term of every step to
-    run_dir/metrics.jsonl and TensorBoard. Returns the last step's terms.
+    run_dir/metrics.jsonl and TensorBoard (diagnostics only on the steps they are measured).
+    Returns the last step's terms, without diagnostics.
 
     If a step raises, the steps buffered since the last flush are still written before the
     exception propagates, because those are the steps that explain the failure."""
@@ -285,6 +493,8 @@ def run(
     steps, log_every, ckpt_every = t["steps"], t["log_every"], t["ckpt_every"]
     keys: list[str] = []
     rows: list[tuple[int, torch.Tensor]] = []
+    diag_rows: list[tuple[int, list[str], torch.Tensor]] = []
+    diag_names = set(diagnostic_keys(model, cfg))
     last: torch.Tensor | None = None
     writer = SummaryWriter(str(run_dir / "tensorboard"))
     try:
@@ -293,11 +503,16 @@ def run(
                 for step in range(1, steps + 1):
                     batch = to_device(next(batches), device)
                     losses = train_step(model, opt, batch, cfg, step=step - 1)
-                    keys = keys or list(losses)
+                    keys = keys or [k for k in losses if k not in diag_names]
                     last = torch.stack([losses[k] for k in keys])
                     rows.append((step, last))
+                    measured = [k for k in losses if k in diag_names]
+                    if measured:
+                        diag_rows.append(
+                            (step, measured, torch.stack([losses[k] for k in measured]))
+                        )
                     if step % log_every == 0 or step == steps:
-                        _flush(rows, keys, f, writer)
+                        _flush(rows, keys, f, writer, diag_rows)
                     if step % ckpt_every == 0 or step == steps:
                         save_checkpoint(
                             run_dir / "checkpoints" / f"step_{step:07d}.pt", model, opt, step, cfg
@@ -305,7 +520,7 @@ def run(
             finally:
                 if rows:  # only after an exception: the last step always flushes
                     try:
-                        _flush(rows, keys, f, writer)
+                        _flush(rows, keys, f, writer, diag_rows)
                     except Exception as e:  # never mask the original error
                         print(f"[train] lost {len(rows)} buffered steps: {e}", file=sys.stderr)
     finally:

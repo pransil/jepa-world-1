@@ -143,6 +143,96 @@ payload (JSON) ─► viewer_template.html ─► $JEPA_ARTIFACTS/viewers/<UTC>-
   lane's main clone included). The write is `paths.write_new`'s: all or nothing, never over an
   existing file.
 
+## Scores by motion regime (`regimes.py`)
+
+```
+python -m jepa_world.regimes --run <run dir> [--split test] [--checkpoint step_N.pt] [--set ...]
+```
+
+This asks whether the error lives in the bounces or in smooth rolling too. Each (window t,
+horizon k) gets one regime, from the episode files' `contact` and `bounce` flags:
+
+- **bounce:** a bounce in frames t+1..t+k.
+- **rolling:** no bounce in t−C+1..t+k, and contact in every one of those frames.
+- **airborne:** everything else.
+
+**Not here:** new families in `eval --run`'s report. This is a separate file under
+`<run>/eval/regimes/`. It is kept out of `eval/*.json`, because `viewer.eval_summary` and the
+experiment scripts read every file there as an eval report (tested).
+
+```
+run ─► load_run, the eval --run checks (held-out split first, eval block, episodes, seeds), goal head required
+load_split ─► windows (ep, t): window_index over t in [C−1, T−1−k_eval], eval's own set
+episode files (eval.stored_episodes) ─► contact, bounce (N,T) ─► regime_labels per k ─► (M,) int8
+baselines.predict (closed form) + eval.simulator_baselines (CPU, outside the lock) ─► {name: {k: (M,2)}}
+under gpu_lock (MPS only): window_outputs = JEPA core forward + goal head per batch (no pixel decode)
+   ─► goal mean/logvar (M,K,2), sqerr {k: (M,)}, spread {k: float} (float64 running moments)
+score_regimes ─► {k: {all, rolling, airborne, bounce: share, error_m, mse_m2, ratio, coverage, relerr}}
+```
+
+- **The same windows and numbers as `eval --run`.** The "all" row is the eval headline for that
+  checkpoint (tested: error, ratios and coverage), so a regime row and the headline differ only
+  in which windows are counted. A regime's ratio is a ratio of mean errors, as SPEC §7.2's is.
+  MSE is kept too, because the baseline-only cross-check is a ratio of summed squared errors.
+- **Latent relerr uses the full set's spread.** A regime's relerr is its windows' mean squared
+  error over the target spread of all windows at that k, so the regimes share one scale. Their
+  share-weighted mean is then the full set's relerr. Dividing each regime by its own spread lost:
+  a regime whose targets vary less would look worse for the same error. Training's per-batch
+  relerr divides by a 32-window batch's spread instead, which is about 3% smaller (B−1)/B.
+- **The latent pass is training's forward.** The JEPA core's forward computes the targets and
+  the per-head means, so the per-window error is the term training averages into `sqerr/k`. The
+  goal head runs on its context levels, which is `WorldModel.forward` minus the pixel decoder,
+  whose output nothing here reads. Both are tested against `WorldModel.forward`, and the goal
+  output equals `eval.model_outputs`'.
+- **The span starts at frame t−C+1, as the definition was given.** `contact[f]` and `bounce[f]`
+  describe the interval (f−1, f], so the flags at t−C+1 cover one interval before the first
+  context frame. A landing in exactly that interval makes the window airborne, not rolling. The
+  definition was kept as given, so the baseline-only cross-check it came with reproduces exactly.
+- **Flags come from the episode files.** EpisodeSet doesn't carry `contact` or `bounce`, so they
+  are read through `eval.stored_episodes`, which the simulator baseline also uses. Each file is
+  checked against its row's positions. Adding the flags to EpisodeSet would touch `data/` for
+  one consumer.
+
+## Post-hoc calibration of the goal head (`calibration.py`)
+
+```
+python -m jepa_world.calibration --run <run dir> [--level 0.9] [--folds 5] [--checkpoint ...]
+```
+
+It fits one variance scale per goal horizon and reports what it does to test coverage and NLL.
+**Not here:** a change to `eval --run`. Its numbers stay the model's as trained, and whether a
+scale becomes the default is the user's call (dev is SPEC §3.5's debugging split).
+
+```
+run ─► load_run; the eval --run checks for dev AND test; goal head required
+dev, test ─► eval_windows ─► model_outputs (goal only) under gpu_lock (MPS only) ─► goal_positions
+per k: r2 = Σ_xz (y−μ)²/σ²  (M,)     s_k = quantile(r2_dev, level) / χ²₂(level)
+   test before │ test × s_k (dev fit) │ test × cross-fit s_k (other terrain folds of test)
+   ─► 50% / 90% joint coverage (metrics.coverage), mean NLL (goal_nll's formula), per regime too
+<run>/eval/calibration/<time>-calibration-<hex>.json
+```
+
+- **The scale multiplies the variance; the mean is untouched.** So the error and every ratio stay
+  as they are, and only coverage and NLL move. One scale per k: SPEC's goal head has one log-
+  variance per horizon and axis, and per k is the coarsest scale that can still follow the
+  miss changing with k.
+- **Fit to the coverage level, in closed form.** s_k is the level-quantile of r2 over
+  χ²₂(level), so the fit set's `level` region holds `level` of its truths, to one window
+  (tested). The NLL-optimal scale, mean(r2)/2, is reported beside it as a diagnostic, not
+  applied. When the two disagree, the residuals aren't Gaussian with a wrong scale, and no
+  single scale fixes both.
+- **Two fits, both scored on test.** The dev fit is the proposal. The cross-fit is the check: test
+  terrain seeds go round-robin into folds, and each fold gets the scale fit on the others, so no
+  window's scale saw its own terrain. If the two agree, the dev fit carries over to new terrains.
+  The cross-fit's scales are fit on test data, so they are never a held-out result and not for
+  adoption (`meta.cross_fit_note`). `--level` and `--folds` (2 up to the test terrain count) are
+  checked before any model, data or lock, and the fitted level is always among the scored ones.
+- **Regimes from `regimes.py`.** At k ≤ 2 the miss differs by regime: too wide in rolling, too
+  narrow in bounces (experiments/2026-11-19-error-by-motion-regime.md). One scale can't fix that,
+  and the per-regime rows show how much is left.
+- **Output under `eval/calibration/`,** for the reason `regimes` writes under `eval/regimes/`
+  (tested: `viewer.eval_summary` still reads the run).
+
 ## Data flow and shapes
 
 M is the number of scored windows (episode, t), the same set at every horizon k. N is the number
@@ -298,6 +388,11 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `eval.evaluate_run` / `--run` | no | GPU lock on MPS, run dir (writes `eval/*.json`) | fast end to end on tiny fake datasets (CPU, simulator off) |
 | `viewer.goal_track`, `pick_episodes`, `png_strip`, `eval_summary`, `render_html` | yes (eval_summary reads a run's eval/) | none | `tests/test_viewer.py` |
 | `viewer.export` / CLI | no | artifact root (reads datasets and runs, writes `viewers/`), GPU lock only with `--device mps` | fast end to end on tiny fake datasets (CPU) |
+| `regimes.regime_labels`, `score_regimes` | yes, numpy | none | `tests/test_regimes.py` (hand-built flags at each edge, a brute-force check of the definition, synthetic scores) |
+| `regimes.window_outputs`, `episode_flags` | torch, device / disk (episode files) | none | fast: tiny CPU model against one unbatched forward; fake episodes with chosen flags |
+| `regimes.evaluate_regimes` / CLI | no | GPU lock on MPS, run dir (writes `eval/regimes/*.json`) | fast end to end on tiny fake datasets (CPU), simulator stubbed |
+| `calibration.fit_scale`, `cross_fit_scales`, `terrain_folds`, `nll`, `calibrate` | yes, numpy | none | `tests/test_calibration.py` (Gaussian residuals with a known variance error; exact χ² quantiles; training's goal_nll) |
+| `calibration.calibrate_run` / CLI | no | GPU lock on MPS, run dir (writes `eval/calibration/*.json`) | fast end to end on tiny fake dev and test splits (CPU), against eval --run's coverage |
 
 ## Files
 
@@ -309,3 +404,5 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `eval.py` | `--baselines`: every baseline on a split, written to a new run dir. `--run`: a trained run's goal head, visibility, events, probes and baselines on held-out splits, written to `<run>/eval/` |
 | `viewer.py` | the pred/actual viewer: models' goal and pixel outputs on held-out episodes, as one HTML file |
 | `viewer_template.html` | the page: camera view, side view, pixel decoder, controls. `viewer.py` fills in its data |
+| `regimes.py` | scores by motion regime (rolling, airborne, bounce): goal head, baselines, coverage and latent relerr per regime and k, written to `<run>/eval/regimes/` |
+| `calibration.py` | post-hoc variance scale per goal horizon: fit on dev and cross-fit over test terrain folds, test coverage and NLL before and after (per regime too), written to `<run>/eval/calibration/` |

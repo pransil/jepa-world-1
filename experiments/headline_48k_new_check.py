@@ -112,14 +112,27 @@ def gates(rs: list[dict]) -> bool:
     return ok
 
 
+def _same(v, w) -> bool:
+    return v == w or (
+        isinstance(v, float) and isinstance(w, float) and math.isnan(v) and math.isnan(w)
+    )
+
+
 def reproducibility(rs: list[dict], ref: list[dict]) -> None:
+    """First step where a key both rows have differs (NaN equals NaN). Per row, because the
+    diagnostic columns (relerr/copy/, gradnorm/) appear only on the steps they were measured."""
     by = {r["step"]: r for r in ref}
     common = sorted(k for k in ref[0] if k in rs[0] and k != "step")
     first = next(
         (
             r["step"]
             for r in rs
-            if r["step"] in by and any(r[k] != by[r["step"]][k] for k in common)
+            if r["step"] in by
+            and any(
+                not _same(r[k], by[r["step"]][k])
+                for k in r.keys() & by[r["step"]].keys()
+                if k != "step"
+            )
         ),
         None,
     )

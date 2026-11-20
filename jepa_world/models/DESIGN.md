@@ -213,10 +213,86 @@ loss/td/k<k> = gaussian_nll(td_pred, td_logvar, td_target)      loss/total += w_
 - The variance guard is unchanged: the branches read the far heads' levels, which the guard
   already covers while those heads are active.
 
+## Diagnostics (A: the latent persistence bar, and gradient pull per head)
+
+Two logged diagnostics, both on by default (`train.copy_every: 10`, `train.grad_norm_every: 500`,
+0 = off), so runs that inherit base.yaml, the M7 ablations among them, log them. Neither changes
+training. Two tests check that the parameters are `torch.equal` with both diagnostics on every
+step and with both off:
+- `test_diagnostics_on_or_off_train_bitwise_the_same`: CPU, plain and top-down, 4 steps;
+- `test_diagnostics_leave_mps_training_bitwise_the_same`: MPS, SPEC shapes, every stage, 3 steps.
+
+- **`relerr/copy/k<k>`: copy the current embedding** (`jepa.copy_relerr`). It is the relerr of
+  using the target encoder's embedding of the stack ending at t, at the level head k reads and
+  after `target_norm`, as the prediction for t+k. It has the same numerator form and the same
+  denominator (the target's batch spread) as `relerr/k`, so `relerr/k < relerr/copy/k` means
+  head k beats latent persistence. That is the bar the goal head already has against
+  persistence. It is 0 on a static clip (`test_copy_baseline_is_zero_when_nothing_moves`).
+  - With `model.top_down`, `relerr/copy/td/k<k>` does the same for each branch, at its finer
+    level, against the branch's target.
+  - Cost: one no-grad target-encoder pass up to the deepest head level.
+  - `experiments/latent_relerr.py` scores it on held-out splits every batch, beside `relerr/k`.
+- **`gradnorm/enc/<term>/<level>`: how hard each weighted term of `loss/total` pulls on the
+  context encoder.**
+  - Terms: `k<k>`, `td/k<k>`, `var`, `goal`, `pix`. The level is the encoder stage that produces
+    it.
+  - It is ‖∂(w·term)/∂θ_stage‖, from one `torch.autograd.grad` per term before the step's
+    backward. `autograd.grad` writes no `.grad`, and `opt.zero_grad` comes after it anyway.
+  - `gradnorm/enc/total/<level>` is read from `.grad` after the backward: the gradient the
+    optimizer actually gets. It is 0 at a level no active head reads yet (L2 and L3 before the
+    far stage), because the optimizer gets nothing there.
+  - The terms come from `compute_world_losses(..., terms={})`, which records each weighted term
+    exactly as it enters `loss/total` (`jepa.add_term`: the same operands in the same order, so
+    the total is bitwise unchanged, `test_weighted_terms_sum_to_loss_total_bitwise`).
+  - `world.loss_term_names` lists every term name, next to the code that records them.
+    `train_step` raises if a recorded term is missing from it, so a new term can't silently go
+    unlogged.
+  - A term not yet in the loss (its stage hasn't started) gets no column that step: it isn't
+    trained, so there is nothing to measure. Near heads read L1, so their L2/L3 norms are
+    exactly 0.
+  - The per-stage parameter lists are built from `context_encoder.stages`. An encoder with
+    parameters outside its stages is refused, rather than credited to the wrong level.
+- **Logging is sparse.**
+  - A diagnostic is computed when the completed-step count is a multiple of its interval, and its
+    columns are in that step's metrics.jsonl line only (`train.run` buffers them beside the
+    fixed-key rows and merges them at flush, one extra host sync per flush).
+  - `train.diagnostic_keys` names every column that can appear. `train.DIAGNOSTIC_PREFIXES`
+    (`relerr/copy/`, `gradnorm/`) marks them for readers.
+  - Window means must filter on the key being present, as the experiment scorers' `window`
+    already does.
+  - `run()` returns the last step's terms without diagnostics.
+  - `train_step(step=None)` (bench, tests) measures none, so `bench` times a step as training
+    runs it.
+- **Re-run checks.** `experiments/compare_metrics.py` treats a diagnostic key present on only one
+  side as reported, not as a mismatch. Every key both sides have must still match bitwise. So a
+  re-run that logs diagnostics compares cleanly against a reference from before they existed:
+  that is m7's reuse check of the 48k reference, called with no flag
+  (`test_a_rerun_with_diagnostics_matches_a_run_without_them`).
+- **Cost, measured on MPS** (`experiments/diag_overhead.py`: the 48k reference config, every
+  stage active, batch 32, synthetic frames; two runs gave the same numbers to 0.1 ms; numbers in
+  A's PR):
+  - A plain step takes 121.3 ms.
+  - A step with the copy baseline due takes 129.2 ms (+7.9 ms). Every 10 steps, that is **0.65%**.
+  - A step with both due takes 334 ms (+205 ms: one `autograd.grad` per active term). Every 500
+    steps, that is **0.34%**.
+  - Total at the defaults: **about 1.0%** of training time, a bit less on real data, where data
+    loading adds time to each step.
+- **Alternatives that lost:**
+  - **Every-step copy baseline:** about 5–7% more encoder work for a curve that 100 samples per
+    1000 steps already resolves.
+  - **NaN-filled columns on every step** (the first version): about 40 extra fields on every line,
+    roughly +50 MB on a 48k run, for values measured once in 500 steps. They also broke re-run
+    diffs (NaN != NaN).
+  - **A separate `diag.jsonl`:** the request was metrics.jsonl, and one file keeps the scorers
+    simple.
+  - **A latent section in `eval.py`:** eval reports no latent relerr today, and
+    `latent_relerr.py` is the held-out latent scorer.
+
 ## Seams
 
 | Unit | Pure? | Touches | Tested by |
 |---|---|---|---|
+| `jepa.copy_relerr`, `jepa.add_term`, `train.encoder_grad_norms`, `train.diagnostic_keys` | yes (no-grad / autograd.grad only) | — | `tests/test_diagnostics.py` |
 | `unet.UNetEncoder`, `heads.HorizonHead`, `heads.GaussianHead`, `heads.TopDownHead` | yes | — | `tests/test_unet.py`, `tests/test_heads.py` (CPU, 16×16), `tests/test_top_down.py` |
 | `jepa.JEPA`, `latent_loss`, `gaussian_nll`, `relative_error`, `normalize_target`, `variance_guard`, `compute_losses`, stack slicing | yes | — | `tests/test_jepa.py` |
 | `data/synthetic.moving_disc_batch` | yes (explicit `torch.Generator`) | — | `tests/test_synthetic.py` |

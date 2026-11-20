@@ -268,11 +268,15 @@ step and with both off:
   re-run that logs diagnostics compares cleanly against a reference from before they existed:
   that is m7's reuse check of the 48k reference, called with no flag
   (`test_a_rerun_with_diagnostics_matches_a_run_without_them`).
-- **Cost (estimated; not yet timed on MPS):**
-  - The gradient norms add one backward-sized pass per active term (about 10) every 500 steps,
-    about 2% of the backward passes.
-  - The copy baseline adds one no-grad target pass (about 1/7 of a step's target encoding) every
-    10 steps.
+- **Cost, measured on MPS** (`experiments/diag_overhead.py`: the 48k reference config, every
+  stage active, batch 32, synthetic frames; two runs gave the same numbers to 0.1 ms; numbers in
+  A's PR):
+  - A plain step takes 121.3 ms.
+  - A step with the copy baseline due takes 129.2 ms (+7.9 ms). Every 10 steps, that is **0.65%**.
+  - A step with both due takes 334 ms (+205 ms: one `autograd.grad` per active term). Every 500
+    steps, that is **0.34%**.
+  - Total at the defaults: **about 1.0%** of training time, a bit less on real data, where data
+    loading adds time to each step.
 - **Alternatives that lost:**
   - **Every-step copy baseline:** about 5–7% more encoder work for a curve that 100 samples per
     1000 steps already resolves.

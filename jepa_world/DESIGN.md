@@ -193,6 +193,46 @@ score_regimes ─► {k: {all, rolling, airborne, bounce: share, error_m, mse_m2
   checked against its row's positions. Adding the flags to EpisodeSet would touch `data/` for
   one consumer.
 
+## Post-hoc calibration of the goal head (`calibration.py`)
+
+```
+python -m jepa_world.calibration --run <run dir> [--level 0.9] [--folds 5] [--checkpoint ...]
+```
+
+It fits one variance scale per goal horizon and reports what it does to test coverage and NLL.
+**Not here:** a change to `eval --run`. Its numbers stay the model's as trained, and whether a
+scale becomes the default is the user's call (dev is SPEC §3.5's debugging split).
+
+```
+run ─► load_run; the eval --run checks for dev AND test; goal head required
+dev, test ─► eval_windows ─► model_outputs (goal only) under gpu_lock (MPS only) ─► goal_positions
+per k: r2 = Σ_xz (y−μ)²/σ²  (M,)     s_k = quantile(r2_dev, level) / χ²₂(level)
+   test before │ test × s_k (dev fit) │ test × cross-fit s_k (other terrain folds of test)
+   ─► 50% / 90% joint coverage (metrics.coverage), mean NLL (goal_nll's formula), per regime too
+<run>/eval/calibration/<time>-calibration-<hex>.json
+```
+
+- **The scale multiplies the variance; the mean is untouched.** So the error and every ratio stay
+  as they are, and only coverage and NLL move. One scale per k: SPEC's goal head has one log-
+  variance per horizon and axis, and per k is the coarsest scale that can still follow the
+  miss changing with k.
+- **Fit to the coverage level, in closed form.** s_k is the level-quantile of r2 over
+  χ²₂(level), so the fit set's `level` region holds `level` of its truths, to one window
+  (tested). The NLL-optimal scale, mean(r2)/2, is reported beside it as a diagnostic, not
+  applied. When the two disagree, the residuals aren't Gaussian with a wrong scale, and no
+  single scale fixes both.
+- **Two fits, both scored on test.** The dev fit is the proposal. The cross-fit is the check: test
+  terrain seeds go round-robin into folds, and each fold gets the scale fit on the others, so no
+  window's scale saw its own terrain. If the two agree, the dev fit carries over to new terrains.
+  The cross-fit's scales are fit on test data, so they are never a held-out result and not for
+  adoption (`meta.cross_fit_note`). `--level` and `--folds` (2 up to the test terrain count) are
+  checked before any model, data or lock, and the fitted level is always among the scored ones.
+- **Regimes from `regimes.py`.** At k ≤ 2 the miss differs by regime: too wide in rolling, too
+  narrow in bounces (experiments/2026-11-19-error-by-motion-regime.md). One scale can't fix that,
+  and the per-regime rows show how much is left.
+- **Output under `eval/calibration/`,** for the reason `regimes` writes under `eval/regimes/`
+  (tested: `viewer.eval_summary` still reads the run).
+
 ## Data flow and shapes
 
 M is the number of scored windows (episode, t), the same set at every horizon k. N is the number
@@ -351,6 +391,8 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `regimes.regime_labels`, `score_regimes` | yes, numpy | none | `tests/test_regimes.py` (hand-built flags at each edge, a brute-force check of the definition, synthetic scores) |
 | `regimes.window_outputs`, `episode_flags` | torch, device / disk (episode files) | none | fast: tiny CPU model against one unbatched forward; fake episodes with chosen flags |
 | `regimes.evaluate_regimes` / CLI | no | GPU lock on MPS, run dir (writes `eval/regimes/*.json`) | fast end to end on tiny fake datasets (CPU), simulator stubbed |
+| `calibration.fit_scale`, `cross_fit_scales`, `terrain_folds`, `nll`, `calibrate` | yes, numpy | none | `tests/test_calibration.py` (Gaussian residuals with a known variance error; exact χ² quantiles; training's goal_nll) |
+| `calibration.calibrate_run` / CLI | no | GPU lock on MPS, run dir (writes `eval/calibration/*.json`) | fast end to end on tiny fake dev and test splits (CPU), against eval --run's coverage |
 
 ## Files
 
@@ -363,3 +405,4 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `viewer.py` | the pred/actual viewer: models' goal and pixel outputs on held-out episodes, as one HTML file |
 | `viewer_template.html` | the page: camera view, side view, pixel decoder, controls. `viewer.py` fills in its data |
 | `regimes.py` | scores by motion regime (rolling, airborne, bounce): goal head, baselines, coverage and latent relerr per regime and k, written to `<run>/eval/regimes/` |
+| `calibration.py` | post-hoc variance scale per goal horizon: fit on dev and cross-fit over test terrain folds, test coverage and NLL before and after (per regime too), written to `<run>/eval/calibration/` |

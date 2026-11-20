@@ -24,13 +24,21 @@ touch the update. **Does training at the new commit repeat the reference bitwise
 ## Hypothesis and pass rule (pre-registered)
 **H0: with the defaults, the new code trains exactly as 6fd7059 did.**
 
-- **Pass:** `uv run python experiments/compare_metrics.py --run <re-run> --ref <0f2411> --allow-new-keys`
-  exits 0. That means:
-  - every one of steps 1–6,500 is present;
-  - every key the reference logs is present at every step, with an identical value (NaN = NaN);
-  - keys only the re-run logs (A's gradient norms) are listed and not compared.
-- **Fail:** any differing value, or a reference key missing. Then the M7 ablations do not start. I
-  report it, and re-running the reference (≈ 4 GPU-h) is the user's call.
+- **Pass:** `uv run python experiments/compare_metrics.py --run <re-run> --ref <0f2411>` exits 0,
+  using main's version of the script at the check's commit. That means:
+  - every one of steps 1–6,500 is present in the reference;
+  - every key both runs log has an identical value at every step (NaN = NaN);
+  - no non-diagnostic key is present on only one side.
+- **New diagnostic keys:** m5's A lands its own version of the script. It exempts diagnostic keys
+  by `train.DIAGNOSTIC_PREFIXES` (`relerr/copy/`, `gradnorm/`): a diagnostic key logged by only
+  one run is reported and not counted. So A's gradient norms don't fail the check, but every
+  shared key still must match bitwise.
+  - If A hasn't merged by the check, there are no such keys, and the script requires the keys to
+    match exactly.
+  - (An earlier draft added an `--allow-new-keys` flag in this lane. It was dropped in favour of
+    A's version, so the two lanes don't collide on the file.)
+- **Fail:** any differing value, or a non-diagnostic key missing on either side. Then the M7
+  ablations do not start. I report it, and re-running the reference (≈ 4 GPU-h) is the user's call.
 - **Also checked:** the re-run's recorded `config.yaml` differs from 0f2411's only in
   `train.steps` (6,500 against 48,000) and in new keys at their off defaults (`data.curriculum`
   null, and A's key if any).

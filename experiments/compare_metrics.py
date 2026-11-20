@@ -7,6 +7,10 @@ an 8000-step run). Prints the rows and keys compared, the number of differing va
 absolute difference (inf when one side is NaN and the other isn't). NaN equals NaN. Exit status 0 only
 if --run has at least one row, every one of its steps is in --ref with the same keys, and every value
 is identical.
+
+With --allow-new-keys, a --run row may also carry keys that --ref lacks (new logging, e.g. per-head
+gradient norms). Those are listed and not compared. Every --ref key must still be present, and its
+value identical. Without the flag, the keys must match exactly.
 """
 
 from __future__ import annotations
@@ -34,6 +38,11 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--run", type=Path, required=True)
     p.add_argument("--ref", type=Path, required=True)
+    p.add_argument(
+        "--allow-new-keys",
+        action="store_true",
+        help="let --run rows carry extra keys (listed, not compared); --ref's keys must all be there",
+    )
     args = p.parse_args(argv)
     ref = {r["step"]: r for r in rows(args.ref)}
     new = rows(args.run)
@@ -44,18 +53,22 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         print(f"steps {missing[:5]}{'...' if len(missing) > 5 else ''} are not in {args.ref}")
         return 1
-    keys, diffs, worst = set(), 0, 0.0
+    keys, extra, diffs, worst = set(), set(), 0, 0.0
     for r in new:
         o = ref[r["step"]]
-        if r.keys() != o.keys():
+        lost = set(o) - set(r)
+        if lost or (r.keys() != o.keys() and not args.allow_new_keys):
             print(f"step {r['step']}: different keys {sorted(set(r) ^ set(o))}")
             return 1
-        for k, v in r.items():
+        extra |= set(r) - set(o)
+        for k, w in o.items():
             keys.add(k)
-            d = diff(v, o[k])
+            d = diff(r[k], w)
             if d is not None:
                 diffs += 1
                 worst = max(worst, d)
+    if extra:
+        print(f"keys only in --run, not compared: {sorted(extra)}")
     print(
         f"{len(new)} rows x {len(keys)} keys compared; differing values: {diffs}; "
         f"max abs diff {worst}"

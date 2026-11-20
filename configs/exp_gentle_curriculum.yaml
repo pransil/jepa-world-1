@@ -1,0 +1,20 @@
+# H, the gentle-world curriculum: the 48k M7 reference (configs/exp_headline_48k.yaml, unchanged) except
+# that steps 1-12000 train on the gentle world (configs/world_gentle.yaml) and steps 12001-48000 on the full
+# world. Total steps, stage starts (far 2000, goal 4000, pixel 6000) and every loss weight are the
+# reference's, so it compares with the reference at matched total steps. The top-level sim is the full
+# world, so eval scores the full-world test split. experiments/<date>-gentle-curriculum.md.
+# Seeds: 0 (this file) and 1 (--set seed=1).
+# Build the gentle world's train split first:
+#   uv run python -m jepa_world.data.build --config configs/world_gentle.yaml --split train
+base: exp_headline_48k.yaml
+
+data:
+  curriculum:
+    steps: 12000              # every stage starts inside it; the reference's goal head sits at persistence until ~12k
+    sim:                      # = configs/world_gentle.yaml's sim overrides (tests/test_train_curriculum.py)
+      terrain:
+        relief: [0.5, 1.5]
+        max_slope: 0.2
+        ledges: [0, 0]
+      ball:
+        drop: [0.0, 0.0]

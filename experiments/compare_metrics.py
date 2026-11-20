@@ -7,6 +7,12 @@ an 8000-step run). Prints the rows and keys compared, the number of differing va
 absolute difference (inf when one side is NaN and the other isn't). NaN equals NaN. Exit status 0 only
 if --run has at least one row, every one of its steps is in --ref with the same keys, and every value
 is identical.
+
+Diagnostic columns (train.DIAGNOSTIC_PREFIXES: relerr/copy/, gradnorm/) are logged only on their
+own steps, and runs from before they existed have none. A diagnostic key on only one side is
+counted and reported, not a mismatch. Every other key must be on both sides, and every key both
+sides have must match bitwise. No flag is needed: m7's re-run check against the pre-diagnostics
+48k reference calls it as above.
 """
 
 from __future__ import annotations
@@ -15,6 +21,8 @@ import argparse
 import json
 import math
 from pathlib import Path
+
+from jepa_world.train import DIAGNOSTIC_PREFIXES
 
 
 def rows(run: Path) -> list[dict]:
@@ -44,21 +52,23 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         print(f"steps {missing[:5]}{'...' if len(missing) > 5 else ''} are not in {args.ref}")
         return 1
-    keys, diffs, worst = set(), 0, 0.0
+    keys, one_sided, diffs, worst = set(), set(), 0, 0.0
     for r in new:
         o = ref[r["step"]]
-        if r.keys() != o.keys():
-            print(f"step {r['step']}: different keys {sorted(set(r) ^ set(o))}")
+        odd = set(r) ^ set(o)
+        if any(not k.startswith(DIAGNOSTIC_PREFIXES) for k in odd):
+            print(f"step {r['step']}: different keys {sorted(odd)}")
             return 1
-        for k, v in r.items():
+        one_sided |= odd
+        for k in r.keys() & o.keys():
             keys.add(k)
-            d = diff(v, o[k])
+            d = diff(r[k], o[k])
             if d is not None:
                 diffs += 1
                 worst = max(worst, d)
     print(
         f"{len(new)} rows x {len(keys)} keys compared; differing values: {diffs}; "
-        f"max abs diff {worst}"
+        f"max abs diff {worst}; diagnostic keys on one side only: {len(one_sided)}"
     )
     return 0 if diffs == 0 else 1
 

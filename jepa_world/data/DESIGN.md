@@ -86,6 +86,43 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
 - **Sampling is uniform over (episode, valid t) windows**, with replacement, from a numpy
   Generator seeded by `cfg.seed`. Every episode has the same number of windows, so this is also
   uniform over episodes.
+- **Curriculum: a world switch at step N, data-side only** (`data.curriculum: {steps, sim}`,
+  `train.make_batches`). Steps 1..N read `data.split` built under `sim` with `curriculum.sim`
+  merged in (another world, its own dataset). Steps N+1.. read the run's own world, starting from
+  that world's first batch: each world has its own sampler, both seeded by `cfg.seed`. So
+  `train.run` and the stage schedule don't change, the run keeps one run dir and one
+  `metrics.jsonl`, and `config.yaml` keeps the run's own world at the top level, so eval scores
+  that world. Both splits load before the GPU lock, and both stay in RAM until the switch (about
+  1.5 GB each at the train split's size). Null, or absent from an older config, is the plain
+  loader: `test_no_curriculum_trains_bitwise_as_before_whether_the_key_is_null_or_absent`. The
+  key is not in any dataset key, so adding it to base.yaml re-keyed nothing. Two alternatives lost:
+  - **Init from a checkpoint.** It would have needed a step offset (to keep the stage starts),
+    optimizer-state loading, and two run dirs to stitch for the learning curve.
+  - **A config-file reference** (`curriculum: {config: world_gentle.yaml}`). It would make the
+    run's `config.yaml` depend on a file outside the run dir.
+
+  The cost is that `configs/world_gentle.yaml` (used to build that world's dataset) and the
+  experiment's `curriculum.sim` repeat the same four overrides.
+  `test_gentle_curriculum_trains_on_the_gentle_world_then_the_m7_reference_world` holds them to
+  the same dataset key. The config file stays because it is also what `sim.preview` and
+  `experiments/gentle_world_stats.py` measure.
+
+  `train.check_curriculum` limits the overrides:
+  - They may only name existing sim keys, and each keeps its kind: a section stays a section, a
+    range stays a list of the same length, a number stays a number. So a typo, or `relief: 1.0`,
+    fails before anything is built.
+  - They may not touch `fps`, `episode_frames`, `frame_size` or `generator_version`. Both worlds
+    must give the same batch shapes and time per frame, or the mismatch would only surface inside
+    `run()`, after the run dir and the GPU lock.
+  - Deliberate limit: a curriculum can't add or drop a section that is off when absent
+    (`sim.obstacles`). That needs its own rule for "absent".
+
+  **Both samplers use `cfg.seed`, on purpose.** Both worlds' splits list the same (terrain seed,
+  ball seed) episodes in the same order, so step i of the curriculum draws the same (episode, t)
+  windows as the reference's step i, in another world. From the switch on, the run world replays
+  the reference's own stream from its first batch. So each phase differs from the reference only
+  in the world it shows. The cost is that the first batches after the switch revisit the episode
+  indices the curriculum opened with, with different terrain.
 - **The build takes the GPU lock**, because rendering uses the GPU through CGL, and a build takes
   minutes and would skew a benchmark running beside it. The lock is skipped when the dataset
   already exists.

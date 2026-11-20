@@ -58,6 +58,9 @@ sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
 data:                         # SPEC §3.5, split by terrain seed, never by frame. Design: jepa_world/data/DESIGN.md
   source: episodes            # episodes (the M2 loader) | synthetic (moving disc; smoke runs and benchmarks only)
   split: train                # the split train.py reads (dev: debugging only, SPEC §3.5)
+  curriculum: null            # {steps: N, sim: {<sim overrides>}}: steps 1..N read data.split built under sim with the overrides
+                              # merged, steps N+1.. read the run's own world. One run dir; config.yaml keeps the run world at the
+                              # top, so eval scores it. Not in any dataset key (jepa_world/data/DESIGN.md, "Curriculum")
   format_version: 1           # bump if the dataset layout (files, manifest) changes
   splits:                     # seeds as [first, count]; every terrain gets every ball seed of its split
     dev:   {terrain_seeds: [0, 10],      ball_seeds: [0, 4]}     # 4 balls/terrain: docs/decisions/*-ball-samples-per-terrain.md
@@ -126,6 +129,9 @@ train:                        # SPEC §6
   stage_start: {near: 0, far: 2000, goal: 4000, pixel: 6000}  # steps completed before a stage joins loss/total (logged throughout): docs/decisions/2026-11-17-stage-schedule-within-run.md. far: placeholder. goal/pixel: accepted 2026-11-18 (docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md)
   steps: 10000                # placeholder, set per experiment
   log_every: 50               # flush interval for metrics.jsonl; every step is still logged
+  copy_every: 10              # relerr/copy/k (the latent heads' persistence bar) every N completed steps, absent from other lines; 0 = off
+  grad_norm_every: 500        # gradnorm/enc/<term>/<level>: each weighted loss term's pull on the encoder, every N steps; 0 = off.
+                              # Neither changes training (models/DESIGN.md, "Diagnostics")
   ckpt_every: 2000            # plus one checkpoint at the end
 
 eval:                         # SPEC §7, M6: python -m jepa_world.eval --run <run dir>. Design: jepa_world/DESIGN.md

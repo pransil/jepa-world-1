@@ -199,7 +199,8 @@ The ball ranges, the camera, contact and the walls are the full world's
 without slipping while tan(slope) ≤ 3.5 μ, and μ ≥ 0.1, so the 0.2 cap leaves a 1.75× margin.
 
 Measured by `experiments/gentle_world_stats.py` (200 episodes each: terrain seeds 0–199, ball
-seed 0) and `sim.preview`:
+seed 0) and `sim.preview` (contact sheets and `stats.json`:
+`20261120T073817Z-worktree-wt-gentle-curriculum-sim-preview-0253e3`, at 0a2bfa3):
 
 | | full | gentle |
 |---|---|---|

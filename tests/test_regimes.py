@@ -12,7 +12,7 @@ import json
 import numpy as np
 import pytest
 import torch
-from fake_episodes import SHORT, SMALL_SPLITS, Recorder, fake_episode
+from fake_episodes import SHORT, SMALL_SPLITS, Recorder, flagged_episode
 from tiny import AUX, BASE, TINY
 
 from jepa_world import eval as eval_cli
@@ -41,25 +41,6 @@ def run_cfg(*extra: str) -> dict:
 
 def eval_cfg(*extra: str) -> dict:
     return load_config(BASE, [*EVAL_SETS, *extra])
-
-
-def flagged_episode(sim_cfg: dict, terrain_seed: int, ball_seed: int):
-    """fake_episode with contact and bounce set by a pattern picked from the seeds: rolling
-    throughout, one bounce mid-episode, airborne throughout, or random flags."""
-    ep = fake_episode(sim_cfg, terrain_seed, ball_seed)
-    T = len(ep.t)
-    contact, bounce = np.ones(T, bool), np.zeros(T, bool)
-    pattern = (terrain_seed + ball_seed) % 4
-    if pattern == 1:
-        bounce[15] = True
-        contact[12:15] = False  # in the air before it lands
-    elif pattern == 2:
-        contact[:] = False
-    elif pattern == 3:
-        rng = np.random.default_rng([terrain_seed, ball_seed])
-        contact = rng.random(T) < 0.8
-        bounce = contact & (rng.random(T) < 0.15)
-    return dataclasses.replace(ep, contact=contact, bounce=bounce)
 
 
 @pytest.fixture(scope="module")

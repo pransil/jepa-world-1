@@ -166,6 +166,16 @@ def test_curriculum_steps_must_leave_steps_in_the_run_world(steps):
         ("{terrain: 1}", "terrain"),  # a section replaced by a scalar
         ("{}", "sim"),  # nothing to change
         ("[1, 2]", "sim"),
+        ("{terrain: {relief: 1.0}}", "relief"),  # a range given as a number
+        ("{terrain: {ledges: [0, 0, 0]}}", "ledges"),  # a range of the wrong length
+        ("{terrain: {max_slope: true}}", "max_slope"),  # a bool for a number
+        ("{camera_mode: 3}", "camera_mode"),  # a number for a name
+        # the batch contract and the generator's identity are the run's: a curriculum world
+        # with other frames would fail only inside run(), after the run dir and the GPU lock
+        ("{frame_size: 32}", "frame_size"),
+        ("{episode_frames: 20}", "episode_frames"),
+        ("{fps: 30}", "fps"),
+        ("{generator_version: 2}", "generator_version"),
     ],
 )
 def test_curriculum_sim_may_only_override_existing_sim_keys(sim, named):
@@ -198,8 +208,12 @@ def test_curriculum_needs_the_episode_source():
 def test_unbuilt_curriculum_world_fails_check_config_with_the_build_command():
     cfg = episodes_cfg(curriculum(2))
     build.build_split(cfg, "dev", simulate=Recorder())  # only the run's own world
-    with pytest.raises(FileNotFoundError, match=r"(?s)data\.curriculum.*jepa_world\.data\.build"):
+    with pytest.raises(
+        FileNotFoundError, match=r"(?s)data\.curriculum.*jepa_world\.data\.build"
+    ) as e:
         train.check_config(cfg)
+    # it names this curriculum's overrides, not some other experiment's files
+    assert "ledges" in str(e.value) and "world_gentle" not in str(e.value)
 
 
 def test_curriculum_never_reads_test():

@@ -433,13 +433,17 @@ def test_the_m7_reference_and_its_ablations_inherit_the_base_pixel_weighting(nam
 
 
 @pytest.mark.parametrize("path", sorted(CONFIGS.glob("*.yaml")), ids=lambda p: p.stem)
-def test_every_committed_config_passes_check_config(path):
-    """A base.yaml default must never make an existing experiment config unrunnable. Synthetic
-    data, because the episode datasets aren't built in the test artifact root, and so no
-    curriculum (it needs episodes): check_curriculum checks those configs' curricula on their own
-    source."""
-    train.check_config(load_config(path, ["data.source=synthetic", "data.curriculum=null"]))
-    train.check_curriculum(load_config(path))
+def test_every_committed_config_passes_check_config(path, monkeypatch):
+    """A base.yaml default must never make an existing experiment config unrunnable. The episode
+    datasets aren't built in the test artifact root, so the built-split lookup is stubbed out;
+    everything else check_config checks runs on the config as committed, curriculum included."""
+    looked_up = []
+    monkeypatch.setattr(train, "require_split", lambda cfg, split: looked_up.append(split))
+    cfg = load_config(path)
+    train.check_config(cfg)
+    if cfg["data"]["source"] == "episodes":
+        worlds = 1 + (cfg["data"]["curriculum"] is not None)
+        assert looked_up == [cfg["data"]["split"]] * worlds
 
 
 @pytest.mark.parametrize(

@@ -158,7 +158,7 @@ def goal_tables(arm: list[dict], ref: list[dict]) -> None:
         print("|---:|---|---|---|---|---|---|")
         for k in KS:
 
-            def v(runs, k=k):
+            def v(runs, k=k, kind=kind):
                 return [test_metrics(r)["visibility"][k][kind] for r in runs]
 
             def get(vs, key, f):

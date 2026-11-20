@@ -515,20 +515,21 @@ def losses_from_output(
 
 
 @torch.no_grad()
-def copy_relerr(
-    model: JEPA, frames: torch.Tensor, targets: dict[int, torch.Tensor]
-) -> dict[str, torch.Tensor]:
+def copy_relerr(model: JEPA, frames: torch.Tensor, out: dict) -> dict[str, torch.Tensor]:
     """relerr/copy/k<k>: the latent heads' persistence bar. The prediction is the target encoder's
-    embedding of the stack ending at t, at the level head k reads (after loss.target_norm), and
-    `targets` are forward()["target"]: so it is relerr/k with "nothing changes" for the head.
+    embedding of the stack ending at t, at the level head k reads (after loss.target_norm),
+    scored against forward()["target"][k] (`out` is forward()'s output) exactly as relerr/k is:
+    relerr/k with "nothing changes" for the head. With model.top_down, relerr/copy/td/k<k> does
+    the same for each branch, at its finer level, against out["td_target"][k].
     One extra no-grad target-encoder pass, up to the deepest level a head reads."""
-    levels = set(model.head_level.values())
+    levels = set(model.head_level.values()) | set(model.td_level.values())
     deepest = max(levels, key=model.level_names.index)
     zs = model.target_encoder(target_stack(frames, model.context_frames, 0), upto=deepest)
     z0 = {lv: normalize_target(zs[lv], model.target_norm) for lv in levels}
-    out = {}
-    for k in model.horizons:
-        target = targets[k]
-        sq = _sq_from_err2(_err2(z0[model.head_level[k]], target))
-        out[f"relerr/copy/k{k}"] = _relerr_from_sq(sq, target, eps=1e-12)
-    return out
+    pairs = [(f"k{k}", model.head_level[k], out["target"][k]) for k in model.horizons]
+    pairs += [(f"td/k{k}", lv, out["td_target"][k]) for k, lv in model.td_level.items()]
+    res = {}
+    for tag, lv, target in pairs:
+        sq = _sq_from_err2(_err2(z0[lv], target))
+        res[f"relerr/copy/{tag}"] = _relerr_from_sq(sq, target, eps=1e-12)
+    return res

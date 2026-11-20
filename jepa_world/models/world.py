@@ -148,6 +148,18 @@ class WorldModel(JEPA):
         return out
 
 
+def loss_term_names(model: WorldModel, loss_cfg: dict) -> list[str]:
+    """Every weighted term loss/total can hold, by the name compute_world_losses records it under
+    (its `terms`): k<k> per horizon, td/k<k> per top-down branch, var with the collapse guard,
+    goal and pix for the built aux heads. A term only appears in `terms` while its stage is
+    active. train.diagnostic_keys and train.train_step rely on this list being complete."""
+    names = [f"k{k}" for k in model.horizons] + [f"td/k{k}" for k in model.td_level]
+    names += ["var"] if loss_cfg["collapse_guard"] else []
+    names += ["goal"] if model.goal is not None else []
+    names += ["pix"] if model.pixel is not None else []
+    return names
+
+
 def split_batch(batch: torch.Tensor | Mapping[str, torch.Tensor]):
     """A frames tensor (the M3 layout) or a with_gt dict -> (frames, ball_pos or None)."""
     if isinstance(batch, torch.Tensor):
@@ -237,5 +249,5 @@ def compute_world_losses(
         )
     losses["loss/total"] = total
     if copy_baseline:
-        losses.update(copy_relerr(model, frames, out["target"]))
+        losses.update(copy_relerr(model, frames, out))
     return losses

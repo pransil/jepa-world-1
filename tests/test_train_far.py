@@ -123,17 +123,17 @@ def test_run_with_far_stage_logs_every_term_every_step(tmp_path):
         | {f"logvar/k{k}" for k in FAR}
         | {"loss/var", "var/L1", "var/L2", "var/L3", "loss/total", "step"}
         | {"emb_std/L1", "emb_std/L2", "emb_std/L3"}
-        | set(train.diagnostic_keys(train.build_model(cfg), cfg))
     )
+    diag = set(train.diagnostic_keys(train.build_model(cfg), cfg))  # only on their own steps
     for r in lines:
-        assert set(r) == expected  # far terms are logged before their stage starts, too
+        assert set(r) - diag == expected  # far terms are logged before their stage starts, too
 
 
 def test_same_seed_gives_identical_losses_with_far_stage(tmp_path):
     cfg = tiny_far_cfg("train.steps=3")
     a = train.run(cfg, tmp_path / "a", device=torch.device("cpu"))
     b = train.run(cfg, tmp_path / "b", device=torch.device("cpu"))
-    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)  # NaN-safe compare
+    assert a == b
 
 
 MPS_FAR_STEP = """

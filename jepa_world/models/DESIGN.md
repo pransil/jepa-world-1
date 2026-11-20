@@ -217,8 +217,10 @@ loss/td/k<k> = gaussian_nll(td_pred, td_logvar, td_target)      loss/total += w_
 
 Two logged diagnostics, both on by default (`train.copy_every: 10`, `train.grad_norm_every: 500`,
 0 = off), so runs that inherit base.yaml, the M7 ablations among them, log them. Neither changes
-training: `test_diagnostics_on_or_off_train_bitwise_the_same` (plain and top-down) checks that the
-parameters after 4 steps are `torch.equal` with both diagnostics on every step and with both off.
+training. Two tests check that the parameters are `torch.equal` with both diagnostics on every
+step and with both off:
+- `test_diagnostics_on_or_off_train_bitwise_the_same`: CPU, plain and top-down, 4 steps;
+- `test_diagnostics_leave_mps_training_bitwise_the_same`: MPS, SPEC shapes, every stage, 3 steps.
 
 - **`relerr/copy/k<k>`: copy the current embedding** (`jepa.copy_relerr`). It is the relerr of
   using the target encoder's embedding of the stack ending at t, at the level head k reads and
@@ -226,6 +228,8 @@ parameters after 4 steps are `torch.equal` with both diagnostics on every step a
   denominator (the target's batch spread) as `relerr/k`, so `relerr/k < relerr/copy/k` means
   head k beats latent persistence. That is the bar the goal head already has against
   persistence. It is 0 on a static clip (`test_copy_baseline_is_zero_when_nothing_moves`).
+  - With `model.top_down`, `relerr/copy/td/k<k>` does the same for each branch, at its finer
+    level, against the branch's target.
   - Cost: one no-grad target-encoder pass up to the deepest head level.
   - `experiments/latent_relerr.py` scores it on held-out splits every batch, beside `relerr/k`.
 - **`gradnorm/enc/<term>/<level>`: how hard each weighted term of `loss/total` pulls on the
@@ -235,18 +239,35 @@ parameters after 4 steps are `torch.equal` with both diagnostics on every step a
   - It is ‖∂(w·term)/∂θ_stage‖, from one `torch.autograd.grad` per term before the step's
     backward. `autograd.grad` writes no `.grad`, and `opt.zero_grad` comes after it anyway.
   - `gradnorm/enc/total/<level>` is read from `.grad` after the backward: the gradient the
-    optimizer actually gets.
+    optimizer actually gets. It is 0 at a level no active head reads yet (L2 and L3 before the
+    far stage), because the optimizer gets nothing there.
   - The terms come from `compute_world_losses(..., terms={})`, which records each weighted term
     exactly as it enters `loss/total` (`jepa.add_term`: the same operands in the same order, so
     the total is bitwise unchanged, `test_weighted_terms_sum_to_loss_total_bitwise`).
-  - A term not yet in the loss (its stage hasn't started) logs NaN, not 0: it isn't trained, so
-    there is nothing to measure. Near heads read L1, so their L2/L3 norms are exactly 0.
-- **Logging.**
-  - Every step has the same columns (`train.diagnostic_keys`). A diagnostic is computed when the
-    completed-step count is a multiple of its interval, and is NaN between, so 1000-step window
-    means need `nanmean`, as `goalratio` already did.
-  - TensorBoard skips NaN values.
-  - Equality tests on `train.run`'s final dict compare as JSON, because NaN != NaN.
+  - `world.loss_term_names` lists every term name, next to the code that records them.
+    `train_step` raises if a recorded term is missing from it, so a new term can't silently go
+    unlogged.
+  - A term not yet in the loss (its stage hasn't started) gets no column that step: it isn't
+    trained, so there is nothing to measure. Near heads read L1, so their L2/L3 norms are
+    exactly 0.
+  - The per-stage parameter lists are built from `context_encoder.stages`. An encoder with
+    parameters outside its stages is refused, rather than credited to the wrong level.
+- **Logging is sparse.**
+  - A diagnostic is computed when the completed-step count is a multiple of its interval, and its
+    columns are in that step's metrics.jsonl line only (`train.run` buffers them beside the
+    fixed-key rows and merges them at flush, one extra host sync per flush).
+  - `train.diagnostic_keys` names every column that can appear. `train.DIAGNOSTIC_PREFIXES`
+    (`relerr/copy/`, `gradnorm/`) marks them for readers.
+  - Window means must filter on the key being present, as the experiment scorers' `window`
+    already does.
+  - `run()` returns the last step's terms without diagnostics.
+  - `train_step(step=None)` (bench, tests) measures none, so `bench` times a step as training
+    runs it.
+- **Re-run checks.** `experiments/compare_metrics.py` treats a diagnostic key present on only one
+  side as reported, not as a mismatch. Every key both sides have must still match bitwise. So a
+  re-run that logs diagnostics compares cleanly against a reference from before they existed:
+  that is m7's reuse check of the 48k reference, called with no flag
+  (`test_a_rerun_with_diagnostics_matches_a_run_without_them`).
 - **Cost (estimated; not yet timed on MPS):**
   - The gradient norms add one backward-sized pass per active term (about 10) every 500 steps,
     about 2% of the backward passes.
@@ -255,6 +276,9 @@ parameters after 4 steps are `torch.equal` with both diagnostics on every step a
 - **Alternatives that lost:**
   - **Every-step copy baseline:** about 5–7% more encoder work for a curve that 100 samples per
     1000 steps already resolves.
+  - **NaN-filled columns on every step** (the first version): about 40 extra fields on every line,
+    roughly +50 MB on a 48k run, for values measured once in 500 steps. They also broke re-run
+    diffs (NaN != NaN).
   - **A separate `diag.jsonl`:** the request was metrics.jsonl, and one file keeps the scorers
     simple.
   - **A latent section in `eval.py`:** eval reports no latent relerr today, and

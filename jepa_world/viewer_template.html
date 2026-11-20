@@ -1,0 +1,868 @@
+<meta charset="utf-8">
+<title>Ball Prediction Viewer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: a lab instrument. Controls and a frame timeline on top; the camera frame and the side
+   view side by side; then the pixel decoder, the per-horizon numbers, and the definitions. */
+:root {
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --ground: #e4e0d3;
+  --ground-line: #a29d8e;
+  --accent: #2a78d6;
+  --tip-bg: #0b0b0b;
+  --tip-fg: #f0efec;
+  /* Horizons, one blue ramp light -> dark as k grows (ordinal). */
+  --k-1: #86b6ef; --k-2: #5598e7; --k-3: #3987e5; --k-4: #2a78d6;
+  --k-5: #1c5cab; --k-10: #184f95; --k-20: #0d366b; --k-other: #898781;
+  /* The camera frame is always a dark image (black sky), so its overlays use the dark steps. */
+  --ck-1: #184f95; --ck-2: #256abf; --ck-3: #3987e5; --ck-4: #5598e7;
+  --ck-5: #86b6ef; --ck-10: #9ec5f4; --ck-20: #cde2fb; --ck-other: #c3c2b7;
+  --cam-margin: #46453f;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
+    --ground: #2c2b27; --ground-line: #67645b; --accent: #3987e5;
+    --tip-bg: #f0efec; --tip-fg: #0b0b0b;
+    --k-1: #184f95; --k-2: #256abf; --k-3: #3987e5; --k-4: #5598e7;
+    --k-5: #86b6ef; --k-10: #9ec5f4; --k-20: #cde2fb;
+    --cam-margin: #2c2b27;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
+  --ground: #2c2b27; --ground-line: #67645b; --accent: #3987e5;
+  --tip-bg: #f0efec; --tip-fg: #0b0b0b;
+  --k-1: #184f95; --k-2: #256abf; --k-3: #3987e5; --k-4: #5598e7;
+  --k-5: #86b6ef; --k-10: #9ec5f4; --k-20: #cde2fb;
+  --cam-margin: #2c2b27;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); margin: 0; }
+.page {
+  max-width: 1320px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 40px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+h1 { font-size: 22px; line-height: 1.2; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-2); }
+h3 { font-size: 13px; margin: 12px 0 4px; color: var(--ink-2); }
+p { margin: 0; }
+.top { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-start; justify-content: space-between; }
+.titles { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sub { color: var(--ink-2); }
+.badge {
+  border: 1.5px solid var(--ink); border-radius: 4px; padding: 3px 8px; font-weight: 650;
+  font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap;
+}
+.controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.controls label { display: flex; gap: 6px; align-items: center; color: var(--ink-2); min-width: 0; max-width: 100%; }
+.controls select { min-width: 0; flex: 0 1 auto; }
+select, button {
+  font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--axis);
+  border-radius: 6px; padding: 4px 8px; min-height: 32px;
+}
+select { max-width: 100%; }
+#model { max-width: min(420px, 100%); }
+button { cursor: pointer; min-width: 34px; }
+button:hover, select:hover { border-color: var(--ink-2); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#play { min-width: 76px; font-weight: 600; }
+.scrub { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; flex: 1 1 320px; min-width: 0; }
+#frame { flex: 1 1 160px; min-width: 0; accent-color: var(--accent); }
+#tlabel { font: 13px var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timeline canvas { display: block; width: 100%; height: 76px; cursor: pointer; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; color: var(--ink-2); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 2px 10px 2px 6px;
+  min-height: 28px; font-variant-numeric: tabular-nums;
+}
+.chip[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
+.dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex: none; }
+.key { display: inline-flex; align-items: center; gap: 6px; }
+.key svg { flex: none; }
+.grid { display: grid; grid-template-columns: minmax(0, 440px) minmax(0, 1fr); gap: 14px; }
+.panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px;
+  display: flex; flex-direction: column; gap: 10px; min-width: 0; margin: 0;
+}
+.cap { color: var(--ink-2); font-size: 13px; }
+.note { color: var(--muted); font-size: 12px; }
+.wide { grid-column: 1 / -1; }
+canvas { display: block; max-width: 100%; }
+.pix { display: grid; grid-template-columns: repeat(3, minmax(0, 192px)); gap: 10px; }
+.pix figure { margin: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pix figcaption { font-size: 12px; color: var(--ink-2); }
+.pix canvas { width: 100%; height: auto; aspect-ratio: 1; image-rendering: pixelated; background: var(--cam-margin); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; width: 100%; }
+th, td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--ink-2); font-weight: 600; }
+th:first-child, td:first-child { text-align: left; }
+td.dim { color: var(--muted); }
+.wide table { width: auto; }
+.wide th, .wide td { padding: 4px 14px; }
+tr.off td { color: var(--muted); }
+.notes dl { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px 24px; }
+.notes dl > div { display: flex; flex-direction: column; gap: 2px; }
+.notes dt { font-weight: 650; }
+.notes dd { margin: 0; color: var(--ink-2); max-width: 75ch; }
+code { font-family: var(--mono); font-size: 12px; }
+.tip {
+  position: fixed; z-index: 20; pointer-events: none; background: var(--tip-bg); color: var(--tip-fg);
+  border-radius: 6px; padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: pre; max-width: 90vw;
+}
+@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+
+<div class="page">
+  <header class="top">
+    <div class="titles">
+      <h1>Ball predictions vs actual motion</h1>
+      <p class="sub" id="sub"></p>
+    </div>
+    <span class="badge" id="badge"></span>
+  </header>
+
+  <section class="controls" aria-label="Model, episode and playback">
+    <label for="model">Model <select id="model"></select></label>
+    <label for="episode">Episode <select id="episode"></select></label>
+    <div class="scrub">
+      <button id="play" type="button">Play</button>
+      <button id="prev" type="button" aria-label="Previous frame">&lsaquo;</button>
+      <button id="next" type="button" aria-label="Next frame">&rsaquo;</button>
+      <input type="range" id="frame" min="0" max="59" value="3" aria-label="Frame">
+      <output id="tlabel" for="frame"></output>
+    </div>
+    <label for="speed">Speed
+      <select id="speed">
+        <option value="0.25">&frac14;&times;</option>
+        <option value="0.5">&frac12;&times;</option>
+        <option value="1" selected>1&times; (real time)</option>
+      </select>
+    </label>
+  </section>
+
+  <div class="timeline"><canvas id="timeline" aria-label="Frame timeline: events and the windows eval scores. Click to jump."></canvas></div>
+
+  <section class="legend" aria-label="Legend and display options">
+    <span>Horizons (click to hide):</span>
+    <span class="chips" id="chips"></span>
+    <span class="key"><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="var(--k-4)" stroke="var(--surface)" stroke-width="2"></circle></svg>predicted t+k</span>
+    <span class="key"><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="var(--ink)" stroke-width="1.5"></circle></svg>actual t+k</span>
+    <label for="region">Region <select id="region"></select></label>
+    <label for="zoom">Side view <select id="zoom">
+      <option value="path">whole path</option>
+      <option value="ball">around the ball</option>
+    </select></label>
+  </section>
+
+  <div class="grid">
+    <figure class="panel" id="cam-panel">
+      <h2>Camera, frame t</h2>
+      <canvas id="cam" aria-label="Camera frame with predicted and actual positions"></canvas>
+      <p class="cap" id="cam-cap"></p>
+    </figure>
+
+    <figure class="panel" id="side-panel">
+      <h2>Side view, world metres</h2>
+      <canvas id="side" aria-label="Side view: terrain, the ball's path, predicted and actual positions"></canvas>
+      <p class="cap" id="side-cap"></p>
+    </figure>
+
+    <section class="panel">
+      <h2>Pixel decoder</h2>
+      <div class="pix">
+        <figure><canvas id="pix-dec" width="64" height="64"></canvas><figcaption id="pix-dec-cap"></figcaption></figure>
+        <figure><canvas id="pix-real" width="64" height="64"></canvas><figcaption id="pix-real-cap"></figcaption></figure>
+        <figure><canvas id="pix-diff" width="64" height="64"></canvas><figcaption>
+          |decoder &minus; real| &times;
+          <select id="gain" aria-label="Difference gain"><option value="1">1</option><option value="4" selected>4</option><option value="16">16</option></select>
+        </figcaption></figure>
+      </div>
+      <p class="cap" id="pix-cap"></p>
+    </section>
+
+    <section class="panel">
+      <h2>At this frame</h2>
+      <div class="scroll"><table id="ktable"></table></div>
+      <p class="note" id="ktable-note"></p>
+    </section>
+
+    <section class="panel wide">
+      <h2>This model on the whole split</h2>
+      <div id="evalsum"></div>
+      <h3>This episode only</h3>
+      <div class="scroll"><table id="epsum"></table></div>
+      <p class="note" id="epsum-note"></p>
+    </section>
+
+    <section class="panel notes wide">
+      <h2>What each overlay is</h2>
+      <dl id="notes"></dl>
+    </section>
+  </div>
+  <div class="tip" id="tip" hidden></div>
+</div>
+
+<script id="payload" type="application/json">__PAYLOAD__</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("payload").textContent);
+const $ = (id) => document.getElementById(id);
+const S = D.sim.frame_size, PPM = D.sim.px_per_m, FPS = D.sim.fps;
+const KNOWN_K = [1, 2, 3, 4, 5, 10, 20];
+const LABELLED_K = new Set([5, 10, 20]);  // selective direct labels in the side view
+const state = { m: 0, e: 0, t: 0, playing: false, speed: 1, hidden: new Set(), region: "", zoom: "path", gain: 4 };
+const images = new Map();
+let markers = { cam: [], side: [] };
+
+const model = () => D.models[state.m];
+const episode = () => D.episodes[state.e];
+const mep = () => model().episodes[state.e];
+const fmt = (x, d = 3) => (x == null || !isFinite(x) ? "—" : x.toFixed(d));
+const fmtSig = (x) => (x == null || !isFinite(x) ? "—" : x < 0.01 ? x.toExponential(1) : x.toFixed(3));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function css() { return getComputedStyle(document.documentElement); }
+function kColor(cs, k, onImage) {
+  const pre = onImage ? "--ck-" : "--k-";
+  return (KNOWN_K.includes(k) ? cs.getPropertyValue(pre + k) : cs.getPropertyValue(pre + "other")).trim();
+}
+function strip(uri) {
+  let im = images.get(uri);
+  if (!im) {
+    im = new Image();
+    im.onload = () => render();
+    im.src = uri;
+    images.set(uri, im);
+  }
+  return im.complete && im.naturalWidth ? im : null;
+}
+function fitCanvas(cv, w, h) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.round(w * dpr), H = Math.round(h * dpr);
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  cv.style.width = w + "px";
+  cv.style.height = h + "px";
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
+}
+/* Window index for frame t: predictions exist for t >= t0 (C-1 context frames before t). */
+function win(t) {
+  const m = model(), w = t - m.t0;
+  return w >= 0 && t <= episode().T - 1 ? w : -1;
+}
+function visibleKs() { return model().horizons.map((k, j) => ({ k, j })).filter(({ k }) => !state.hidden.has(k)); }
+function regionsShown() {
+  if (state.region === "none") return [];
+  if (state.region === "all") return D.regions;
+  return D.regions.filter((r) => String(r.p) === state.region);
+}
+function inRegion(pred, truth, std, scale) {
+  const zx = (truth[0] - pred[0]) / std[0], zz = (truth[1] - pred[1]) / std[1];
+  return zx * zx + zz * zz <= scale * scale;
+}
+function dist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
+/* Everything known about horizon j at frame t, for the table and the tooltips. */
+function horizonAt(t, j) {
+  const m = model(), e = episode(), w = win(t), k = m.horizons[j];
+  if (w < 0 || !m.goal) return null;
+  const me = mep();
+  const truth = t + k <= e.T - 1 ? e.pos[t + k] : null;
+  const pred = me.pred[w][j], std = me.std[w][j];
+  return {
+    k, j, pred, std, truth, target: t + k,
+    err: truth ? dist(pred, truth) : null,
+    persist: truth ? dist(e.pos[t], truth) : null,
+    inside: D.regions.map((r) => (truth ? inRegion(pred, truth, std, r.scale) : null)),
+    predPx: me.pred_px[w][j], truePx: me.true_px[w][j],
+  };
+}
+function describe(h) {
+  const lines = [
+    `k = ${h.k}: frame ${h.target}, ${(h.k / FPS).toFixed(2)} s after t`,
+    `predicted  x ${fmt(h.pred[0])}  z ${fmt(h.pred[1])} m`,
+    h.truth ? `actual     x ${fmt(h.truth[0])}  z ${fmt(h.truth[1])} m` : "actual     past the episode's end",
+    `std        x ${fmtSig(h.std[0])}  z ${fmtSig(h.std[1])} m`,
+  ];
+  if (h.truth) {
+    lines.push(`error ${fmt(h.err)} m   (persistence ${fmt(h.persist)} m)`);
+    lines.push(D.regions.map((r, i) => `in ${Math.round(r.p * 100)}% region: ${h.inside[i] ? "yes" : "no"}`).join("   "));
+  }
+  return lines.join("\n");
+}
+
+/* ---------------------------------------------------------------- controls */
+function setupControls() {
+  $("model").innerHTML = D.models.map((m, i) =>
+    `<option value="${i}">${esc(m.label)}, step ${m.step}</option>`).join("");
+  $("episode").innerHTML = D.episodes.map((e, i) =>
+    `<option value="${i}">${esc(e.id)}: ${esc(eventSummary(e))}</option>`).join("");
+  const regionOpts = D.regions.map((r) => `<option value="${r.p}">${Math.round(r.p * 100)}%</option>`);
+  $("region").innerHTML = [...regionOpts, '<option value="all">all</option>', '<option value="none">none</option>'].join("");
+  state.region = String(D.regions[D.regions.length - 1].p);
+  $("region").value = state.region;
+  state.t = Math.max(0, model().t0);
+  $("model").onchange = () => { state.m = +$("model").value; buildChips(); render(); };
+  $("episode").onchange = () => { state.e = +$("episode").value; render(); };
+  $("frame").oninput = () => { state.t = +$("frame").value; render(); };
+  $("prev").onclick = () => step(-1);
+  $("next").onclick = () => step(1);
+  $("play").onclick = () => setPlaying(!state.playing);
+  $("speed").onchange = () => { state.speed = +$("speed").value; };
+  $("region").onchange = () => { state.region = $("region").value; render(); };
+  $("zoom").onchange = () => { state.zoom = $("zoom").value; render(); };
+  $("gain").onchange = () => { state.gain = +$("gain").value; render(); };
+  document.addEventListener("keydown", (ev) => {
+    // A focused control handles its own keys: Space activates a button, arrows move the slider.
+    if (ev.target.closest && ev.target.closest("button, select, input, textarea")) return;
+    if (ev.key === " ") { ev.preventDefault(); setPlaying(!state.playing); }
+    else if (ev.key === "ArrowLeft") { ev.preventDefault(); step(-1); }
+    else if (ev.key === "ArrowRight") { ev.preventDefault(); step(1); }
+  });
+  const tl = $("timeline");
+  const seek = (ev) => {
+    const r = tl.getBoundingClientRect(), g = timelineGeom(r.width);
+    const t = Math.round(((ev.clientX - r.left) - g.x0) / g.w * (episode().T - 1));
+    state.t = Math.min(episode().T - 1, Math.max(0, t));
+    render();
+  };
+  tl.addEventListener("pointerdown", (ev) => { seek(ev); tl.setPointerCapture(ev.pointerId); });
+  tl.addEventListener("pointermove", (ev) => { if (ev.buttons) seek(ev); });
+  for (const id of ["cam", "side"]) {
+    const cv = $(id);
+    cv.addEventListener("pointermove", (ev) => hover(id, ev));
+    cv.addEventListener("pointerleave", () => { $("tip").hidden = true; });
+  }
+  window.addEventListener("resize", () => render());
+  if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => render());
+  new MutationObserver(() => render()).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  buildChips();
+}
+function buildChips() {
+  $("chips").innerHTML = model().horizons.map((k) =>
+    `<button type="button" class="chip" data-k="${k}" aria-pressed="${!state.hidden.has(k)}">` +
+    `<span class="dot" style="background: var(--k-${KNOWN_K.includes(k) ? k : "other"})"></span>k=${k}</button>`).join("");
+  for (const b of $("chips").querySelectorAll("button")) {
+    b.onclick = () => {
+      const k = +b.dataset.k;
+      if (state.hidden.has(k)) state.hidden.delete(k); else state.hidden.add(k);
+      b.setAttribute("aria-pressed", String(!state.hidden.has(k)));
+      render();
+    };
+  }
+}
+function eventSummary(e) {
+  const n = (k) => e.events[k].length, plural = (c, w) => `${c} ${w}${c === 1 ? "" : "s"}`;
+  const parts = [plural(n("bounce"), "bounce")];
+  if (n("out_of_view")) parts.push(`${n("out_of_view")} frames out of view`);
+  if (n("occluded")) parts.push(`${n("occluded")} frames occluded`);
+  return parts.join(", ");
+}
+function step(d) {
+  setPlaying(false);
+  state.t = Math.min(episode().T - 1, Math.max(0, state.t + d));
+  render();
+}
+let last = 0, acc = 0, raf = 0;  // raf: the pending frame request, so only one loop runs
+function setPlaying(on) {
+  state.playing = on;
+  $("play").textContent = on ? "Pause" : "Play";
+  if (on) {
+    if (state.t >= episode().T - 1) state.t = 0;
+    last = performance.now(); acc = 0;
+    if (!raf) raf = requestAnimationFrame(tick);
+  }
+}
+function tick(now) {
+  raf = 0;
+  if (!state.playing) return;
+  acc += (now - last) / 1000 * FPS * state.speed;
+  last = now;
+  if (acc >= 1) {
+    const n = Math.floor(acc);
+    acc -= n;
+    state.t += n;
+    if (state.t >= episode().T - 1) { state.t = episode().T - 1; render(); setPlaying(false); return; }
+    render();
+  }
+  raf = requestAnimationFrame(tick);
+}
+function hover(id, ev) {
+  const r = $(id).getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+  let best = null, bd = 12;
+  for (const mk of markers[id]) {
+    const d = Math.hypot(mk.x - x, mk.y - y);
+    if (d < bd) { bd = d; best = mk; }
+  }
+  const tip = $("tip");
+  if (!best) { tip.hidden = true; return; }
+  tip.textContent = best.text;
+  tip.hidden = false;
+  const pad = 14, tw = tip.offsetWidth, th = tip.offsetHeight;
+  let left = ev.clientX + pad, top = ev.clientY + pad;
+  if (left + tw > window.innerWidth - 8) left = ev.clientX - pad - tw;
+  if (top + th > window.innerHeight - 8) top = ev.clientY - pad - th;
+  tip.style.left = Math.max(8, left) + "px";
+  tip.style.top = Math.max(8, top) + "px";
+}
+
+/* ---------------------------------------------------------------- render */
+function render() {
+  const m = model(), e = episode();
+  state.t = Math.min(state.t, e.T - 1);
+  $("frame").max = e.T - 1;
+  $("frame").value = state.t;
+  $("tlabel").textContent = `t = ${String(state.t).padStart(2, " ")} / ${e.T - 1} · ${(state.t / FPS).toFixed(2)} s`;
+  $("badge").textContent = `${D.split} split · held out`;
+  $("sub").textContent = `${m.label}: ${m.run}, ${m.checkpoint} (step ${m.step}), trained on the ${m.trained_on} split. ` +
+    `Showing ${D.split} episode ${e.id}.`;
+  const cs = css();
+  drawTimeline(cs);
+  drawCamera(cs);
+  drawSide(cs);
+  drawPixel();
+  fillTable(cs);
+  fillSummary();
+  fillNotes();
+}
+
+function timelineGeom(width) { const x0 = 92; return { x0, w: Math.max(10, width - x0 - 8) }; }
+function drawTimeline(cs) {
+  const cv = $("timeline"), width = cv.parentElement.clientWidth, height = 76;
+  const ctx = fitCanvas(cv, width, height), e = episode(), m = model(), g = timelineGeom(width);
+  const X = (t) => g.x0 + (t / (e.T - 1)) * g.w;
+  ctx.clearRect(0, 0, width, height);
+  ctx.font = "11px " + cs.getPropertyValue("--font");
+  ctx.textBaseline = "middle";
+  const rows = [
+    { label: "eval windows", y: 10 },
+    { label: "predicted", y: 24 },
+    { label: "bounce", y: 38, ev: "bounce" },
+    { label: "out of view", y: 52, ev: "out_of_view" },
+    { label: "occluded", y: 66, ev: "occluded" },
+  ];
+  const ink2 = cs.getPropertyValue("--ink-2").trim(), muted = cs.getPropertyValue("--muted").trim();
+  const grid = cs.getPropertyValue("--grid").trim(), ink = cs.getPropertyValue("--ink").trim();
+  for (const r of rows) {
+    ctx.fillStyle = muted;
+    ctx.fillText(r.label, 0, r.y);
+    ctx.fillStyle = grid;
+    ctx.fillRect(g.x0, r.y - 0.5, g.w, 1);
+  }
+  ctx.fillStyle = ink2;
+  ctx.fillRect(X(m.scored[0]), 6, X(m.scored[1]) - X(m.scored[0]), 8);
+  if (m.goal || m.pixel) ctx.fillRect(X(m.t0), 21, X(e.T - 1) - X(m.t0), 6);
+  for (const r of rows.filter((r) => r.ev)) {
+    for (const t of e.events[r.ev]) ctx.fillRect(X(t) - 1.5, r.y - 5, 3, 10);
+  }
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(X(state.t), 2);
+  ctx.lineTo(X(state.t), height - 2);
+  ctx.stroke();
+}
+
+function drawCamera(cs) {
+  const cv = $("cam"), panel = $("cam-panel");
+  const size = Math.min(panel.clientWidth - 28, 412);
+  const ctx = fitCanvas(cv, size, size), e = episode(), m = model(), t = state.t;
+  const margin = S / 2, f = size / (S + 2 * margin);
+  const P = (u, v) => [(u + margin) * f, (v + margin) * f];
+  ctx.fillStyle = cs.getPropertyValue("--cam-margin").trim();
+  ctx.fillRect(0, 0, size, size);
+  const im = strip(e.frames);
+  if (im) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(im, t * S, 0, S, S, margin * f, margin * f, S * f, S * f);
+  }
+  ctx.strokeStyle = "rgba(255,255,255,0.55)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(margin * f - 0.5, margin * f - 0.5, S * f + 1, S * f + 1);
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = "11px " + cs.getPropertyValue("--font");
+  ctx.textBaseline = "top";
+  ctx.fillText("outside the 64×64 frame", 6, 6);
+  markers.cam = [];
+  const clampPt = (p) => {
+    const lo = 5, hi = size - 5;
+    const q = [Math.min(hi, Math.max(lo, p[0])), Math.min(hi, Math.max(lo, p[1]))];
+    return { q, clamped: q[0] !== p[0] || q[1] !== p[1] };
+  };
+  // The true ball at t, at its true size: ground truth, drawn over the rendered ball.
+  const bt = P(e.px[t][0], e.px[t][1]);
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.25;
+  ctx.beginPath();
+  ctx.arc(bt[0], bt[1], e.radius * PPM * f, 0, 2 * Math.PI);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  markers.cam.push({ x: bt[0], y: bt[1], text: `ball at t = ${t} (actual)\nx ${fmt(e.pos[t][0])}  z ${fmt(e.pos[t][1])} m\nradius ${fmt(e.radius)} m` });
+  const w = win(t);
+  let cap;
+  if (!m.goal) cap = "This model has no goal head, so there are no predicted positions to draw.";
+  else if (w < 0) cap = `Predictions start at t = ${m.t0}: the model needs frames t−${m.t0}…t.`;
+  else {
+    const regions = regionsShown();
+    for (const { k, j } of visibleKs()) {
+      const h = horizonAt(t, j), col = kColor(cs, k, true);
+      const pp = P(h.predPx[0], h.predPx[1]);
+      const cp = clampPt(pp);
+      if (!cp.clamped) {
+        regions.forEach((r) => {
+          const rx = r.scale * h.std[0] * PPM * f, ry = r.scale * h.std[1] * PPM * f;
+          ctx.setLineDash(r.p < D.regions[D.regions.length - 1].p ? [4, 3] : []);
+          ctx.beginPath();
+          ctx.ellipse(pp[0], pp[1], Math.max(rx, 0.5), Math.max(ry, 0.5), 0, 0, 2 * Math.PI);
+          ctx.strokeStyle = "rgba(255,255,255,0.7)";
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        });
+        ctx.setLineDash([]);
+      }
+      if (h.truePx[0] != null) {
+        const tp = clampPt(P(h.truePx[0], h.truePx[1]));
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cp.q[0], cp.q[1]);
+        ctx.lineTo(tp.q[0], tp.q[1]);
+        ctx.stroke();
+        ringMark(ctx, tp.q, 4.5, "#ffffff", "#000000", tp.clamped);
+        markers.cam.push({ x: tp.q[0], y: tp.q[1], text: describe(h) });
+      }
+      dotMark(ctx, cp.q, 4.5, col, "#ffffff", cp.clamped);
+      markers.cam.push({ x: cp.q[0], y: cp.q[1], text: describe(h) });
+    }
+    cap = `Drawn in frame t's camera coordinates (${PPM.toFixed(1)} px per metre): the camera follows the ball, ` +
+      "so frame t+k is framed differently. Points beyond the margin are pinned to its edge (hollow). " +
+      `Dashed circle: the ball at t, true size. ${D.split} split.`;
+  }
+  $("cam-cap").textContent = cap;
+}
+function dotMark(ctx, p, r, fill, ring, hollow) {
+  ctx.beginPath();
+  ctx.arc(p[0], p[1], r, 0, 2 * Math.PI);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = ring;
+  ctx.stroke();
+  if (hollow) { ctx.lineWidth = 1.5; ctx.strokeStyle = fill; ctx.stroke(); }
+  else { ctx.fillStyle = fill; ctx.fill(); }
+}
+function ringMark(ctx, p, r, stroke, outline, dashed) {
+  ctx.beginPath();
+  ctx.arc(p[0], p[1], r, 0, 2 * Math.PI);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = outline;
+  ctx.stroke();
+  ctx.setLineDash(dashed ? [2, 2] : []);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = stroke;
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function sideRange(e, t, width) {
+  let x0, x1, z0, z1;
+  if (state.zoom === "ball") {
+    const half = D.sim.view_height;  // 2x the camera's view
+    x0 = e.pos[t][0] - half; x1 = e.pos[t][0] + half;
+    z0 = e.pos[t][1] - half * 0.55; z1 = e.pos[t][1] + half * 0.55;
+  } else {
+    const xs = e.pos.map((p) => p[0]), zs = e.pos.map((p) => p[1]);
+    const pad = Math.max(1.0, 0.08 * (Math.max(...xs) - Math.min(...xs)));
+    x0 = Math.min(...xs) - pad; x1 = Math.max(...xs) + pad;
+    let lo = Math.min(...zs);
+    e.terrain.x.forEach((x, i) => { if (x >= x0 && x <= x1) lo = Math.min(lo, e.terrain.z[i]); });
+    z0 = lo - 0.3; z1 = Math.max(...zs) + 0.6;
+  }
+  // One scale for x and z (metres are metres): grow whichever span is short.
+  const height = Math.min(440, Math.max(240, width * 0.55));
+  const s = Math.min(width / (x1 - x0), height / (z1 - z0));
+  const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+  return { s, height, x0: cx - width / 2 / s, z1: cz + height / 2 / s };
+}
+function drawSide(cs) {
+  const cv = $("side"), width = $("side-panel").clientWidth - 28;
+  const e = episode(), m = model(), t = state.t;
+  const g = sideRange(e, t, width);
+  const ctx = fitCanvas(cv, width, g.height);
+  const X = (x) => (x - g.x0) * g.s, Z = (z) => (g.z1 - z) * g.s;
+  const tok = (n) => cs.getPropertyValue(n).trim();
+  ctx.fillStyle = tok("--surface");
+  ctx.fillRect(0, 0, width, g.height);
+  // 1 m grid (or coarser when zoomed out), labelled on the left and bottom edges.
+  const stepM = g.s > 40 ? 1 : g.s > 12 ? 2 : 5;
+  ctx.strokeStyle = tok("--grid");
+  ctx.lineWidth = 1;
+  ctx.fillStyle = tok("--muted");
+  ctx.font = "11px " + tok("--font");
+  const xMax = g.x0 + width / g.s, zMin = g.z1 - g.height / g.s;
+  const xTicks = [], zTicks = [];
+  for (let x = Math.ceil(g.x0 / stepM) * stepM; x <= xMax; x += stepM) xTicks.push(x);
+  for (let z = Math.ceil(zMin / stepM) * stepM; z <= g.z1; z += stepM) zTicks.push(z);
+  for (const x of xTicks) { ctx.beginPath(); ctx.moveTo(X(x) + 0.5, 0); ctx.lineTo(X(x) + 0.5, g.height); ctx.stroke(); }
+  for (const z of zTicks) { ctx.beginPath(); ctx.moveTo(0, Z(z) + 0.5); ctx.lineTo(width, Z(z) + 0.5); ctx.stroke(); }
+  // Terrain z = h(x), filled down to the bottom edge.
+  ctx.beginPath();
+  ctx.moveTo(X(e.terrain.x[0]), g.height + 10);
+  e.terrain.x.forEach((x, i) => ctx.lineTo(X(x), Z(e.terrain.z[i])));
+  ctx.lineTo(X(e.terrain.x[e.terrain.x.length - 1]), g.height + 10);
+  ctx.closePath();
+  ctx.fillStyle = tok("--ground");
+  ctx.fill();
+  ctx.strokeStyle = tok("--ground-line");
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = tok("--ink-2");
+  ctx.textBaseline = "bottom";
+  for (const x of xTicks) ctx.fillText(`x ${x} m`, X(x) + 3, g.height - 3);
+  ctx.textBaseline = "top";
+  for (const z of zTicks) ctx.fillText(`z ${z} m`, 3, Z(z) + 3);
+  // The camera's view at frame t.
+  const half = D.sim.view_height / 2, c = e.cam[t];
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = tok("--muted");
+  ctx.lineWidth = 1;
+  ctx.strokeRect(X(c[0] - half), Z(c[1] + half), 2 * half * g.s, 2 * half * g.s);
+  ctx.setLineDash([]);
+  ctx.fillStyle = tok("--muted");
+  ctx.textBaseline = "top";
+  ctx.fillText("camera, frame t", X(c[0] - half) + 4, Math.max(3, Z(c[1] + half) + 4));
+  // The ball's actual path: the future dashed, the past solid.
+  const path = (from, to) => { ctx.beginPath(); for (let i = from; i <= to; i++) { const p = e.pos[i]; i === from ? ctx.moveTo(X(p[0]), Z(p[1])) : ctx.lineTo(X(p[0]), Z(p[1])); } ctx.stroke(); };
+  ctx.strokeStyle = tok("--muted");
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  path(t, e.T - 1);
+  ctx.setLineDash([]);
+  ctx.strokeStyle = tok("--ink-2");
+  ctx.lineWidth = 1.75;
+  path(0, t);
+  // The ball at t, true size.
+  ctx.beginPath();
+  ctx.arc(X(e.pos[t][0]), Z(e.pos[t][1]), Math.max(2, e.radius * g.s), 0, 2 * Math.PI);
+  ctx.strokeStyle = tok("--ink");
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  markers.side = [{ x: X(e.pos[t][0]), y: Z(e.pos[t][1]), text: `ball at t = ${t} (actual)\nx ${fmt(e.pos[t][0])}  z ${fmt(e.pos[t][1])} m` }];
+  const w = win(t);
+  let cap = `Terrain z = h(x), the ball's actual path (solid up to t, dashed after) and the camera's view at t. ${D.split} split.`;
+  if (m.goal && w >= 0) {
+    const regions = regionsShown(), surface = tok("--surface");
+    const ks = visibleKs();
+    for (const { k, j } of ks) {  // regions under every marker
+      const h = horizonAt(t, j), col = kColor(cs, k, false);
+      regions.forEach((r) => {
+        ctx.setLineDash(r.p < D.regions[D.regions.length - 1].p ? [4, 3] : []);
+        ctx.beginPath();
+        ctx.ellipse(X(h.pred[0]), Z(h.pred[1]), Math.max(0.5, r.scale * h.std[0] * g.s), Math.max(0.5, r.scale * h.std[1] * g.s), 0, 0, 2 * Math.PI);
+        ctx.globalAlpha = 0.10;
+        ctx.fillStyle = col;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.25;
+        ctx.stroke();
+      });
+      ctx.setLineDash([]);
+    }
+    for (const { k, j } of ks) {
+      const h = horizonAt(t, j), col = kColor(cs, k, false);
+      const pp = [X(h.pred[0]), Z(h.pred[1])];
+      if (h.truth) {
+        const tp = [X(h.truth[0]), Z(h.truth[1])];
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(pp[0], pp[1]); ctx.lineTo(tp[0], tp[1]); ctx.stroke();
+        ringMark(ctx, tp, 4.5, tok("--ink"), surface, false);
+        markers.side.push({ x: tp[0], y: tp[1], text: describe(h) });
+      }
+      dotMark(ctx, pp, 4.5, col, surface, false);
+      markers.side.push({ x: pp[0], y: pp[1], text: describe(h) });
+      if (LABELLED_K.has(k)) {
+        ctx.fillStyle = tok("--ink-2");
+        ctx.textBaseline = "bottom";
+        ctx.fillText(`k=${k}`, pp[0] + 6, pp[1] - 5);
+      }
+    }
+    cap = `Filled dots: the goal head's predicted position at t+k; rings: where the ball actually was at t+k; ` +
+      `ellipses: the ${regions.map((r) => Math.round(r.p * 100) + "%").join(" and ") || "(hidden)"} region. ` + cap;
+  } else if (!m.goal) cap = "This model has no goal head. " + cap;
+  $("side-cap").textContent = cap;
+}
+
+const off = document.createElement("canvas");
+off.width = off.height = S;
+const offCtx = off.getContext("2d", { willReadFrequently: true });
+function framePixels(uri, idx) {
+  const im = strip(uri);
+  if (!im) return null;
+  offCtx.clearRect(0, 0, S, S);
+  offCtx.drawImage(im, idx * S, 0, S, S, 0, 0, S, S);
+  return offCtx.getImageData(0, 0, S, S);
+}
+function blit(id, data) {
+  const cv = $(id), ctx = cv.getContext("2d");
+  cv.width = cv.height = S;
+  if (data) ctx.putImageData(data, 0, 0); else ctx.clearRect(0, 0, S, S);
+}
+function drawPixel() {
+  const m = model(), e = episode(), t = state.t, w = win(t);
+  const hasNext = t + 1 <= e.T - 1;
+  const real = hasNext ? framePixels(e.frames, t + 1) : null;
+  blit("pix-real", real);
+  $("pix-real-cap").textContent = hasNext ? `Real frame t+1 = ${t + 1}` : "No frame t+1: the episode ends at t.";
+  if (!m.pixel) {
+    blit("pix-dec", null); blit("pix-diff", null);
+    $("pix-dec-cap").textContent = "This model has no pixel decoder.";
+    $("pix-cap").textContent = "";
+    return;
+  }
+  if (w < 0) {
+    blit("pix-dec", null); blit("pix-diff", null);
+    $("pix-dec-cap").textContent = `Starts at t = ${m.t0}.`;
+    $("pix-cap").textContent = `The decoder reads frames t−${m.t0}…t, so its first frame is t = ${m.t0}.`;
+    return;
+  }
+  const dec = framePixels(mep().pixel, w);
+  blit("pix-dec", dec);
+  $("pix-dec-cap").textContent = `Decoder output from frames ${t - m.t0}…${t}: its frame ${t + 1}`;
+  if (dec && real) {
+    const diff = new ImageData(S, S);
+    for (let i = 0; i < diff.data.length; i += 4) {
+      for (let c = 0; c < 3; c++) diff.data[i + c] = Math.min(255, Math.abs(dec.data[i + c] - real.data[i + c]) * state.gain);
+      diff.data[i + 3] = 255;
+    }
+    blit("pix-diff", diff);
+  } else blit("pix-diff", null);
+  const mae = mep().pixel_mae[w], copy = mep().copy_mae[w];
+  $("pix-cap").textContent = mae == null
+    ? "No real frame t+1 to compare with."
+    : `Mean absolute error at this frame (0–1 scale): decoder ${mae.toFixed(4)}, copying frame t ${copy.toFixed(4)}. ` +
+      `The decoder is an auxiliary head, trained on the train split to draw frame t+1. ${D.split} split.`;
+}
+
+function fillTable(cs) {
+  const m = model(), t = state.t, w = win(t);
+  const tbl = $("ktable");
+  if (!m.goal) { tbl.innerHTML = ""; $("ktable-note").textContent = "This model has no goal head."; return; }
+  if (w < 0) { tbl.innerHTML = ""; $("ktable-note").textContent = `Predictions start at t = ${m.t0}.`; return; }
+  const regionHead = D.regions.map((r) => `<th>in ${Math.round(r.p * 100)}%</th>`).join("");
+  let rows = `<thead><tr><th>k</th><th>frame</th><th>predicted x, z (m)</th><th>actual x, z (m)</th>` +
+    `<th>error (m)</th><th>persistence (m)</th><th>std x, z (m)</th>${regionHead}</tr></thead><tbody>`;
+  for (let j = 0; j < m.horizons.length; j++) {
+    const h = horizonAt(t, j), k = h.k;
+    const cls = state.hidden.has(k) ? ' class="off"' : "";
+    const sw = `<span class="dot" style="background: ${kColor(cs, k, false)}; width:10px; height:10px; margin-right:6px; vertical-align:-1px"></span>`;
+    rows += `<tr${cls}><td>${sw}${k}</td><td>${h.target}</td>` +
+      `<td>${fmt(h.pred[0])}, ${fmt(h.pred[1])}</td>` +
+      (h.truth ? `<td>${fmt(h.truth[0])}, ${fmt(h.truth[1])}</td><td>${fmt(h.err)}</td><td>${fmt(h.persist)}</td>`
+        : `<td class="dim">past the end</td><td class="dim">—</td><td class="dim">—</td>`) +
+      `<td>${fmtSig(h.std[0])}, ${fmtSig(h.std[1])}</td>` +
+      h.inside.map((v) => `<td${v == null ? ' class="dim"' : ""}>${v == null ? "—" : v ? "yes" : "no"}</td>`).join("") + "</tr>";
+  }
+  tbl.innerHTML = rows + "</tbody>";
+  const scored = t >= m.scored[0] && t <= m.scored[1];
+  $("ktable-note").textContent = `t = ${t}: ${scored ? "inside" : "outside"} the windows eval scores (t = ${m.scored[0]}…${m.scored[1]}). ` +
+    "Persistence predicts the ball stays where it is at t. One frame of one episode: expect noise.";
+}
+
+function fillSummary() {
+  const m = model(), ev = m.eval;
+  const box = $("evalsum");
+  if (!ev) {
+    box.innerHTML = `<p class="cap">No <code>eval --run</code> report for this checkpoint on the ${esc(D.split)} split, ` +
+      `so no split-wide numbers are shown. To make one: <code>uv run python -m jepa_world.eval --run &lt;run dir&gt; ` +
+      `--checkpoint ${esc(m.checkpoint)} --split ${esc(D.split)}</code></p>`;
+  } else {
+    const levels = Object.keys(ev.by_k[Object.keys(ev.by_k)[0]].coverage);
+    let h = `<p class="cap">From <code>${esc(ev.file)}</code> in the run's eval folder: the ${esc(ev.split)} split` +
+      `${ev.headline ? " (the headline split)" : ""}, ${ev.episodes} episodes, ${ev.windows} windows (t = ${ev.starts[0]}…${ev.starts[1]}). ` +
+      "Ratios below 1 beat that baseline. Coverage should be close to its level.</p>";
+    h += `<div class="scroll"><table><thead><tr><th>k</th><th>mean error (m)</th><th>÷ persistence</th><th>÷ const. velocity</th>` +
+      `<th>÷ simulator, mean params</th>${levels.map((p) => `<th>${Math.round(p * 100)}% coverage</th>`).join("")}</tr></thead><tbody>`;
+    for (const [k, r] of Object.entries(ev.by_k)) {
+      h += `<tr><td>${k}</td><td>${fmt(r.error_m, 4)}</td><td>${fmt(r.ratio_to_persistence)}</td><td>${fmt(r.ratio_to_const_velocity)}</td>` +
+        `<td>${fmt(r.ratio_to_simulator_mean)}</td>${levels.map((p) => `<td>${fmt(r.coverage[p])}</td>`).join("")}</tr>`;
+    }
+    h += "</tbody></table></div>";
+    if (ev.probe_r2) {
+      h += `<p class="note">Linear probe R² on this split (pooled encoder levels, fitted on ${esc(m.trained_on)}): ` +
+        `world position ${fmt(ev.probe_r2.pos, 2)}, position in the frame ${fmt(ev.probe_r2.pos_cam, 2)}.</p>`;
+    }
+    box.innerHTML = h;
+  }
+  const tbl = $("epsum"), me = mep();
+  if (!m.goal) { tbl.innerHTML = ""; $("epsum-note").textContent = ""; return; }
+  let rows = "<thead><tr><th>k</th><th>model error (m)</th><th>persistence error (m)</th><th>ratio</th></tr></thead><tbody>";
+  for (const k of m.horizons) {
+    const r = me.errors[String(k)];
+    rows += `<tr><td>${k}</td><td>${fmt(r.model, 4)}</td><td>${fmt(r.persistence, 4)}</td><td>${r.persistence > 0 ? fmt(r.model / r.persistence) : "—"}</td></tr>`;
+  }
+  tbl.innerHTML = rows + "</tbody>";
+  $("epsum-note").textContent = `Mean over t = ${m.scored[0]}…${m.scored[1]} of episode ${episode().id}, the same windows eval scores. ` +
+    "One episode is a small sample; the table above is the split-wide result.";
+}
+
+function fillNotes() {
+  const m = model(), c = m.t0 + 1;
+  const items = [
+    ["Predicted position (filled dot)",
+      `The goal head's output. From frames t−${m.t0}…t only (${c} frames), it predicts` +
+      " the ball's displacement from t to t+k as a 2-D Gaussian " +
+      "(a mean and a standard deviation per axis). The dot is the ball's position at t plus that mean. These are the numbers " +
+      "eval scores as the goal head."],
+    ["Region (ellipse)",
+      "The joint region of that Gaussian that holds the stated probability (solid for the largest level, dashed for smaller ones). " +
+      "These are the regions eval's coverage numbers count: over many windows, the actual position should fall inside the 90% " +
+      "region about 90% of the time."],
+    ["Actual position (ring)", "Where the ball really was at t+k, from the simulator's ground truth."],
+    ["Camera view",
+      `The real ${S}×${S} frame t, upscaled. Everything is drawn in frame t's camera coordinates. The camera is orthographic ` +
+      "and follows the ball with a lag, so the ball at t+k appears elsewhere in frame t+k itself."],
+    ["Pixel decoder",
+      `An auxiliary head trained to draw frame t+1 from the same ${c} context frames.` +
+      " It is shown beside the real frame t+1, " +
+      "with the error of simply copying frame t for comparison."],
+    ["Not drawn: the latent predictor heads",
+      "They predict embeddings of future frames, not positions. A linear probe recovers world position from these embeddings " +
+      "poorly (its R² is in the summary panel when the run's eval has one), so a probe's output would show the probe's failure, " +
+      "not the model's prediction."],
+    ["Data", `${D.split_note}. ${D.picked_by}. Dataset ${D.dataset}. Every model was trained on its own training split, never on these episodes.`],
+    [`Frames after t = ${m.scored[1]}`,
+      `The model predicts at every t from ${m.t0} on, but eval scores only t = ${m.scored[0]}…${m.scored[1]}, where every ` +
+      `horizon the model is trained on (up to k = ${m.k_eval}) still lands inside the episode. Later frames show ground ` +
+      "truth only for the horizons that still fit."],
+    ["Made", `${D.created}, git ${D.git && D.git.sha ? D.git.sha.slice(0, 10) : "?"}${D.git && D.git.dirty ? " (uncommitted changes)" : ""}, by python -m jepa_world.viewer.`],
+  ];
+  $("notes").innerHTML = items.map(([dt, dd]) => `<div><dt>${esc(dt)}</dt><dd>${esc(dd)}</dd></div>`).join("");
+}
+
+setupControls();
+render();
+</script>

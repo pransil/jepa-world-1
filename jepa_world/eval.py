@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import os
 import secrets
 import sys
 import time
@@ -42,7 +41,7 @@ from jepa_world.sim.io import load_episode
 from jepa_world.utils.config import load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
-from jepa_world.utils.paths import new_run_dir
+from jepa_world.utils.paths import new_run_dir, write_new
 from jepa_world.utils.repro import run_metadata
 
 
@@ -307,18 +306,22 @@ def model_outputs(
     *,
     goal: bool = True,
     features: bool = True,
+    pixel: bool = False,
 ) -> dict:
-    """The goal head's output and the pooled context levels for windows (ep, t).
+    """The goal head's output and the pooled context levels for windows (ep, t), and with
+    pixel=True the pixel decoder's frame (its prediction of frame t+1, SPEC §4.7).
 
     Only the context frames t−C+1 … t go to the device, never ground truth or a later frame. The
     goal head and the probes read nothing else, so the targets and horizon heads that
     `WorldModel.forward` would also compute are skipped. This is the same path as forward's goal
     (`test_context_path_matches_forward`). Returns {"goal_mean", "goal_logvar"}: (M, K, 2)
     float64, or None without a goal head (or goal=False), and {"features": {level: (M,
-    channels)}}, every encoder level spatially pooled, empty with features=False."""
+    channels)}}, every encoder level spatially pooled, empty with features=False, and
+    {"pixel"}: (M, 3, S, S) float32 in [0, 1], or None without a pixel decoder (or pixel=False)."""
     c = model.context_frames
     goal = goal and getattr(model, "goal", None) is not None
-    means, logvars, feats = [], [], {}
+    pixel = pixel and getattr(model, "pixel", None) is not None
+    means, logvars, feats, pixels = [], [], {}, []
     with torch.no_grad():
         for i in range(0, len(ep), batch_size):
             frames = window_frames(es, ep[i : i + batch_size], t[i : i + batch_size], c, 0)
@@ -331,10 +334,13 @@ def model_outputs(
                 for level, f in ctx.items():  # pool on the device: copy (B, C), not the map
                     pooled = f.mean(dim=(2, 3)).cpu().double().numpy()
                     feats.setdefault(level, []).append(pooled)
+            if pixel:
+                pixels.append(model.pixel([ctx[lv] for lv in model.pixel_levels]).cpu().numpy())
     return {
         "goal_mean": np.concatenate(means) if means else None,
         "goal_logvar": np.concatenate(logvars) if logvars else None,
         "features": {level: np.concatenate(v) for level, v in feats.items()},
+        "pixel": np.concatenate(pixels) if pixels else None,
     }
 
 
@@ -521,7 +527,7 @@ def evaluate_run(
         tr_ep, tr_t = ep_all[pick], t_all[pick]
         for s, es in [(trained, tr), *data.items()]:
             _check_seed_balls(cfg, s, es)
-    empty = {"goal_mean": None, "goal_logvar": None, "features": {}}
+    empty = {"goal_mean": None, "goal_logvar": None, "features": {}, "pixel": None}
     outputs, tr_out = dict.fromkeys(splits, empty), None
     if has_goal or use_probes:
         with gpu_lock(f"eval {run_dir.name}", enabled=device.type == "mps"):
@@ -568,12 +574,7 @@ def evaluate_run(
     out_dir.mkdir(exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     name = f"{stamp}-{'-'.join(splits)}-{secrets.token_hex(3)}.json"
-    path, tmp = out_dir / name, out_dir / f".{name}.tmp"
-    tmp.write_text(text)
-    try:
-        os.link(tmp, path)  # all or nothing, and never over an earlier eval (EEXIST)
-    finally:
-        tmp.unlink()
+    path = write_new(out_dir / name, text)  # all or nothing, never over an earlier eval
     return doc, path
 
 

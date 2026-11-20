@@ -71,6 +71,21 @@ def test_slope_is_capped_away_from_walls_and_ledges(sim_cfg):
         assert np.abs(slopes[_away_from_walls_and_ledges(t, tc)]).max() <= tc["max_slope"] + 1e-6
 
 
+def test_zero_ledges_give_a_smooth_slope_capped_interior(sim_cfg):
+    """ledges: [0, 0] (the gentle world, configs/world_gentle.yaml): no ledge, and the slope cap
+    holds over the whole interior, since there is no ledge transition to exempt."""
+    cfg = copy.deepcopy(sim_cfg)
+    cfg["terrain"]["ledges"] = [0, 0]
+    tc = cfg["terrain"]
+    for seed in range(5):
+        t = sample_terrain(cfg, seed)
+        assert t.params["ledge_x"] == [] and t.params["ledge_height"] == []
+        assert np.isfinite(t.heights).all()
+        inner = np.abs(t.x) <= tc["length"] / 2 - tc["wall_width"]
+        slopes = (np.diff(t.heights) / np.diff(t.x))[inner[:-1] & inner[1:]]
+        assert np.abs(slopes).max() <= tc["max_slope"] + 1e-6
+
+
 def test_ledges_are_steps_of_the_configured_size_away_from_the_walls(sim_cfg):
     tc = sim_cfg["terrain"]
     half, margin = tc["length"] / 2, tc["wall_width"] + tc["ledge_gap"]

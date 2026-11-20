@@ -46,10 +46,17 @@ def window(rs: list[dict], key: str, a: int, b: int) -> float:
 
 
 def eval_report(run: Path, step: int) -> dict:
+    """The run's one `jepa_world.eval --split test --split dev` report at `step`. Other files in
+    eval/ (e.g. regimes scoring, whose meta has `split`, not `splits`, and no `report`) are skipped."""
     found = []
     for p in sorted(run.glob("eval/*.json")):
         d = json.loads(p.read_text())
-        if d["meta"]["step"] == step and {"test", "dev"} <= set(d["meta"]["splits"]):
+        meta = d.get("meta", {})
+        if (
+            "report" in d
+            and meta.get("step") == step
+            and {"test", "dev"} <= set(meta.get("splits", []))
+        ):
             found.append((p.name, d))
     if len(found) != 1:
         raise SystemExit(f"{run.name}: expected one step-{step} test+dev eval, found {len(found)}")

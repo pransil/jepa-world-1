@@ -1,0 +1,11 @@
+# M7 §3, camera mode (docs/milestones/M7-plan.md): the 48k M7 reference rendered with the
+# track_full camera, which keeps the ball in frame on exactly the same trajectories
+# (docs/decisions/2026-11-17-camera-mode-track-lagged.md). Changing sim.camera_mode changes the
+# dataset key, so this config builds its own datasets first:
+#   uv run python -m jepa_world.data.build --config configs/m7_camera_full.yaml --split all
+# It inherits the 10% pixel share and latent_reduce: mean (docs/decisions/2026-11-19-m7-ablations-at-48k.md).
+# Seeds 0 (this file) and 1 (--set seed=1). experiments/2026-11-20-m7-camera-full.md
+base: exp_headline_48k.yaml
+
+sim:
+  camera_mode: track_full

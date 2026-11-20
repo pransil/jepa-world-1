@@ -441,13 +441,29 @@ def _gaussian_terms(
     return over_channels(_nll_from_err2(err2, logvar), channels, reduce), sqerr
 
 
+def add_term(
+    total: torch.Tensor, terms: dict[str, torch.Tensor] | None, name: str, term: torch.Tensor
+) -> torch.Tensor:
+    """total + term, recording the weighted term under `name` when `terms` is given. The sum is
+    the one it always was (the same operands, in the same order), so recording changes nothing."""
+    if terms is not None:
+        terms[name] = term
+    return total + term
+
+
 def losses_from_output(
-    model: JEPA, out: dict, loss_cfg: dict, active: Collection[int]
+    model: JEPA,
+    out: dict,
+    loss_cfg: dict,
+    active: Collection[int],
+    terms: dict[str, torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """compute_losses' terms from an existing forward() output, so a caller that also needs the
     output (models/world.py) runs the model once. The same terms and the same total.
     The caller validates first, before its forward: check_loss_cfg, and `active` from
-    model.check_active (compute_losses and world.compute_world_losses both do)."""
+    model.check_active (compute_losses and world.compute_world_losses both do).
+    `terms`, if given, is filled with each weighted term exactly as it enters loss/total, with its
+    graph ("k<k>", "td/k<k>", "var"): what train.encoder_grad_norms differentiates."""
     losses: dict[str, torch.Tensor] = {}
     reduce = latent_reduce(loss_cfg)
     total = out["context"][model.level_names[0]].new_zeros(())
@@ -461,7 +477,7 @@ def losses_from_output(
         losses[f"loss/k{k}"] = lk
         losses[f"relerr/k{k}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
-            total = total + loss_cfg["w_k"] * lk
+            total = add_term(total, terms, f"k{k}", loss_cfg["w_k"] * lk)
     for k in model.td_level:  # empty unless model.top_down
         tag, target = f"td/k{k}", out["td_target"][k]
         ltd, sqerr = _gaussian_terms(
@@ -470,7 +486,7 @@ def losses_from_output(
         losses[f"loss/{tag}"] = ltd
         losses[f"relerr/{tag}"] = _relerr_from_sq(sqerr, target, eps=1e-12)
         if k in active:
-            total = total + loss_cfg["w_td"] * ltd
+            total = add_term(total, terms, tag, loss_cfg["w_td"] * ltd)
     active_levels = {model.head_level[k] for k in active}
     guards, extra = [], {}
     for lv in sorted(set(model.head_level.values()), key=model.level_names.index):
@@ -492,7 +508,28 @@ def losses_from_output(
                 guards.append(g)
     if guards:  # summed, so a level's weight never changes when another level joins
         losses["loss/var"] = torch.stack(guards).sum()
-        total = total + loss_cfg["w_var"] * losses["loss/var"]
+        total = add_term(total, terms, "var", loss_cfg["w_var"] * losses["loss/var"])
     losses["loss/total"] = total
     losses.update(extra)
     return losses
+
+
+@torch.no_grad()
+def copy_relerr(model: JEPA, frames: torch.Tensor, out: dict) -> dict[str, torch.Tensor]:
+    """relerr/copy/k<k>: the latent heads' persistence bar. The prediction is the target encoder's
+    embedding of the stack ending at t, at the level head k reads (after loss.target_norm),
+    scored against forward()["target"][k] (`out` is forward()'s output) exactly as relerr/k is:
+    relerr/k with "nothing changes" for the head. With model.top_down, relerr/copy/td/k<k> does
+    the same for each branch, at its finer level, against out["td_target"][k].
+    One extra no-grad target-encoder pass, up to the deepest level a head reads."""
+    levels = set(model.head_level.values()) | set(model.td_level.values())
+    deepest = max(levels, key=model.level_names.index)
+    zs = model.target_encoder(target_stack(frames, model.context_frames, 0), upto=deepest)
+    z0 = {lv: normalize_target(zs[lv], model.target_norm) for lv in levels}
+    pairs = [(f"k{k}", model.head_level[k], out["target"][k]) for k in model.horizons]
+    pairs += [(f"td/k{k}", lv, out["td_target"][k]) for k, lv in model.td_level.items()]
+    res = {}
+    for tag, lv, target in pairs:
+        sq = _sq_from_err2(_err2(z0[lv], target))
+        res[f"relerr/copy/{tag}"] = _relerr_from_sq(sq, target, eps=1e-12)
+    return res

@@ -97,6 +97,21 @@ def test_the_fitted_scale_makes_the_region_hold_its_level_on_the_fit_set(level):
     assert s == pytest.approx(2.0, rel=0.1)  # the variance was 2x too small
 
 
+def test_fit_scale_refuses_a_fit_set_with_no_spread():
+    with pytest.raises(ValueError, match="no positive variance scale"):
+        calibration.fit_scale(np.r_[np.zeros(95), np.ones(5)], 0.9)
+
+
+def test_the_fitted_level_is_always_scored():
+    dev = {1: gaussian_windows(m=200, seed=1)}
+    test = {1: gaussian_windows(m=200, seed=2)}
+    folds = np.arange(200) % 2
+    labels = {1: np.zeros(200, int)}
+    out = calibration.calibrate(dev, test, folds, labels, levels=[0.5], level=0.8)
+    assert set(out["1"]["test"]["dev_scaled"]["coverage"]) == {"0.5", "0.8"}
+    assert abs(out["1"]["dev_fit"]["dev_after"]["coverage"]["0.8"] - 0.8) <= 1 / 200 + 1e-12
+
+
 def test_fit_scale_is_one_for_a_calibrated_model_and_scales_with_the_residuals():
     p = (np.arange(1, 10_000) - 0.5) / 10_000
     r2 = -2 * np.log(1 - p)  # exact chi-square(2) quantiles: a calibrated model
@@ -154,7 +169,8 @@ def test_calibrate_reports_before_and_after_per_k_and_per_regime():
     test = {k: gaussian_windows(m=600, true_scale=2.0, seed=10 + k) for k in (1, 5)}
     seeds = np.repeat(np.arange(6), 100)
     labels = {k: rng.integers(0, 3, 600) for k in (1, 5)}
-    out = calibration.calibrate(dev, test, seeds, labels, levels=[0.5, 0.9], level=0.9, n_folds=3)
+    folds = calibration.terrain_folds(seeds, 3)
+    out = calibration.calibrate(dev, test, folds, labels, levels=[0.5, 0.9], level=0.9)
     assert set(out) == {"1", "5"}
     for k in (1, 5):
         r = out[str(k)]
@@ -220,6 +236,19 @@ def test_calibrate_run_needs_held_out_dev_and_test_and_a_goal_head(artifacts):
     near, _ = make_run(load_config(BASE, [*TINY, *EPISODES]), name="tiny-cal-no-goal")
     with pytest.raises(ValueError, match="goal head"):
         calibration.calibrate_run(near, eval_cfg(), n_folds=2)
+
+
+@pytest.mark.parametrize(("level", "folds"), [(90, 2), (1.0, 2), (0.9, 1), (0.9, 3)])
+def test_calibrate_run_checks_level_and_folds_before_loading_anything(
+    artifacts, monkeypatch, level, folds
+):
+    loads = []
+    monkeypatch.setattr(calibration, "load_run", lambda *a, **kw: loads.append(a))
+    with pytest.raises(ValueError, match="level|n_folds"):
+        calibration.calibrate_run(
+            "unused", eval_cfg(), level=level, n_folds=folds
+        )  # 2 test terrains
+    assert loads == []
 
 
 def test_cli_prints_before_and_after_per_k(artifacts, capsys):

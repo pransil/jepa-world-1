@@ -224,6 +224,9 @@ per k: r2 = Σ_xz (y−μ)²/σ²  (M,)     s_k = quantile(r2_dev, level) / χ²
 - **Two fits, both scored on test.** The dev fit is the proposal. The cross-fit is the check: test
   terrain seeds go round-robin into folds, and each fold gets the scale fit on the others, so no
   window's scale saw its own terrain. If the two agree, the dev fit carries over to new terrains.
+  The cross-fit's scales are fit on test data, so they are never a held-out result and not for
+  adoption (`meta.cross_fit_note`). `--level` and `--folds` (2 up to the test terrain count) are
+  checked before any model, data or lock, and the fitted level is always among the scored ones.
 - **Regimes from `regimes.py`.** At k ≤ 2 the miss differs by regime: too wide in rolling, too
   narrow in bounces (experiments/2026-11-19-error-by-motion-regime.md). One scale can't fix that,
   and the per-regime rows show how much is left.

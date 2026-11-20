@@ -37,6 +37,7 @@ import torch
 
 from jepa_world import regimes
 from jepa_world.data.dataset import load_split
+from jepa_world.data.splits import terrain_seeds
 from jepa_world.eval import (
     BASE_CONFIG,
     check_episode_run,
@@ -78,7 +79,13 @@ def fit_scale(r2, level: float) -> float:
     r2 = np.asarray(r2, dtype=np.float64)
     if r2.size == 0 or not np.isfinite(r2).all():
         raise ValueError("fit_scale needs at least one finite r2")
-    return float(np.quantile(r2, level) / chi2_2(level))
+    s = float(np.quantile(r2, level) / chi2_2(level))
+    if not (s > 0.0 and math.isfinite(s)):
+        raise ValueError(
+            f"fitted scale {s}: at least {level:g} of the fit set's r2 are 0 (the predicted mean "
+            "equals the truth), so no positive variance scale fits"
+        )
+    return s
 
 
 def ml_scale(r2) -> float:
@@ -127,17 +134,21 @@ def _score(mean, var, truth, scale, levels) -> dict:
 def calibrate(
     dev: Mapping[int, tuple],
     test: Mapping[int, tuple],
-    test_seeds,
+    test_folds,
     test_labels: Mapping[int, np.ndarray],
     levels: Iterable[float],
     level: float,
-    n_folds: int,
 ) -> dict:
     """{str(k): {"dev_fit", "test", "by_regime"}} for every k in `test`. dev and test map k to
-    (mean, var, truth), each (M, 2) over that split's windows; test_seeds (M,) are the test
-    windows' terrain seeds, test_labels {k: (M,)} their regimes (regimes.regime_labels)."""
-    levels = list(levels)
-    folds = terrain_folds(test_seeds, n_folds)
+    (mean, var, truth), each (M, 2) over that split's windows; test_folds (M,) are the test
+    windows' terrain folds (terrain_folds), test_labels {k: (M,)} their regimes
+    (regimes.regime_labels). Coverage is scored at `levels` and always at `level`.
+
+    The cross-fit is a CHECK of the dev fit, fit on test's other terrain folds: never a held-out
+    result, and its scales are not for adoption."""
+    levels = sorted({*(float(p) for p in levels), float(level)})
+    folds = np.asarray(test_folds)
+    n_folds = len(np.unique(folds))
     out = {}
     for k in sorted(test):
         mean, var, truth = test[k]
@@ -150,8 +161,8 @@ def calibrate(
             "dev_scaled": _score(mean, var, truth, s, levels),
             "cross_fit": {
                 **_score(mean, var, truth, cf, levels),
-                "n_folds": int(n_folds),
-                "fold_scales": [float(cf[folds == f][0]) for f in range(n_folds)],
+                "n_folds": n_folds,
+                "fold_scales": [float(cf[folds == f][0]) for f in np.unique(folds)],
             },
         }
         by_regime = {}
@@ -191,7 +202,14 @@ def calibrate_run(
     calibrate(...)}. The same checks as `eval --run` for both splits before the GPU; only the
     forward passes run under the GPU lock, and only on MPS."""
     run_dir, ev = Path(run_dir), eval_cfg["eval"]
-    check_eval_block(ev)
+    check_eval_block(ev)  # these checks come before any model, data or lock
+    if not 0.0 < level < 1.0:
+        raise ValueError(f"level={level}: expected 0 < level < 1")
+    n_terrains = len(terrain_seeds(eval_cfg["data"], SCORED_SPLIT))
+    if not 2 <= n_folds <= n_terrains:
+        raise ValueError(
+            f"n_folds={n_folds}: expected 2 .. {n_terrains} ({SCORED_SPLIT} terrain seeds)"
+        )
     device = pick_device(ev["device"])
     run = load_run(run_dir, checkpoint, torch.device("cpu"))  # moved to the device under the lock
     cfg = run.cfg
@@ -223,16 +241,10 @@ def calibrate_run(
     contact, bounce = regimes.episode_flags(cfg, SCORED_SPLIT, es)
     labels = {k: regimes.regime_labels(contact, bounce, ep, t, k, c) for k in goal_ks}
     seeds = es.terrain_seed[ep]
+    folds = terrain_folds(seeds, n_folds)  # the one fold assignment: scored and recorded
     horizons = calibrate(
-        per_split[FIT_SPLIT],
-        per_split[SCORED_SPLIT],
-        seeds,
-        labels,
-        ev["coverage_levels"],
-        level,
-        n_folds,
+        per_split[FIT_SPLIT], per_split[SCORED_SPLIT], folds, labels, ev["coverage_levels"], level
     )
-    folds = terrain_folds(seeds, n_folds)
     meta = {
         **run_metadata(),
         "run_dir": str(run_dir),
@@ -251,6 +263,8 @@ def calibrate_run(
         "eval": ev,
         "note": "scale multiplies the goal head's predicted variance (std by sqrt(scale)); the mean "
         "is unchanged. Dev is SPEC §3.5's debugging split: a proposal, not an eval default.",
+        "cross_fit_note": "cross_fit scales are fit on test's other terrain folds: a check of the "
+        "dev fit, not a held-out result, and not for adoption.",
     }
     doc = {"meta": meta, "horizons": horizons}
     text = json.dumps(doc, indent=2, allow_nan=False)  # fails before any file exists
@@ -269,6 +283,7 @@ def format_table(doc: dict) -> str:
     """Per k: the dev-fit scale, then test coverage and NLL before, with the dev-fit scale, and
     cross-fit; then 90% coverage per regime before and with the dev-fit scale."""
     lines = []
+    key = f"{float(doc['meta']['level']):g}"  # the fitted level, as metrics keys it
     for k, r in doc["horizons"].items():
         fit = r["dev_fit"]
         levels = list(r["test"]["before"]["coverage"])
@@ -281,7 +296,7 @@ def format_table(doc: dict) -> str:
         for name, key in (
             ("before", "before"),
             ("dev-fit", "dev_scaled"),
-            ("cross-fit", "cross_fit"),
+            ("cross-fit*", "cross_fit"),
         ):
             row = r["test"][key]
             lines.append(
@@ -293,10 +308,13 @@ def format_table(doc: dict) -> str:
         for name, row in r["by_regime"].items():
             if row["windows"]:
                 cells.append(
-                    f"{name} {_f(row['before']['coverage'].get('0.9'), '.3f')} -> "
-                    f"{_f(row['dev_scaled']['coverage'].get('0.9'), '.3f')}"
+                    f"{name} {_f(row['before']['coverage'].get(key), '.3f')} -> "
+                    f"{_f(row['dev_scaled']['coverage'].get(key), '.3f')}"
                 )
-        lines.append("  cov0.9 by regime, before -> dev-fit: " + ", ".join(cells))
+        lines.append(f"  cov{key} by regime, before -> dev-fit: " + ", ".join(cells))
+    lines.append(
+        "\n* cross-fit: scales fit on test's other terrain folds, a check of the dev fit only"
+    )
     return "\n".join(lines)
 
 

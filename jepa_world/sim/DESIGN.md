@@ -199,8 +199,10 @@ The ball ranges, the camera, contact and the walls are the full world's
 without slipping while tan(slope) ≤ 3.5 μ, and μ ≥ 0.1, so the 0.2 cap leaves a 1.75× margin.
 
 Measured by `experiments/gentle_world_stats.py` (200 episodes each: terrain seeds 0–199, ball
-seed 0) and `sim.preview` (contact sheets and `stats.json`:
-`20261120T073817Z-worktree-wt-gentle-curriculum-sim-preview-0253e3`, at 0a2bfa3):
+seed 0). Every number below, and every candidate that lost, is in its `stats.json`:
+`20261120T074338Z-worktree-wt-gentle-curriculum-gentle-world-stats-fcc7af`, at d3d2d50. The
+contact sheets are in a `sim.preview` run (same seeds, same rates):
+`20261120T073817Z-worktree-wt-gentle-curriculum-sim-preview-0253e3`, at 0a2bfa3.
 
 | | full | gentle |
 |---|---|---|
@@ -215,15 +217,15 @@ seed 0) and `sim.preview` (contact sheets and `stats.json`:
 | p90 top speed | 7.0 m/s | 3.0 m/s |
 
 - **What's left is the start settle.** `start_z` puts the ball `drop` above the highest surface
-  point under its footprint. So on a slope, even at drop 0, it starts up to about 9 cm above the
-  surface (at r = 0.35 m and slope 0.3), with a horizontal velocity. It lands within frames 0–4.
-  Every episode has an airborne frame 0, and almost all of the gentle world's 0.11 bounces per
-  episode are this landing. It is under 2 px at 64 px for 3.6 m. Changing `start_z` would change
-  every existing dataset, so it stays.
+  point under its footprint. So on a slope, even at drop 0, it starts above the surface with a
+  horizontal velocity. The frame-0 clearance has a median of 1.4 cm and a maximum of 5.9 cm. The
+  ball lands within frames 0–4. Every episode has an airborne frame 0, and almost all of the
+  gentle world's 0.11 bounces per episode are this landing. At 64 px for 3.6 m it is at most about
+  1 px. Changing `start_z` would change every existing dataset, so it stays.
 - **The slip left over is contact softness, not sliding.** Its episodes span the whole friction
   range (median μ ≈ 0.5, not clustered at 0.1). The mismatch stays under 5% on 99% of contact
   frames, which is the size MuJoCo's soft-contact penetration gives the rolling radius.
-- **Candidates that lost** (scratch sweep over the same 200 episodes):
+- **Candidates that lost** (the same 200 episodes, `candidates` in the same `stats.json`):
   - Removing only the ledges and the drop left 78 bounces from frame 5 on.
   - Slope 0.3 left 7.
   - Slope 0.25 left 6.

@@ -60,14 +60,20 @@ def world_stats(sim: dict, n: int) -> dict:
     edge = sim["terrain"]["length"] / 2 - sim["terrain"]["wall_width"]
     wall = [np.abs(ep.ball_pos[:, 0]) + ep.ball.radius > edge for ep in eps]
     gap0 = [float(ep.terrain.gap(ep.ball_pos[0], ep.ball.radius)) for ep in eps]
-    rel = []
+    rel, slip_mu = [], []
     for ep in eps:
         v = ep.ball_vel
         surface = np.sign(v[:, 0]) * np.linalg.norm(v, axis=1)
         rolling = ep.ball_spin * ep.ball.radius
         held = ep.contact & np.r_[False, ep.contact[:-1]]
-        rel.append((np.abs(surface - rolling) / np.maximum(np.abs(surface), 0.2))[held])
+        r = np.abs(surface - rolling) / np.maximum(np.abs(surface), 0.2)
+        rel.append(r[held])
+        if (r[SETTLE:][held[SETTLE:]] > SLIP_REL).any():
+            slip_mu.append(ep.ball.friction)
     rel = np.concatenate(rel)
+    # Sliding on a slope would pick out the low-friction balls (tan(slope) > 3.5 mu); soft-contact
+    # mismatch wouldn't. So: the friction of the episodes that slip after the settle.
+    mu = np.percentile(slip_mu, [0, 50, 100]) if slip_mu else [np.nan] * 3
     return {
         "contact_rate": st["contact_rate"],
         "airborne_frame_rate": st["free_flight_frame_rate"],
@@ -84,6 +90,10 @@ def world_stats(sim: dict, n: int) -> dict:
         "wall_frame_rate": float(np.mean([w.mean() for w in wall])),
         "slip_contact_frame_rate": float(np.mean(rel > SLIP_REL)),
         "slip_rel_p99": float(np.percentile(rel, 99)),
+        f"episodes_slipping_from_frame_{SETTLE}": len(slip_mu),
+        "their_friction_min": float(mu[0]),
+        "their_friction_median": float(mu[1]),
+        "their_friction_max": float(mu[2]),
         "relief_median_m": float(np.median([ep.terrain.params["relief"] for ep in eps])),
         "max_speed_p90": st["max_speed_p90"],
     }

@@ -8,6 +8,9 @@ run's checkpoint on held-out terrains (dev, by default) with the same loss code
 (models/world.compute_world_losses, every built horizon and aux stage active, the checkpoint's own
 loss config), so each number means exactly what the training column with the same name means:
   relerr/k    error relative to predicting the batch-mean target (1.0 = no better)
+  relerr/copy/k  the same for "copy the current embedding": the target encoder's embedding at t
+              as the prediction for t+k, the latent heads' persistence bar (relerr/k below it
+              beats persistence)
   loss/k      the latent loss of horizon k; sqerr/k, logvar/k for the Gaussian far heads
   emb_std/Lx  the context embedding's spread per level
 loss/k, sqerr/k, var/Lx and loss/var follow the run's loss.latent_reduce: under 'mean' they are
@@ -67,6 +70,7 @@ def score(run, split: str, n_batches: int, seed: int, device: torch.device) -> d
                 cfg["loss"],
                 active=list(model.horizons),
                 aux_active=list(model.aux_stages),
+                copy_baseline=True,
             )
             vals = torch.stack(list(losses.values())).cpu().tolist()
             for k, v in zip(losses, vals, strict=True):

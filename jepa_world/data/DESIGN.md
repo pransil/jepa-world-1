@@ -104,8 +104,25 @@ cfg.data.splits ─► splits.split_episodes ─► [(terrain_seed, ball_seed), 
   The cost is that `configs/world_gentle.yaml` (used to build that world's dataset) and the
   experiment's `curriculum.sim` repeat the same four overrides.
   `test_gentle_curriculum_trains_on_the_gentle_world_then_the_m7_reference_world` holds them to
-  the same dataset key. The overrides may only name existing sim keys (`train.check_curriculum`),
-  so a typo fails before anything is built.
+  the same dataset key. The config file stays because it is also what `sim.preview` and
+  `experiments/gentle_world_stats.py` measure.
+
+  `train.check_curriculum` limits the overrides:
+  - They may only name existing sim keys, and each keeps its kind: a section stays a section, a
+    range stays a list of the same length, a number stays a number. So a typo, or `relief: 1.0`,
+    fails before anything is built.
+  - They may not touch `fps`, `episode_frames`, `frame_size` or `generator_version`. Both worlds
+    must give the same batch shapes and time per frame, or the mismatch would only surface inside
+    `run()`, after the run dir and the GPU lock.
+  - Deliberate limit: a curriculum can't add or drop a section that is off when absent
+    (`sim.obstacles`). That needs its own rule for "absent".
+
+  **Both samplers use `cfg.seed`, on purpose.** Both worlds' splits list the same (terrain seed,
+  ball seed) episodes in the same order, so step i of the curriculum draws the same (episode, t)
+  windows as the reference's step i, in another world. From the switch on, the run world replays
+  the reference's own stream from its first batch. So each phase differs from the reference only
+  in the world it shows. The cost is that the first batches after the switch revisit the episode
+  indices the curriculum opened with, with different terrain.
 - **The build takes the GPU lock**, because rendering uses the GPU through CGL, and a build takes
   minutes and would skew a benchmark running beside it. The lock is skipped when the dataset
   already exists.

@@ -200,7 +200,7 @@ without slipping while tan(slope) ≤ 3.5 μ, and μ ≥ 0.1, so the 0.2 cap lea
 
 Measured by `experiments/gentle_world_stats.py` (200 episodes each: terrain seeds 0–199, ball
 seed 0). Every number below, and every candidate that lost, is in its `stats.json`:
-`20261120T074338Z-worktree-wt-gentle-curriculum-gentle-world-stats-fcc7af`, at d3d2d50. The
+`20261120T074426Z-worktree-wt-gentle-curriculum-gentle-world-stats-266e1a`, at 215ee89. The
 contact sheets are in a `sim.preview` run (same seeds, same rates):
 `20261120T073817Z-worktree-wt-gentle-curriculum-sim-preview-0253e3`, at 0a2bfa3.
 
@@ -222,9 +222,10 @@ contact sheets are in a `sim.preview` run (same seeds, same rates):
   ball lands within frames 0–4. Every episode has an airborne frame 0, and almost all of the
   gentle world's 0.11 bounces per episode are this landing. At 64 px for 3.6 m it is at most about
   1 px. Changing `start_z` would change every existing dataset, so it stays.
-- **The slip left over is contact softness, not sliding.** Its episodes span the whole friction
-  range (median μ ≈ 0.5, not clustered at 0.1). The mismatch stays under 5% on 99% of contact
-  frames, which is the size MuJoCo's soft-contact penetration gives the rolling radius.
+- **The slip left over is contact softness, not sliding.** Sliding would pick out the
+  low-friction balls. Instead, the 19 episodes with a mismatch over 5% after the settle span
+  μ 0.13–0.97 (median 0.53). The mismatch stays under 4.7% on 99% of contact frames, which is the
+  size MuJoCo's soft-contact penetration gives the rolling radius.
 - **Candidates that lost** (the same 200 episodes, `candidates` in the same `stats.json`):
   - Removing only the ledges and the drop left 78 bounces from frame 5 on.
   - Slope 0.3 left 7.

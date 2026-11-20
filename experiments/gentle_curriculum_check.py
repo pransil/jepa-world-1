@@ -41,7 +41,9 @@ def regimes(run: Path, step: int = STEPS) -> dict:
     if not found:
         raise SystemExit(f"{run.name}: no step-{step} test regimes file in eval/regimes/")
     name, d = found[-1]
-    print(f"  {run.name}: {name} (sha {d['meta']['git']['sha'][:7]}, dirty {d['meta']['git']['dirty']})")
+    print(
+        f"  {run.name}: {name} (sha {d['meta']['git']['sha'][:7]}, dirty {d['meta']['git']['dirty']})"
+    )
     return d["regimes"]
 
 

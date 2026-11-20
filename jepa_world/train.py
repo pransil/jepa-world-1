@@ -13,6 +13,7 @@ from __future__ import annotations
 # `python -m jepa_world.train` imports the jepa_world package (which sets
 # PYTORCH_ENABLE_MPS_FALLBACK) before this module, so before torch.
 import argparse
+import itertools
 import json
 import sys
 from collections.abc import Iterator, Mapping
@@ -32,7 +33,7 @@ from jepa_world.models.world import (
     check_pix_share,
     compute_world_losses,
 )
-from jepa_world.utils.config import load_config
+from jepa_world.utils.config import deep_merge, load_config
 from jepa_world.utils.device import pick_device
 from jepa_world.utils.locks import gpu_lock
 from jepa_world.utils.paths import new_run_dir
@@ -125,9 +126,87 @@ def needs_gt(cfg: dict) -> bool:
     return "goal" in cfg["train"]["stages"]  # only the goal loss needs a label beyond the frames
 
 
+# sim keys a curriculum world must share with the run's: they fix the batch contract (frame size,
+# episode length, time per frame) or name the generator. A curriculum world with other frames
+# would fail only inside run(), after the run dir and the GPU lock.
+CURRICULUM_FIXED_SIM = ("fps", "episode_frames", "frame_size", "generator_version")
+
+
+def _kind(v) -> tuple:
+    """What an override must keep: a section, a list of the same length, or a value of the same
+    type (bool is not a number here)."""
+    if isinstance(v, dict):
+        return ("section",)
+    if isinstance(v, list):
+        return ("list", len(v))
+    if isinstance(v, bool):
+        return ("bool",)
+    if isinstance(v, int | float):
+        return ("number",)
+    return (type(v).__name__,)
+
+
+def _check_sim_overrides(sim: dict, over: dict, path: str) -> None:
+    """Every key in `over` names an existing key of `sim`, and keeps its kind (`_kind`): a typo or
+    a range given as a number must fail, not build a dataset of a world nobody asked for. So a
+    curriculum can't add or drop a section that is off when absent (sim.obstacles):
+    jepa_world/data/DESIGN.md, "Curriculum"."""
+    for k, v in over.items():
+        if k not in sim:
+            raise KeyError(f"{path}.{k}: not a sim key (known: {sorted(sim)})")
+        if _kind(v) != _kind(sim[k]):
+            raise ValueError(
+                f"{path}.{k}: {v!r} must keep the run's kind {_kind(sim[k])} (got {_kind(v)})"
+            )
+        if isinstance(v, dict):
+            _check_sim_overrides(sim[k], v, f"{path}.{k}")
+
+
+def check_curriculum(cfg: dict) -> None:
+    """data.curriculum: null, or exactly {steps, sim}. steps is an int in (0, train.steps), so
+    both worlds train; sim is a non-empty set of overrides of existing sim keys, none of them in
+    CURRICULUM_FIXED_SIM; the source is episodes (a synthetic batch has no world). The split it
+    reads is data.split, checked by _require_built_source like the run's own."""
+    cur = cfg["data"].get("curriculum")
+    if cur is None:
+        return
+    if not isinstance(cur, dict) or set(cur) != {"steps", "sim"}:
+        raise ValueError(f"data.curriculum must be null or exactly {{steps, sim}}, got {cur!r}")
+    steps, total = cur["steps"], cfg["train"]["steps"]
+    if type(steps) is not int or not 0 < steps < total:
+        raise ValueError(
+            f"data.curriculum.steps must be an int in (0, train.steps={total}), got {steps!r}"
+        )
+    if not isinstance(cur["sim"], dict) or not cur["sim"]:
+        raise ValueError(f"data.curriculum.sim must be a non-empty mapping, got {cur['sim']!r}")
+    fixed = [k for k in CURRICULUM_FIXED_SIM if k in cur["sim"]]
+    if fixed:
+        raise ValueError(
+            f"data.curriculum.sim may not change {fixed}: both worlds must give the same batches "
+            "(frame size, episode length, time per frame) from the same generator"
+        )
+    _check_sim_overrides(cfg["sim"], cur["sim"], "data.curriculum.sim")
+    if cfg["data"]["source"] != "episodes":
+        raise ValueError(
+            f"data.curriculum needs data.source=episodes (got {cfg['data']['source']!r}): "
+            "it switches between two simulated worlds"
+        )
+
+
+def curriculum_cfg(cfg: dict) -> dict | None:
+    """The config of the curriculum's world: cfg with data.curriculum.sim merged onto sim, and no
+    curriculum of its own. None without a curriculum. It doesn't validate: check_config and
+    make_batches run check_curriculum first."""
+    if cfg["data"].get("curriculum") is None:
+        return None
+    phase = deep_merge(cfg, {"sim": cfg["data"]["curriculum"]["sim"]})
+    phase["data"]["curriculum"] = None
+    return phase
+
+
 def _require_built_source(cfg: dict) -> None:
-    """'episodes' needs data.split to be dev or train (never test) and built for this config
-    (FileNotFoundError names the command)."""
+    """'episodes' needs data.split to be dev or train (never test) and built for this config, and
+    for the curriculum's world if there is one (FileNotFoundError names the command)."""
     source = cfg["data"]["source"]
     if source == "episodes":
         split = cfg["data"]["split"]
@@ -137,6 +216,16 @@ def _require_built_source(cfg: dict) -> None:
                 "terrains are held out for evaluation (SPEC §3.5, §7.3)"
             )
         require_split(cfg, split)
+        phase = curriculum_cfg(cfg)
+        if phase is not None:
+            try:
+                require_split(phase, split)
+            except FileNotFoundError as e:
+                over = cfg["data"]["curriculum"]["sim"]
+                raise FileNotFoundError(
+                    f"data.curriculum's world is not built. {e}\n<your config> here is one whose "
+                    f"sim is this run's sim with data.curriculum.sim merged: {over}"
+                ) from None
     elif source != "synthetic":
         raise ValueError(f"data.source={source!r}: expected 'episodes' or 'synthetic'")
 
@@ -173,6 +262,7 @@ def check_config(cfg: dict) -> list[int]:
     """Everything a training run needs, checked once, before any run dir exists.
     Returns the horizons that get heads."""
     horizons = model_horizons(cfg)
+    check_curriculum(cfg)
     _require_built_source(cfg)
     if cfg["train"]["optimizer"] != "adamw":
         raise ValueError(f"train.optimizer={cfg['train']['optimizer']!r}: only 'adamw' exists")
@@ -225,11 +315,21 @@ def train_step(
 
 def make_batches(cfg: dict, horizons: list[int]) -> Iterator[Batch]:
     """Endless CPU batches, seeded from cfg['seed']: frames (B, C + k_max, 3, S, S) in the M3
-    layout, or, when train.stages has goal, {"frames", "ball_pos" (B, C + k_max, 2)}."""
+    layout, or, when train.stages has goal, {"frames", "ball_pos" (B, C + k_max, 2)}.
+
+    With data.curriculum, the first curriculum.steps batches come from the curriculum's world,
+    then the run's own world from its first batch: each world has its own sampler, both seeded
+    from cfg['seed']. Both splits load here, before the GPU lock."""
+    check_curriculum(cfg)
     _require_built_source(cfg)
-    if cfg["data"]["source"] == "episodes":
+    if cfg["data"]["source"] == "synthetic":
+        return _synthetic_batches(cfg, horizons)
+    phase = curriculum_cfg(cfg)
+    if phase is None:
         return _episode_batches(cfg, horizons)
-    return _synthetic_batches(cfg, horizons)
+    first = _episode_batches(phase, horizons)
+    steps = cfg["data"]["curriculum"]["steps"]
+    return itertools.chain(itertools.islice(first, steps), _episode_batches(cfg, horizons))
 
 
 def _flush(rows: list[tuple[int, torch.Tensor]], keys: list[str], f, writer) -> None:

@@ -58,6 +58,9 @@ sim:                          # SPEC §3. Design: jepa_world/sim/DESIGN.md
 data:                         # SPEC §3.5, split by terrain seed, never by frame. Design: jepa_world/data/DESIGN.md
   source: episodes            # episodes (the M2 loader) | synthetic (moving disc; smoke runs and benchmarks only)
   split: train                # the split train.py reads (dev: debugging only, SPEC §3.5)
+  curriculum: null            # {steps: N, sim: {<sim overrides>}}: steps 1..N read data.split built under sim with the overrides
+                              # merged, steps N+1.. read the run's own world. One run dir; config.yaml keeps the run world at the
+                              # top, so eval scores it. Not in any dataset key (jepa_world/data/DESIGN.md, "Curriculum")
   format_version: 1           # bump if the dataset layout (files, manifest) changes
   splits:                     # seeds as [first, count]; every terrain gets every ball seed of its split
     dev:   {terrain_seeds: [0, 10],      ball_seeds: [0, 4]}     # 4 balls/terrain: docs/decisions/*-ball-samples-per-terrain.md

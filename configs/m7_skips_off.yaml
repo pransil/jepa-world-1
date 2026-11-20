@@ -1,0 +1,9 @@
+# M7 §2, decoder skips off (docs/milestones/M7-plan.md): the 48k M7 reference with the U-Net
+# encoder L1/L2 -> decoder skips turned off, so the pixel decoder upsamples from L3 alone
+# (docs/decisions/2026-11-17-skip-connections-meaning.md). It inherits the 10% pixel share and
+# latent_reduce: mean (docs/decisions/2026-11-19-m7-ablations-at-48k.md).
+# Seeds 0 (this file) and 1 (--set seed=1). experiments/2026-11-20-m7-skips-off.md
+base: exp_headline_48k.yaml
+
+model:
+  unet_skips: false

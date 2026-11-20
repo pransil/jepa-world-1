@@ -64,7 +64,37 @@ because the curriculum is off by default.
 with no other project job and ≥ 10 GB free. No eval.
 
 ## Results
-(Filled in after the run.)
+- **Commit:** **2fa0446**, clean (`meta.json`: dirty false). That is this lane merged with main
+  b7f4d57, which has H PR 1 and A (df688b3).
+- **Run:** `20261120T115641Z-worktree-wt-exp-m7-refcheck-m7-refcheck-s0-9ad7c5`, MPS,
+  2026-11-20 03:56–04:09 local (about 13 min). It exited 0, with checkpoints at 2,000, 4,000, 6,000
+  and 6,500.
+- **Pass rule:** `uv run python experiments/compare_metrics.py --run <9ad7c5> --ref <0f2411>`
+  **exited 0**:
+  > 6500 rows x 53 keys compared; differing values: 0; max abs diff 0.0; diagnostic keys on one side only: 40
+  - Every shared key is bitwise identical at every one of steps 1–6,500.
+  - The 40 one-sided keys are all A's diagnostics, present only in the re-run:
+    - 33 `gradnorm/enc/<term>/<level>` keys;
+    - 7 `relerr/copy/k` keys.
+- **Diagnostics ran as planned** (from the re-run's `metrics.jsonl`):
+  - gradient norms at logged steps 1, 501, …, 6,001 (13 steps);
+  - step 6,001's include the `pix` term, so the last one ran with all four stages active;
+  - the copy baseline at 650 steps (1, 11, …, 6,491).
+- **Recorded config:** 121 leaves against the reference's 118. Exactly 4 differ:
+  - `train.steps`: 6,500 against 48,000;
+  - `data.curriculum`: null (off), absent in the reference;
+  - `train.copy_every`: 10, absent in the reference;
+  - `train.grad_norm_every`: 500, absent in the reference.
 
 ## Conclusion
-(Filled in after the run.)
+**Pass: H0 holds.** At 2fa0446, training with the defaults and A's diagnostics on repeats the M7
+reference bitwise through step 6,500, including:
+- every stage switch;
+- 500 steps with all four stages active;
+- a gradient-norm step on the first pixel step.
+
+So the reference runs `…-0f2411` and `…-ada237` stand for the M7 ablations at this commit, and no
+reference re-run is needed. The usual limit applies: this is evidence for steps 6,501–48,000, not
+proof. Each ablation still checks before it runs that
+`git diff 2fa0446 <its sha> -- jepa_world/models jepa_world/train.py jepa_world/data configs/base.yaml`
+is empty. If it isn't, the ablation needs this check again.

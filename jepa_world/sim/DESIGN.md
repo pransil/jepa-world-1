@@ -178,6 +178,59 @@ These are SPEC §3.2's `track_lagged_obstacles` and the M7 occlusion ablation
 - **From a state, the posts come from the `sim_cfg` you pass**, like every physics parameter. To
   continue a stored episode, pass its `meta["sim_cfg"]`: same posts, same contact settings.
 
+## The gentle world (`configs/world_gentle.yaml`)
+
+The H experiment's curriculum world: smooth rolling, no ledges, and the ball starting on the
+surface. It is a config, not code. `ledges: [0, 0]` already worked: there are zero bins and no
+steps, and `test_zero_ledges_give_a_smooth_slope_capped_interior` pins it. So no existing config's
+output changed, and `generator_version` stays.
+
+It changes four values and nothing else:
+
+| value | full world | gentle world |
+|---|---|---|
+| `relief` | [0.5, 4.0] | [0.5, 1.5] |
+| `max_slope` | 0.8 | 0.2 |
+| `ledges` | [2, 5] | [0, 0] |
+| `drop` | [0, 2] | [0, 0] |
+
+The ball ranges, the camera, contact and the walls are the full world's
+(`test_gentle_world_keeps_the_ball_camera_and_walls_and_cannot_slip`). A solid sphere rolls
+without slipping while tan(slope) ≤ 3.5 μ, and μ ≥ 0.1, so the 0.2 cap leaves a 1.75× margin.
+
+Measured by `experiments/gentle_world_stats.py` (200 episodes each: terrain seeds 0–199, ball
+seed 0) and `sim.preview`:
+
+| | full | gentle |
+|---|---|---|
+| contact rate | 0.656 | 0.977 |
+| bounces / episode | 4.1 | 0.11 |
+| frames out of view | 2.4% | 0 |
+| bounces from frame 5 on | 801 | 1 |
+| airborne frames from frame 5 on | 3174 | 1 |
+| episodes reaching a wall zone | 3 | 2 (0.03% of frames) |
+| contact frames slipping > 5% | 12.6% | 0.9% (p99 mismatch 4.7%) |
+| median relief | 5.7 m | 0.47 m |
+| p90 top speed | 7.0 m/s | 3.0 m/s |
+
+- **What's left is the start settle.** `start_z` puts the ball `drop` above the highest surface
+  point under its footprint. So on a slope, even at drop 0, it starts up to about 9 cm above the
+  surface (at r = 0.35 m and slope 0.3), with a horizontal velocity. It lands within frames 0–4.
+  Every episode has an airborne frame 0, and almost all of the gentle world's 0.11 bounces per
+  episode are this landing. It is under 2 px at 64 px for 3.6 m. Changing `start_z` would change
+  every existing dataset, so it stays.
+- **The slip left over is contact softness, not sliding.** Its episodes span the whole friction
+  range (median μ ≈ 0.5, not clustered at 0.1). The mismatch stays under 5% on 99% of contact
+  frames, which is the size MuJoCo's soft-contact penetration gives the rolling radius.
+- **Candidates that lost** (scratch sweep over the same 200 episodes):
+  - Removing only the ledges and the drop left 78 bounces from frame 5 on.
+  - Slope 0.3 left 7.
+  - Slope 0.25 left 6.
+  - Raising the shortest wavelength from 2 m to 5 m at slope 0.3 left 12, no better. So
+    short-wave crests weren't the cause, and the slope cap was.
+  - Relief [0.25, 1.0] at slope 0.2 matched the chosen world (0 bounces from frame 5 on). The cap
+    binds on most terrains either way, so relief barely matters at slope 0.2.
+
 ## Key decisions
 
 - **Three joints** (slide x, slide z, hinge y) rather than a channel. Free flight is then

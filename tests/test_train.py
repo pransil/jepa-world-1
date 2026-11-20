@@ -435,8 +435,11 @@ def test_the_m7_reference_and_its_ablations_inherit_the_base_pixel_weighting(nam
 @pytest.mark.parametrize("path", sorted(CONFIGS.glob("*.yaml")), ids=lambda p: p.stem)
 def test_every_committed_config_passes_check_config(path):
     """A base.yaml default must never make an existing experiment config unrunnable. Synthetic
-    data, because the episode datasets aren't built in the test artifact root."""
-    train.check_config(load_config(path, ["data.source=synthetic"]))
+    data, because the episode datasets aren't built in the test artifact root, and so no
+    curriculum (it needs episodes): check_curriculum checks those configs' curricula on their own
+    source."""
+    train.check_config(load_config(path, ["data.source=synthetic", "data.curriculum=null"]))
+    train.check_curriculum(load_config(path))
 
 
 @pytest.mark.parametrize(

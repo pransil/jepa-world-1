@@ -15,7 +15,8 @@ Per k, per regime and over all windows:
 - latent relerr per head: the mean per-window squared error over the target spread of the FULL
   window set at that k. One denominator for every regime, so they are comparable, and their
   share-weighted mean is the full set's relerr.
-Writes <run>/eval/<time>-regimes-<split>-<hex>.json. Design: jepa_world/DESIGN.md.
+Writes <run>/eval/regimes/<time>-regimes-<split>-<hex>.json, outside eval/*.json, which readers take
+to be eval --run reports. Design: jepa_world/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -253,7 +254,7 @@ def evaluate_regimes(
     simulate=simulate_from_state,
 ) -> tuple[dict, Path]:
     """Score a run's goal head, the baselines and the latent heads per motion regime on held-out
-    `split`, over eval's windows, and write <run>/eval/<time>-regimes-<split>-<hex>.json:
+    `split`, over eval's windows, and write <run>/eval/regimes/<time>-regimes-<split>-<hex>.json:
     {"meta": ..., "regimes": score_regimes(...)}.
 
     The same checks as `eval --run`, before the GPU: a held-out split (checked before anything is
@@ -321,8 +322,10 @@ def evaluate_regimes(
         meta["simulator"] = sim_info
     doc = {"meta": meta, "regimes": scores}
     text = json.dumps(doc, indent=2, allow_nan=False)  # fails before any file exists
-    out_dir = run_dir / "eval"
-    out_dir.mkdir(exist_ok=True)
+    # A subdirectory: viewer.eval_summary and the experiment scripts read every <run>/eval/*.json
+    # as an `eval --run` report, and this isn't one.
+    out_dir = run_dir / "eval" / "regimes"
+    out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = write_new(out_dir / f"{stamp}-regimes-{split}-{secrets.token_hex(3)}.json", text)
     return json.loads(text), path

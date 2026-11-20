@@ -156,8 +156,9 @@ horizon k) gets one regime, from the episode files' `contact` and `bounce` flags
 - **rolling:** no bounce in t−C+1..t+k, and contact in every one of those frames.
 - **airborne:** everything else.
 
-**Not here:** new families in `eval --run`'s report. This is a separate file beside it, under
-`<run>/eval/`.
+**Not here:** new families in `eval --run`'s report. This is a separate file under
+`<run>/eval/regimes/`. It is kept out of `eval/*.json`, because `viewer.eval_summary` and the
+experiment scripts read every file there as an eval report (tested).
 
 ```
 run ─► load_run, the eval --run checks (held-out split first, eval block, episodes, seeds), goal head required
@@ -349,7 +350,7 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `viewer.export` / CLI | no | artifact root (reads datasets and runs, writes `viewers/`), GPU lock only with `--device mps` | fast end to end on tiny fake datasets (CPU) |
 | `regimes.regime_labels`, `score_regimes` | yes, numpy | none | `tests/test_regimes.py` (hand-built flags at each edge, a brute-force check of the definition, synthetic scores) |
 | `regimes.window_outputs`, `episode_flags` | torch, device / disk (episode files) | none | fast: tiny CPU model against one unbatched forward; fake episodes with chosen flags |
-| `regimes.evaluate_regimes` / CLI | no | GPU lock on MPS, run dir (writes `eval/*-regimes-*.json`) | fast end to end on tiny fake datasets (CPU), simulator stubbed |
+| `regimes.evaluate_regimes` / CLI | no | GPU lock on MPS, run dir (writes `eval/regimes/*.json`) | fast end to end on tiny fake datasets (CPU), simulator stubbed |
 
 ## Files
 
@@ -361,4 +362,4 @@ frozen features {level:(M,C,H,W)} ─► pool ─► ProbeData(split) ─► fit
 | `eval.py` | `--baselines`: every baseline on a split, written to a new run dir. `--run`: a trained run's goal head, visibility, events, probes and baselines on held-out splits, written to `<run>/eval/` |
 | `viewer.py` | the pred/actual viewer: models' goal and pixel outputs on held-out episodes, as one HTML file |
 | `viewer_template.html` | the page: camera view, side view, pixel decoder, controls. `viewer.py` fills in its data |
-| `regimes.py` | scores by motion regime (rolling, airborne, bounce): goal head, baselines, coverage and latent relerr per regime and k, written to `<run>/eval/` |
+| `regimes.py` | scores by motion regime (rolling, airborne, bounce): goal head, baselines, coverage and latent relerr per regime and k, written to `<run>/eval/regimes/` |

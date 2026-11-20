@@ -16,7 +16,7 @@ from fake_episodes import SHORT, SMALL_SPLITS, Recorder, fake_episode
 from tiny import AUX, BASE, TINY
 
 from jepa_world import eval as eval_cli
-from jepa_world import metrics, regimes, train
+from jepa_world import metrics, regimes, train, viewer
 from jepa_world.data import build
 from jepa_world.data.dataset import load_split, valid_starts, window_frames
 from jepa_world.data.splits import LeakageError
@@ -342,7 +342,7 @@ def test_evaluate_regimes_writes_one_file_whose_all_row_is_the_eval_headline(art
     cfg = run_cfg()
     run, _ = make_run(cfg)
     doc, path = regimes.evaluate_regimes(run, eval_cfg(), "test")
-    assert path.parent == run / "eval" and "regimes-test" in path.name
+    assert path.parent == run / "eval" / "regimes" and "regimes-test" in path.name
     assert json.loads(path.read_text()) == doc
     meta, scores = doc["meta"], doc["regimes"]
     assert meta["split"] == "test" and meta["step"] == 3 and meta["windows"] == 4 * 7
@@ -419,7 +419,21 @@ def test_cli_prints_a_table_per_horizon_and_the_file(artifacts, capsys):
         args += ["--set", s]
     assert regimes.main(args) == 0
     out = capsys.readouterr().out
-    (path,) = (run / "eval").glob("*regimes-test*.json")
+    (path,) = (run / "eval" / "regimes").glob("*regimes-test*.json")
     assert str(path) in out
     for word in ("rolling", "airborne", "bounce", "k=20", "relerr"):
         assert word in out
+
+
+def test_regimes_files_stay_out_of_the_eval_report_glob(artifacts):
+    # viewer.eval_summary and the experiment scripts read every <run>/eval/*.json as an eval
+    # --run report (meta.splits, meta.checkpoint, report). A regimes file must not be among them.
+    cfg = run_cfg()
+    run, _ = make_run(cfg, name="tiny-regimes-beside-eval")
+    report, _ = eval_cli.evaluate_run(run, eval_cfg(), ["test"])
+    regimes.evaluate_regimes(run, eval_cfg(), "test")
+    docs = [json.loads(p.read_text()) for p in (run / "eval").glob("*.json")]
+    assert len(docs) == 1 and all("report" in d and "splits" in d["meta"] for d in docs)
+    summary = viewer.eval_summary(run, "step_0000003.pt", "test")
+    goal = report["report"]["headline"]["metrics"]["goal_head"]
+    assert summary["by_k"]["1"]["error_m"] == goal["error_m"]["1"]["mean"]

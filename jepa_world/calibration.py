@@ -293,12 +293,12 @@ def format_table(doc: dict) -> str:
             + " ".join(f"{s:.3f}" for s in r["test"]["cross_fit"]["fold_scales"])
         )
         lines.append("  test       " + "".join(f"{'cov' + p:>9}" for p in levels) + f"{'nll':>9}")
-        for name, key in (
+        for name, variant in (
             ("before", "before"),
             ("dev-fit", "dev_scaled"),
             ("cross-fit*", "cross_fit"),
         ):
-            row = r["test"][key]
+            row = r["test"][variant]
             lines.append(
                 f"  {name:10} "
                 + "".join(f"{row['coverage'][p]:9.3f}" for p in levels)

@@ -197,6 +197,21 @@ def test_calibrate_reports_before_and_after_per_k_and_per_regime():
     json.dumps(out, allow_nan=False)
 
 
+def test_the_table_prints_each_regimes_coverage_at_the_fitted_level():
+    dev = {1: gaussian_windows(m=300, seed=1)}
+    test = {1: gaussian_windows(m=300, seed=2)}
+    labels = {1: np.arange(300) % 3}
+    folds = calibration.terrain_folds(np.repeat(np.arange(4), 75), 2)
+    out = calibration.calibrate(dev, test, folds, labels, levels=[0.5, 0.9], level=0.9)
+    text = calibration.format_table({"meta": {"level": 0.9}, "horizons": out})
+    (line,) = [s for s in text.splitlines() if "by regime" in s]
+    assert line.startswith("  cov0.9 by regime") and "n/a" not in line
+    for name in regimes.REGIMES:
+        row = out["1"]["by_regime"][name]
+        before, after = row["before"]["coverage"]["0.9"], row["dev_scaled"]["coverage"]["0.9"]
+        assert f"{name} {before:.3f} -> {after:.3f}" in line
+
+
 # --- the command, end to end --------------------------------------------------------------------
 
 

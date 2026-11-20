@@ -104,6 +104,11 @@ the thresholds of the new-defaults note:
 - the jump in loss/total and near relerr k1–5 at step 12,001;
 - the steps until near relerr k1–5 is back within 10% of its level over the reference's first
   steps on the same windows (steps 1–1,000 of the reference, which see the same batches).
+- *Amendment (2026-11-20, written after H s0's training metrics were seen, before any eval).* The
+  recovery measure above compares against the reference's steps 1–1,000, when the reference is an
+  untrained model, so it cannot show recovery. Reported instead: the first 100-step window after
+  step 12,000 in which H's near relerr k1–5 mean is within 10% of reference s0's over the same
+  steps. The switch is reported, not gated, so no verdict depends on this change.
 
 ### B. Deciding: goal head, full-world TEST, ratio to persistence at step 48,000
 
@@ -154,6 +159,14 @@ the bounce rows.
 - **Fixed before scoring:** PR #35 isn't merged yet, so the exact field (ratio to persistence if
   it is there, else error in metres) is written into this note before H's first eval, without
   having seen H's per-regime numbers.
+- *The field, fixed 2026-11-20, before H's first eval or regimes run.* The field is
+  `regimes[k][regime]["ratio"]["persistence"]` from the file written by
+  `uv run python -m jepa_world.regimes --run <dir> --split test`, at step 48,000. Regimes are
+  `rolling` (the smooth-rolling row above), `airborne` and `bounce`. The reference files are:
+  - s0: `eval/regimes/20261120T074239Z-regimes-test-2dd8a9.json`
+  - s1: `eval/regimes/20261120T074408Z-regimes-test-b231bd.json`
+
+  Scored by `experiments/gentle_curriculum_check.py`.
 - **My prediction:** rolling better at most k, and bounce within.
 
 ### C. Secondary: latent heads, full-world training batches, steps 47,001–48,000

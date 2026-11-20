@@ -88,8 +88,9 @@ def test_run_logs_every_term_every_step_and_checkpoints(tmp_path):
         "loss/total",
         "emb_std/L1",
     }
+    diag = set(train.diagnostic_keys(train.build_model(cfg), cfg))  # only on their own steps
     for r in lines:
-        assert set(r) == expected | {"step"}
+        assert set(r) - diag == expected | {"step"}
         assert all(isinstance(r[key], float) for key in expected)
     ckpts = sorted(p.name for p in (tmp_path / "checkpoints").iterdir())
     assert ckpts == ["step_0000004.pt", "step_0000005.pt"]
@@ -433,10 +434,17 @@ def test_the_m7_reference_and_its_ablations_inherit_the_base_pixel_weighting(nam
 
 
 @pytest.mark.parametrize("path", sorted(CONFIGS.glob("*.yaml")), ids=lambda p: p.stem)
-def test_every_committed_config_passes_check_config(path):
-    """A base.yaml default must never make an existing experiment config unrunnable. Synthetic
-    data, because the episode datasets aren't built in the test artifact root."""
-    train.check_config(load_config(path, ["data.source=synthetic"]))
+def test_every_committed_config_passes_check_config(path, monkeypatch):
+    """A base.yaml default must never make an existing experiment config unrunnable. The episode
+    datasets aren't built in the test artifact root, so the built-split lookup is stubbed out;
+    everything else check_config checks runs on the config as committed, curriculum included."""
+    looked_up = []
+    monkeypatch.setattr(train, "require_split", lambda cfg, split: looked_up.append(split))
+    cfg = load_config(path)
+    train.check_config(cfg)
+    if cfg["data"]["source"] == "episodes":
+        worlds = 1 + (cfg["data"]["curriculum"] is not None)
+        assert looked_up == [cfg["data"]["split"]] * worlds
 
 
 @pytest.mark.parametrize(

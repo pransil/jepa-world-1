@@ -262,7 +262,8 @@ def test_mean_trains_and_stays_finite():
     first = None
     for step in range(5):
         losses = train.train_step(model, opt, frames, cfg, step=step)
-        assert all(torch.isfinite(v) for k, v in losses.items() if not k.startswith("relerr")), step
+        diag = ("relerr", "gradnorm/")  # diagnostics are NaN between their steps
+        assert all(torch.isfinite(v) for k, v in losses.items() if not k.startswith(diag)), step
         first = losses["loss/total"] if first is None else first
     assert losses["loss/total"] < first  # the same fixed batch: the loss goes down
 

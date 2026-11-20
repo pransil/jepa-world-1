@@ -272,6 +272,10 @@ def check_config(cfg: dict) -> list[int]:
             "lower-precision path must be built and tested explicitly first (SPEC §6)"
         )
     _check_stage_start(cfg, horizons)
+    for key in ("grad_norm_every", "copy_every"):
+        v = cfg["train"].get(key, 0)
+        if type(v) is not int or v < 0:
+            raise ValueError(f"train.{key} must be an int >= 0 (0 = off), got {v!r}")
     latent_reduce(cfg["loss"])  # fails before any run dir; the loss checks again per call
     check_pix_share(cfg["loss"])  # a no-op without a pixel stage, like w_pix: base.yaml sets one
     return horizons
@@ -290,6 +294,57 @@ def build_optimizer(model: WorldModel, cfg: dict) -> torch.optim.Optimizer:
     )
 
 
+GRAD_TERMS_AUX = {"goal": "goal", "pixel": "pix"}  # aux stage -> its term name in loss/total
+
+
+def diagnostic_keys(model: WorldModel, cfg: dict) -> list[str]:
+    """Every diagnostic column a run logs (models/DESIGN.md, "Diagnostics"), so each step has the
+    same keys: values on the steps they are due, NaN between, and NaN for a term not in the loss
+    yet. relerr/copy/k<k> with train.copy_every > 0; with train.grad_norm_every > 0,
+    gradnorm/enc/<term>/<level> for every term loss/total can have, and gradnorm/enc/total/<level>."""
+    t = cfg["train"]
+    keys = []
+    if t.get("copy_every", 0):
+        keys += [f"relerr/copy/k{k}" for k in model.horizons]
+    if t.get("grad_norm_every", 0):
+        names = [f"k{k}" for k in model.horizons] + [f"td/k{k}" for k in model.td_level]
+        names += ["var"] if cfg["loss"]["collapse_guard"] else []
+        names += [GRAD_TERMS_AUX[s] for s in model.aux_stages] + ["total"]
+        keys += [f"gradnorm/enc/{n}/{lv}" for n in names for lv in model.context_encoder.names]
+    return keys
+
+
+def _stage_grad_norms(model: WorldModel, grads, tag: str) -> dict[str, torch.Tensor]:
+    """{gradnorm/enc/<tag>/<level>: L2 norm over that encoder stage's parameter gradients}, from
+    gradients listed in context_encoder.stages order. None (no path to the stage) counts as 0."""
+    enc, out, i = model.context_encoder, {}, 0
+    zero = next(enc.parameters()).new_zeros(())
+    for lv, stage in zip(enc.names, enc.stages, strict=True):
+        n = len(list(stage.parameters()))
+        sq = [g.pow(2).sum() for g in grads[i : i + n] if g is not None]
+        out[f"gradnorm/enc/{tag}/{lv}"] = torch.stack(sq).sum().sqrt() if sq else zero
+        i += n
+    return out
+
+
+def encoder_grad_norms(
+    model: WorldModel, terms: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """How hard each weighted term of loss/total pulls on the context encoder, per encoder level:
+    the norm of d(term)/d(stage parameters). One autograd.grad per term, keeping the graph for the
+    step's own backward. It writes no .grad, so the step is unchanged."""
+    params = list(model.context_encoder.parameters())  # stages in order: the encoder's only params
+    out = {}
+    for name, term in terms.items():
+        grads = torch.autograd.grad(term, params, retain_graph=True, allow_unused=True)
+        out.update(_stage_grad_norms(model, grads, name))
+    return out
+
+
+def _due(every: int, step: int | None) -> bool:
+    return every > 0 and (step is None or step % every == 0)
+
+
 def train_step(
     model: WorldModel,
     opt: torch.optim.Optimizer,
@@ -301,16 +356,39 @@ def train_step(
     `batch` is a frames tensor, or a with_gt dict ({"frames", "ball_pos", ...}; the goal stage
     needs it). `step` (steps completed before this one) selects the active stages via
     train.stage_start; None means every built stage.
+    The diagnostics (diagnostic_keys) are computed when `step` is a multiple of their interval
+    (always when it is None) and are NaN otherwise. They change no parameter: the per-term
+    gradients come from autograd.grad before the backward, the total's from .grad after it.
     Returns every term detached, still on the device (no host sync here)."""
     model.train()
     active = active_horizons(cfg, model.horizons, step)
     aux = [s for s in active_aux(cfg, step) if s in model.aux_stages]
-    losses = compute_world_losses(model, batch, cfg["loss"], active=active, aux_active=aux)
+    grads_due = _due(cfg["train"].get("grad_norm_every", 0), step)
+    terms: dict[str, torch.Tensor] | None = {} if grads_due else None
+    losses = compute_world_losses(
+        model,
+        batch,
+        cfg["loss"],
+        active=active,
+        aux_active=aux,
+        terms=terms,
+        copy_baseline=_due(cfg["train"].get("copy_every", 0), step),
+    )
+    diag = encoder_grad_norms(model, terms) if grads_due else {}
     opt.zero_grad(set_to_none=True)
     losses["loss/total"].backward()
+    if grads_due:
+        enc = model.context_encoder
+        diag.update(_stage_grad_norms(model, [p.grad for p in enc.parameters()], "total"))
     opt.step()
     model.ema_update(cfg["model"]["ema_momentum"])
-    return {k: v.detach() for k, v in losses.items()}
+    out = {k: v.detach() for k, v in losses.items()}
+    keys = diagnostic_keys(model, cfg)
+    if keys:
+        nan = out["loss/total"].new_full((), float("nan"))  # filled on device: no host copy
+        for key in keys:
+            out[key] = diag[key].detach() if key in diag else out.get(key, nan)
+    return out
 
 
 def make_batches(cfg: dict, horizons: list[int]) -> Iterator[Batch]:
@@ -340,7 +418,8 @@ def _flush(rows: list[tuple[int, torch.Tensor]], keys: list[str], f, writer) -> 
         f.write(json.dumps(rec) + "\n")
         for k, v in rec.items():
             if k != "step":
-                writer.add_scalar(k, v, step)
+                if v == v:  # NaN: a diagnostic between its steps, or a still batch's goalratio
+                    writer.add_scalar(k, v, step)
     f.flush()
     rows.clear()
 

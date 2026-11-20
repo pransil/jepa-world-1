@@ -213,10 +213,58 @@ loss/td/k<k> = gaussian_nll(td_pred, td_logvar, td_target)      loss/total += w_
 - The variance guard is unchanged: the branches read the far heads' levels, which the guard
   already covers while those heads are active.
 
+## Diagnostics (A: the latent persistence bar, and gradient pull per head)
+
+Two logged diagnostics, both on by default (`train.copy_every: 10`, `train.grad_norm_every: 500`,
+0 = off), so runs that inherit base.yaml, the M7 ablations among them, log them. Neither changes
+training: `test_diagnostics_on_or_off_train_bitwise_the_same` (plain and top-down) checks that the
+parameters after 4 steps are `torch.equal` with both diagnostics on every step and with both off.
+
+- **`relerr/copy/k<k>`: copy the current embedding** (`jepa.copy_relerr`). It is the relerr of
+  using the target encoder's embedding of the stack ending at t, at the level head k reads and
+  after `target_norm`, as the prediction for t+k. It has the same numerator form and the same
+  denominator (the target's batch spread) as `relerr/k`, so `relerr/k < relerr/copy/k` means
+  head k beats latent persistence. That is the bar the goal head already has against
+  persistence. It is 0 on a static clip (`test_copy_baseline_is_zero_when_nothing_moves`).
+  - Cost: one no-grad target-encoder pass up to the deepest head level.
+  - `experiments/latent_relerr.py` scores it on held-out splits every batch, beside `relerr/k`.
+- **`gradnorm/enc/<term>/<level>`: how hard each weighted term of `loss/total` pulls on the
+  context encoder.**
+  - Terms: `k<k>`, `td/k<k>`, `var`, `goal`, `pix`. The level is the encoder stage that produces
+    it.
+  - It is ‖∂(w·term)/∂θ_stage‖, from one `torch.autograd.grad` per term before the step's
+    backward. `autograd.grad` writes no `.grad`, and `opt.zero_grad` comes after it anyway.
+  - `gradnorm/enc/total/<level>` is read from `.grad` after the backward: the gradient the
+    optimizer actually gets.
+  - The terms come from `compute_world_losses(..., terms={})`, which records each weighted term
+    exactly as it enters `loss/total` (`jepa.add_term`: the same operands in the same order, so
+    the total is bitwise unchanged, `test_weighted_terms_sum_to_loss_total_bitwise`).
+  - A term not yet in the loss (its stage hasn't started) logs NaN, not 0: it isn't trained, so
+    there is nothing to measure. Near heads read L1, so their L2/L3 norms are exactly 0.
+- **Logging.**
+  - Every step has the same columns (`train.diagnostic_keys`). A diagnostic is computed when the
+    completed-step count is a multiple of its interval, and is NaN between, so 1000-step window
+    means need `nanmean`, as `goalratio` already did.
+  - TensorBoard skips NaN values.
+  - Equality tests on `train.run`'s final dict compare as JSON, because NaN != NaN.
+- **Cost (estimated; not yet timed on MPS):**
+  - The gradient norms add one backward-sized pass per active term (about 10) every 500 steps,
+    about 2% of the backward passes.
+  - The copy baseline adds one no-grad target pass (about 1/7 of a step's target encoding) every
+    10 steps.
+- **Alternatives that lost:**
+  - **Every-step copy baseline:** about 5–7% more encoder work for a curve that 100 samples per
+    1000 steps already resolves.
+  - **A separate `diag.jsonl`:** the request was metrics.jsonl, and one file keeps the scorers
+    simple.
+  - **A latent section in `eval.py`:** eval reports no latent relerr today, and
+    `latent_relerr.py` is the held-out latent scorer.
+
 ## Seams
 
 | Unit | Pure? | Touches | Tested by |
 |---|---|---|---|
+| `jepa.copy_relerr`, `jepa.add_term`, `train.encoder_grad_norms`, `train.diagnostic_keys` | yes (no-grad / autograd.grad only) | — | `tests/test_diagnostics.py` |
 | `unet.UNetEncoder`, `heads.HorizonHead`, `heads.GaussianHead`, `heads.TopDownHead` | yes | — | `tests/test_unet.py`, `tests/test_heads.py` (CPU, 16×16), `tests/test_top_down.py` |
 | `jepa.JEPA`, `latent_loss`, `gaussian_nll`, `relative_error`, `normalize_target`, `variance_guard`, `compute_losses`, stack slicing | yes | — | `tests/test_jepa.py` |
 | `data/synthetic.moving_disc_batch` | yes (explicit `torch.Generator`) | — | `tests/test_synthetic.py` |

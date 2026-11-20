@@ -72,9 +72,10 @@ def test_same_seed_gives_identical_losses(tmp_path):
     cfg = tiny_cfg("train.steps=3")
     a = train.run(cfg, tmp_path / "a", device=torch.device("cpu"))
     b = train.run(cfg, tmp_path / "b", device=torch.device("cpu"))
-    assert a == b
+    # compared as JSON: diagnostics are NaN between their steps, and NaN != NaN in a dict compare
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
     c = train.run(tiny_cfg("train.steps=3", "seed=1"), tmp_path / "c", device=torch.device("cpu"))
-    assert a != c
+    assert json.dumps(a, sort_keys=True) != json.dumps(c, sort_keys=True)
 
 
 def test_run_logs_every_term_every_step_and_checkpoints(tmp_path):
@@ -82,12 +83,16 @@ def test_run_logs_every_term_every_step_and_checkpoints(tmp_path):
     train.run(cfg, tmp_path, device=torch.device("cpu"))
     lines = [json.loads(s) for s in (tmp_path / "metrics.jsonl").read_text().splitlines()]
     assert [r["step"] for r in lines] == [1, 2, 3, 4, 5]  # 5 is flushed even though 5 % 2 != 0
-    expected = {f"{p}/k{k}" for p in ("loss", "relerr") for k in NEAR} | {
-        "loss/var",
-        "var/L1",
-        "loss/total",
-        "emb_std/L1",
-    }
+    expected = (
+        {f"{p}/k{k}" for p in ("loss", "relerr") for k in NEAR}
+        | {
+            "loss/var",
+            "var/L1",
+            "loss/total",
+            "emb_std/L1",
+        }
+        | set(train.diagnostic_keys(train.build_model(cfg), cfg))
+    )
     for r in lines:
         assert set(r) == expected | {"step"}
         assert all(isinstance(r[key], float) for key in expected)
@@ -209,11 +214,12 @@ def test_same_seed_gives_identical_losses_with_aux_stages(tmp_path):
     cfg = tiny_aux_cfg("train.steps=2")
     a = train.run(cfg, tmp_path / "a", device=torch.device("cpu"))
     b = train.run(cfg, tmp_path / "b", device=torch.device("cpu"))
-    assert a == b and {"loss/goal", "loss/pix"} <= set(a)
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)  # NaN-safe compare
+    assert {"loss/goal", "loss/pix"} <= set(a)
     c = train.run(
         tiny_aux_cfg("train.steps=2", "seed=1"), tmp_path / "c", device=torch.device("cpu")
     )
-    assert a != c
+    assert json.dumps(a, sort_keys=True) != json.dumps(c, sort_keys=True)
 
 
 def test_run_logs_the_aux_terms_every_step(tmp_path):

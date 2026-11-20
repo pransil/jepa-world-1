@@ -40,11 +40,17 @@ def window(rs: list[dict], key: str, a: int, b: int) -> float:
 
 
 def evals_at(run: Path, step: int) -> list[tuple[str, dict]]:
-    """Every test+dev eval of `run` at `step`, oldest first (names start with a UTC stamp)."""
+    """Every test+dev eval of `run` at `step`, oldest first (names start with a UTC stamp). Other
+    files in eval/ (e.g. regimes scoring: meta has `split`, not `splits`, and no report) are skipped."""
     found = []
     for p in sorted(run.glob("eval/*.json")):
         d = json.loads(p.read_text())
-        if d["meta"]["step"] == step and {"test", "dev"} <= set(d["meta"]["splits"]):
+        meta = d.get("meta", {})
+        if (
+            "report" in d
+            and meta.get("step") == step
+            and {"test", "dev"} <= set(meta.get("splits", []))
+        ):
             found.append((p.name, d))
     return found
 

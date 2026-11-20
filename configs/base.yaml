@@ -129,7 +129,7 @@ train:                        # SPEC §6
   stage_start: {near: 0, far: 2000, goal: 4000, pixel: 6000}  # steps completed before a stage joins loss/total (logged throughout): docs/decisions/2026-11-17-stage-schedule-within-run.md. far: placeholder. goal/pixel: accepted 2026-11-18 (docs/decisions/2026-11-17-m5-stage-starts-and-aux-sizes.md)
   steps: 10000                # placeholder, set per experiment
   log_every: 50               # flush interval for metrics.jsonl; every step is still logged
-  copy_every: 10              # relerr/copy/k (the latent heads' persistence bar) every N completed steps, NaN between; 0 = off
+  copy_every: 10              # relerr/copy/k (the latent heads' persistence bar) every N completed steps, absent from other lines; 0 = off
   grad_norm_every: 500        # gradnorm/enc/<term>/<level>: each weighted loss term's pull on the encoder, every N steps; 0 = off.
                               # Neither changes training (models/DESIGN.md, "Diagnostics")
   ckpt_every: 2000            # plus one checkpoint at the end

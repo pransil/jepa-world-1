@@ -124,8 +124,9 @@ def test_run_with_far_stage_logs_every_term_every_step(tmp_path):
         | {"loss/var", "var/L1", "var/L2", "var/L3", "loss/total", "step"}
         | {"emb_std/L1", "emb_std/L2", "emb_std/L3"}
     )
+    diag = set(train.diagnostic_keys(train.build_model(cfg), cfg))  # only on their own steps
     for r in lines:
-        assert set(r) == expected  # far terms are logged before their stage starts, too
+        assert set(r) - diag == expected  # far terms are logged before their stage starts, too
 
 
 def test_same_seed_gives_identical_losses_with_far_stage(tmp_path):

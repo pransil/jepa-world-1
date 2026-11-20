@@ -16,7 +16,7 @@ import json
 import secrets
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -56,22 +56,29 @@ class _Physics:
     cam_pos: np.ndarray  # (T, 2)
 
 
-def _episode_physics(cfg: dict, split: str, es: EpisodeSet) -> list[_Physics]:
-    """Each episode's terrain, true ball, spin and stored sim config, in `es`'s row order (the
-    manifest's). Frames are read and dropped: EpisodeSet doesn't carry these fields."""
+def stored_episodes(cfg: dict, split: str, es: EpisodeSet) -> Iterator:
+    """The split's episode files (`sim.episode.Episode`), one at a time in `es`'s row order (the
+    manifest's), each checked against its row's positions. For the fields EpisodeSet doesn't
+    carry; frames are read and dropped by the caller."""
     path = split_dir(cfg, split)
     rows = read_manifest(path)["episodes"]
     if len(rows) != es.n:
         raise ValueError(f"{path}: manifest lists {len(rows)} episodes, the split holds {es.n}")
-    out = []
     for i, row in enumerate(rows):
         ep = load_episode(path / row["file"])
         if not np.array_equal(ep.ball_pos, es.ball_pos[i]):
             raise ValueError(
                 f"{path / row['file']}: positions differ from the loaded split's row {i}"
             )
-        out.append(_Physics(ep.meta["sim_cfg"], ep.terrain, ep.ball, ep.ball_spin, ep.cam_pos))
-    return out
+        yield ep
+
+
+def _episode_physics(cfg: dict, split: str, es: EpisodeSet) -> list[_Physics]:
+    """Each episode's terrain, true ball, spin and stored sim config, in `es`'s row order."""
+    return [
+        _Physics(ep.meta["sim_cfg"], ep.terrain, ep.ball, ep.ball_spin, ep.cam_pos)
+        for ep in stored_episodes(cfg, split, es)
+    ]
 
 
 HIDDEN = ("radius", "friction", "restitution")  # the only BallParams simulate_from_state reads

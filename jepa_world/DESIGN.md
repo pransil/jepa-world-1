@@ -164,7 +164,7 @@ run ─► load_run, the eval --run checks (held-out split first, eval block, ep
 load_split ─► windows (ep, t): window_index over t in [C−1, T−1−k_eval], eval's own set
 episode files (eval.stored_episodes) ─► contact, bounce (N,T) ─► regime_labels per k ─► (M,) int8
 baselines.predict (closed form) + eval.simulator_baselines (CPU, outside the lock) ─► {name: {k: (M,2)}}
-under gpu_lock (MPS only): window_outputs = WorldModel.forward per batch
+under gpu_lock (MPS only): window_outputs = JEPA core forward + goal head per batch (no pixel decode)
    ─► goal mean/logvar (M,K,2), sqerr {k: (M,)}, spread {k: float} (float64 running moments)
 score_regimes ─► {k: {all, rolling, airborne, bounce: share, error_m, mse_m2, ratio, coverage, relerr}}
 ```
@@ -178,9 +178,15 @@ score_regimes ─► {k: {all, rolling, airborne, bounce: share, error_m, mse_m2
   share-weighted mean is then the full set's relerr. Dividing each regime by its own spread lost:
   a regime whose targets vary less would look worse for the same error. Training's per-batch
   relerr divides by a 32-window batch's spread instead, which is about 3% smaller (B−1)/B.
-- **The latent pass is training's forward.** `WorldModel.forward` computes the targets, the
-  per-head means and the goal head in one pass, so the per-window error is the term training
-  averages into `sqerr/k`. The goal output equals `eval.model_outputs`' (tested).
+- **The latent pass is training's forward.** The JEPA core's forward computes the targets and
+  the per-head means, so the per-window error is the term training averages into `sqerr/k`. The
+  goal head runs on its context levels, which is `WorldModel.forward` minus the pixel decoder,
+  whose output nothing here reads. Both are tested against `WorldModel.forward`, and the goal
+  output equals `eval.model_outputs`'.
+- **The span starts at frame t−C+1, as the definition was given.** `contact[f]` and `bounce[f]`
+  describe the interval (f−1, f], so the flags at t−C+1 cover one interval before the first
+  context frame. A landing in exactly that interval makes the window airborne, not rolling. The
+  definition was kept as given, so the baseline-only cross-check it came with reproduces exactly.
 - **Flags come from the episode files.** EpisodeSet doesn't carry `contact` or `bounce`, so they
   are read through `eval.stored_episodes`, which the simulator baseline also uses. Each file is
   checked against its row's positions. Adding the flags to EpisodeSet would touch `data/` for

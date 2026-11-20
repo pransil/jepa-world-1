@@ -221,6 +221,24 @@ def test_an_empty_regime_reports_zero_windows_and_no_numbers():
     json.dumps(s, allow_nan=False)  # JSON-safe, no NaN
 
 
+def test_a_collapsed_target_gives_a_finite_relerr_as_training_does():
+    labels, truth, base, goal, sq, _ = _fake_scores_input()
+    s = regimes.score_regimes(labels, truth, base, goal, sq, {1: 0.0, 5: 0.0}, [0.9])
+    assert s["1"]["all"]["relerr"] == pytest.approx(sq[1].mean() / regimes.SPREAD_EPS)
+    json.dumps(s, allow_nan=False)
+
+
+@pytest.mark.parametrize("bad", ["nan", "shape"])
+def test_scores_refuse_a_prediction_that_is_not_finite_or_not_one_per_window(bad):
+    labels, truth, base, goal, sq, spread = _fake_scores_input()
+    p = base["const_velocity"][5]
+    base["const_velocity"][5] = (
+        np.where(np.arange(len(p))[:, None] == 3, np.nan, p) if bad == "nan" else p[:-1]
+    )
+    with pytest.raises(ValueError, match="const_velocity at k=5"):
+        regimes.score_regimes(labels, truth, base, goal, sq, spread, [0.9])
+
+
 def test_scores_without_a_goal_head_or_a_latent_horizon_leave_those_fields_none():
     labels, truth, base, goal, sq, spread = _fake_scores_input()
     s = regimes.score_regimes(labels, truth, base, None, {1: sq[1]}, {1: spread[1]}, [0.9])
@@ -262,6 +280,22 @@ def test_window_outputs_match_one_forward_over_every_window(artifacts):
     ctx = eval_cli.model_outputs(model, es, ep, t, 5, torch.device("cpu"), features=False)
     np.testing.assert_allclose(out["goal_mean"], ctx["goal_mean"], atol=1e-6)
     np.testing.assert_allclose(out["goal_logvar"], ctx["goal_logvar"], atol=1e-6)
+
+
+def test_window_outputs_never_run_the_pixel_decoder(artifacts, monkeypatch):
+    cfg = run_cfg()
+    _, model = make_run(cfg)
+    assert model.pixel is not None
+
+    def refuse(*a, **kw):
+        raise AssertionError("the pixel decoder ran")
+
+    monkeypatch.setattr(model.pixel, "forward", refuse)
+    es = load_split(cfg, "test")
+    out = regimes.window_outputs(
+        model, es, np.array([0, 1]), np.array([3, 4]), 2, torch.device("cpu")
+    )
+    assert out["goal_mean"].shape == (2, 3, 2)
 
 
 def test_spread_accumulates_exactly_over_uneven_batches_whatever_the_mean():
@@ -369,8 +403,8 @@ def test_evaluate_regimes_scores_held_out_splits_only_and_needs_a_goal_head(arti
         regimes.evaluate_regimes(run, eval_cfg(), "train")
     assert loads == []  # refused before anything was loaded
     monkeypatch.undo()
+    dev_run, _ = make_run(run_cfg("data.split=dev"), name="tiny-dev-trained")
     with pytest.raises(LeakageError, match="trained on"):
-        dev_run, _ = make_run(run_cfg("data.split=dev"), name="tiny-dev-trained")
         regimes.evaluate_regimes(dev_run, eval_cfg(), "dev")
     near, _ = make_run(load_config(BASE, [*TINY, *EPISODES]), name="tiny-no-goal")
     with pytest.raises(ValueError, match="goal head"):

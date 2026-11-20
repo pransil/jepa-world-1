@@ -31,17 +31,20 @@ import numpy as np
 import torch
 
 from jepa_world import baselines, metrics
-from jepa_world.data.dataset import EpisodeSet, load_split, valid_starts, window_frames
+from jepa_world.data.dataset import EpisodeSet, load_split, window_frames
 from jepa_world.eval import (
     BASE_CONFIG,
     HELD_OUT,
+    check_episode_run,
     check_eval_block,
     check_eval_split,
+    eval_windows,
     goal_positions,
     load_run,
     simulator_baselines,
     stored_episodes,
 )
+from jepa_world.models.jepa import JEPA
 from jepa_world.sim.episode import simulate_from_state
 from jepa_world.utils.config import load_config
 from jepa_world.utils.device import pick_device
@@ -57,6 +60,7 @@ DEFINITIONS = {
     "bounce": "a bounce flag in frames t+1..t+k",
 }
 TABLE_BASELINES = ("persistence", "const_velocity", "simulator_mean")  # the printed ratios
+SPREAD_EPS = 1e-12  # relerr's floor on the spread, as training's (models/jepa.py)
 
 
 def regime_labels(contact, bounce, ep, t, k: int, context_frames: int) -> np.ndarray:
@@ -119,13 +123,16 @@ class _Moments:
 def window_outputs(
     model, es: EpisodeSet, ep: np.ndarray, t: np.ndarray, batch_size: int, device: torch.device
 ) -> dict:
-    """The model's full forward (WorldModel.forward, as training runs it) over windows (ep, t):
+    """The JEPA core's forward (the latent heads and their targets, as training computes them)
+    and the goal head on its context, over windows (ep, t). The pixel decoder isn't run: nothing
+    here reads it.
       "sqerr":  {k: (M,) float64} per latent horizon, the head's mean against its target, squared,
                 summed over channels and averaged over positions: training's sqerr/k per window
       "spread": {k: float}, the target spread over all M windows (_Moments.spread)
       "goal_mean", "goal_logvar": (M, K, 2) float64 (= eval.model_outputs), or None without a
                 goal head
-    mean(sqerr[k]) / spread[k] is training's relerr/k with the M windows as one batch."""
+    mean(sqerr[k]) / spread[k] is training's relerr/k with the M windows as one batch (both
+    tested against WorldModel.forward)."""
     c, k_max = model.context_frames, max(model.horizons)
     has_goal = getattr(model, "goal", None) is not None
     sq = {k: [] for k in model.horizons}
@@ -134,14 +141,14 @@ def window_outputs(
     with torch.no_grad():
         for i in range(0, len(ep), batch_size):
             frames = window_frames(es, ep[i : i + batch_size], t[i : i + batch_size], c, k_max)
-            out = model(frames.to(device))
+            out = JEPA.forward(model, frames.to(device))  # WorldModel's, minus goal and pixel
             for k in model.horizons:
                 target = out["target"][k]
                 err = (target - out["pred"][k]).square().sum(dim=1).mean(dim=(1, 2))
                 sq[k].append(err.cpu().double().numpy())  # MPS has no float64: CPU first
                 moments[k].add(target)
-            if has_goal:
-                mean, logvar = out["goal"]
+            if has_goal:  # on the context levels, as WorldModel.forward runs it
+                mean, logvar = model.goal(*(out["context"][lv] for lv in model.goal_levels))
                 means.append(mean.cpu().double().numpy())
                 logvars.append(logvar.cpu().double().numpy())
     return {
@@ -168,8 +175,18 @@ def _row(mask, err: dict, goal_k, truth_k, sq_k, spread_k, names, levels) -> dic
     if goal_k is not None and n:
         cov = metrics.coverage(goal_k["pred"][mask], goal_k["var"][mask], truth_k[mask], levels)
         row["coverage"] = {p: v["joint"] for p, v in cov.items()}
-    row["relerr"] = float(sq_k[mask].mean() / spread_k) if sq_k is not None and n else None
+    row["relerr"] = (
+        float(sq_k[mask].mean() / max(spread_k, SPREAD_EPS)) if sq_k is not None and n else None
+    )
     return row
+
+
+def _check_positions(what: str, a, m: int) -> None:
+    a = np.asarray(a)
+    if a.shape != (m, 2):
+        raise ValueError(f"{what}: expected ({m}, 2), got {a.shape}")
+    if not np.isfinite(a).all():
+        raise ValueError(f"{what} has non-finite values")
 
 
 def score_regimes(
@@ -189,7 +206,8 @@ def score_regimes(
       coverage            {level: joint coverage} of the goal head, None without one at k
       relerr              mean sqerr / spread[k] (the full set's), None without a latent head at k
     Every array is (M, ...) over the same windows. `goal` is {"pred", "var": {k: (M, 2)}}.
-    A regime without windows at k has None everywhere but windows and share."""
+    A regime without windows at k has None everywhere but windows and share. Every prediction
+    must be (M, 2) and finite (as baselines.evaluate requires of its `extra` ones)."""
     levels = list(levels)
     out = {}
     for k in sorted(labels):
@@ -199,6 +217,11 @@ def score_regimes(
             if goal is not None and k in goal["pred"]
             else None
         )
+        named = [(f"truth at k={k}", truth[k])]
+        named += [(f"{n} at k={k}", per_k[k]) for n, per_k in baseline_preds.items()]
+        named += [(f"goal {n} at k={k}", goal_k[n]) for n in ("pred", "var")] if goal_k else []
+        for what, a in named:
+            _check_positions(what, a, len(lab))
         err = {}
         if goal_k is not None:
             err["goal_head"] = metrics.position_error(goal_k["pred"], truth[k])
@@ -244,20 +267,16 @@ def evaluate_regimes(
     device = pick_device(ev["device"])
     run = load_run(run_dir, checkpoint, torch.device("cpu"))  # moved to the device under the lock
     cfg = run.cfg
-    if cfg["data"]["source"] != "episodes":
-        raise ValueError(
-            f"{run_dir} trained on data.source={cfg['data']['source']!r}, not episodes"
-        )
+    check_episode_run(cfg, run_dir)
     if getattr(run.model, "goal", None) is None:
         raise ValueError(f"{run_dir}: no goal head (train.stages lacks goal); this scores one")
     check_eval_split(cfg, eval_cfg, split)
     c = cfg["model"]["context_frames"]
     goal_ks = list(cfg["model"]["goal_horizons"])
-    k_eval = max([*cfg["model"]["horizons"], *goal_ks])  # eval --run's windows (eval.py)
     ks = sorted({*goal_ks, *run.model.horizons})
     es = load_split(cfg, split)
-    starts = valid_starts(es.T, c, k_eval)
-    ep, t = baselines.window_index(es.n, starts)
+    ep, t = eval_windows(cfg, es, has_goal=True)  # eval --run's windows, in the same order
+    starts = np.unique(t)
     contact, bounce = episode_flags(cfg, split, es)
     labels = {k: regime_labels(contact, bounce, ep, t, k, c) for k in ks}
     preds = {

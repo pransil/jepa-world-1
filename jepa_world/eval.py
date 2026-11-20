@@ -484,6 +484,30 @@ def check_eval_block(ev: dict) -> None:
         )
 
 
+def check_episode_run(cfg: dict, run_dir) -> None:
+    """Eval scores runs trained on the real episode splits only."""
+    if cfg["data"]["source"] != "episodes":
+        raise ValueError(
+            f"{run_dir} trained on data.source={cfg['data']['source']!r}: eval needs a run "
+            "trained on data.source=episodes (the real splits)"
+        )
+
+
+def eval_k(cfg: dict, has_goal: bool) -> int:
+    """The largest horizon a window must leave room for: model.horizons and, with a goal head,
+    goal_horizons. The baselines are recomputed on these windows, and they match `eval
+    --baselines`'s whenever max(goal_horizons) <= max(model.horizons), as in base.yaml."""
+    goal_ks = list(cfg["model"]["goal_horizons"]) if has_goal else []
+    return max([*cfg["model"]["horizons"], *goal_ks])
+
+
+def eval_windows(cfg: dict, es: EpisodeSet, has_goal: bool) -> tuple[np.ndarray, np.ndarray]:
+    """(ep, t) of every window `eval --run` scores on `es`, t in [C-1, T-1-eval_k] (t = 3..39 at
+    base.yaml), in `baselines.window_index` order."""
+    starts = valid_starts(es.T, cfg["model"]["context_frames"], eval_k(cfg, has_goal))
+    return baselines.window_index(es.n, starts)
+
+
 def evaluate_run(
     run_dir: str | Path,
     eval_cfg: dict,
@@ -505,24 +529,15 @@ def evaluate_run(
     device = pick_device(ev["device"])
     run = load_run(run_dir, checkpoint, torch.device("cpu"))  # moved to the device under the lock
     cfg = run.cfg
-    if cfg["data"]["source"] != "episodes":
-        raise ValueError(
-            f"{run_dir} trained on data.source={cfg['data']['source']!r}: eval needs a run "
-            "trained on data.source=episodes (the real splits)"
-        )
+    check_episode_run(cfg, run_dir)
     for split in splits:
         check_eval_split(cfg, eval_cfg, split)
     has_goal = getattr(run.model, "goal", None) is not None
     use_probes = bool(ev["probes"]["enabled"])
     c = cfg["model"]["context_frames"]
-    goal_ks = list(cfg["model"]["goal_horizons"]) if has_goal else []
-    # The baselines are recomputed below on exactly these windows. They match `eval --baselines`'s
-    # whenever max(goal_horizons) <= max(model.horizons), as in base.yaml (t = 3..39).
-    k_eval = max([*cfg["model"]["horizons"], *goal_ks])
+    k_eval = eval_k(cfg, has_goal)
     data = {s: load_split(cfg, s) for s in splits}
-    windows = {
-        s: baselines.window_index(es.n, valid_starts(es.T, c, k_eval)) for s, es in data.items()
-    }
+    windows = {s: eval_windows(cfg, es, has_goal) for s, es in data.items()}
     tr = tr_ep = tr_t = None
     if use_probes:
         trained = cfg["data"]["split"]

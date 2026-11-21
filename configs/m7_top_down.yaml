@@ -1,0 +1,11 @@
+# M7 §4, top-down prediction (docs/milestones/M7-plan.md, SPEC §9.2): the 48k M7 reference with
+# model.top_down on, so the k=20 head on L3 also predicts target L2(t+20) and the k=10 head on L2
+# also predicts target L1(t+10), each a Gaussian NLL at loss.w_td 0.5 (base.yaml)
+# (docs/decisions/2026-11-17-top-down-targets.md). It inherits the 10% pixel share and
+# latent_reduce: mean, so both arms compare at one reduction
+# (docs/decisions/2026-11-19-latent-loss-normalization.md, item 6).
+# Seeds 0 (this file) and 1 (--set seed=1). experiments/2026-11-20-m7-top-down.md
+base: exp_headline_48k.yaml
+
+model:
+  top_down: true

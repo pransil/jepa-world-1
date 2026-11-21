@@ -17,7 +17,9 @@ from torch import nn
 from jepa_world.models.goal import GoalHead, displacement_targets, goal_nll
 from jepa_world.models.jepa import (
     JEPA,
+    add_term,
     check_loss_cfg,
+    copy_relerr,
     latent_reduce,
     losses_from_output,
     over_channels,
@@ -146,6 +148,18 @@ class WorldModel(JEPA):
         return out
 
 
+def loss_term_names(model: WorldModel, loss_cfg: dict) -> list[str]:
+    """Every weighted term loss/total can hold, by the name compute_world_losses records it under
+    (its `terms`): k<k> per horizon, td/k<k> per top-down branch, var with the collapse guard,
+    goal and pix for the built aux heads. A term only appears in `terms` while its stage is
+    active. train.diagnostic_keys and train.train_step rely on this list being complete."""
+    names = [f"k{k}" for k in model.horizons] + [f"td/k{k}" for k in model.td_level]
+    names += ["var"] if loss_cfg["collapse_guard"] else []
+    names += ["goal"] if model.goal is not None else []
+    names += ["pix"] if model.pixel is not None else []
+    return names
+
+
 def split_batch(batch: torch.Tensor | Mapping[str, torch.Tensor]):
     """A frames tensor (the M3 layout) or a with_gt dict -> (frames, ball_pos or None)."""
     if isinstance(batch, torch.Tensor):
@@ -160,6 +174,8 @@ def compute_world_losses(
     action: torch.Tensor | None = None,
     active: Collection[int] | None = None,
     aux_active: Collection[str] | None = None,
+    terms: dict[str, torch.Tensor] | None = None,
+    copy_baseline: bool = False,
 ) -> dict[str, torch.Tensor]:
     """compute_losses' terms (jepa.py), plus, for each BUILT aux head, every step:
       loss/goal/k<k>   goal NLL of the displacement ball_pos[t+k] - ball_pos[t], per goal horizon
@@ -178,7 +194,11 @@ def compute_world_losses(
     Under loss.latent_reduce: mean, w_goal is divided by C(L3) and a fixed w_pix by C(L1), the
     level each head reads (SPEC §4.6, §4.7), like that level's latent terms: each keeps its ratio
     to them. w_goal_eff and w_pix_eff log the weights actually used.
-    The model gets the frames only; ball_pos is a label."""
+    The model gets the frames only; ball_pos is a label.
+
+    Diagnostics (models/DESIGN.md, "Diagnostics"), neither of which changes any value above:
+    `terms`, if given, is filled with each weighted term of loss/total ("k<k>", "td/k<k>", "var",
+    "goal", "pix"), with its graph. `copy_baseline` adds relerr/copy/k<k> (jepa.copy_relerr)."""
     frames, ball_pos = split_batch(batch)
     check_loss_cfg(model, loss_cfg)  # every check before the forward, so bad input fails fast
     reduce = latent_reduce(loss_cfg)
@@ -191,7 +211,7 @@ def compute_world_losses(
     active = model.check_active(active)
     aux_active = model.check_aux(aux_active)
     out = model(frames, action, active=active, aux_active=aux_active)
-    losses = losses_from_output(model, out, loss_cfg, active)
+    losses = losses_from_output(model, out, loss_cfg, active, terms)
     total = losses.pop("loss/total")
     if model.goal is not None:
         target = displacement_targets(ball_pos, model.context_frames, model.goal.horizons)
@@ -208,7 +228,7 @@ def compute_world_losses(
         w_goal = 0.0
         if "goal" in aux_active:
             w_goal = over_channels(loss_cfg["w_goal"], model.goal_channels, reduce)
-            total = total + w_goal * losses["loss/goal"]
+            total = add_term(total, terms, "goal", w_goal * losses["loss/goal"])
         losses["w_goal_eff"] = nll.new_full((), w_goal)  # filled on device: no host copy
     if model.pixel is not None:
         pix = losses["loss/pix"] = pixel_l1(out["pixel"], frames[:, model.context_frames])  # t+1
@@ -217,15 +237,17 @@ def compute_world_losses(
             w = pix.new_zeros(())
         elif share is None:  # the fixed weight: under sum, exactly as before
             w_pix = over_channels(loss_cfg["w_pix"], model.pixel_channels, reduce)
-            total = total + w_pix * pix
+            total = add_term(total, terms, "pix", w_pix * pix)
             w = pix.new_full((), w_pix)  # filled on device: no host copy
         else:
             w = pix_share_weight(share, rest, pix)
-            total = total + w * pix
+            total = add_term(total, terms, "pix", w * pix)
         losses["w_pix_eff"] = w
         # the achieved share; |rest| = 0 only if every other term is exactly 0
         losses["pix_share"] = (w * pix.detach()) / rest.abs().clamp_min(
             torch.finfo(rest.dtype).tiny
         )
     losses["loss/total"] = total
+    if copy_baseline:
+        losses.update(copy_relerr(model, frames, out))
     return losses

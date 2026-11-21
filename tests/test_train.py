@@ -88,8 +88,9 @@ def test_run_logs_every_term_every_step_and_checkpoints(tmp_path):
         "loss/total",
         "emb_std/L1",
     }
+    diag = set(train.diagnostic_keys(train.build_model(cfg), cfg))  # only on their own steps
     for r in lines:
-        assert set(r) == expected | {"step"}
+        assert set(r) - diag == expected | {"step"}
         assert all(isinstance(r[key], float) for key in expected)
     ckpts = sorted(p.name for p in (tmp_path / "checkpoints").iterdir())
     assert ckpts == ["step_0000004.pt", "step_0000005.pt"]
